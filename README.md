@@ -1,1 +1,1 @@
-# wireguard-management-console
+# wireguard-console
