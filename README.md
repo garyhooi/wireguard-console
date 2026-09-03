@@ -35,6 +35,17 @@ A self-hosted, production-grade web console for issuing, monitoring, and revokin
 curl -fsSL https://raw.githubusercontent.com/garyhooi/wireguard-console/main/install.sh | sudo bash
 ```
 
+Two guaranteed-fresh alternatives (GitHub's raw CDN caches `main` for a few minutes after pushes; use these when you just pushed/need the exact latest):
+
+```bash
+# Always current (GitHub API, not CDN-cached; ~60 req/hr unauthenticated)
+curl -fsSL -H "Accept: application/vnd.github.raw" \
+  https://api.github.com/repos/garyhooi/wireguard-console/contents/install.sh | sudo bash
+
+# Immutable — pinned to a specific commit
+curl -fsSL https://raw.githubusercontent.com/garyhooi/wireguard-console/<COMMIT_SHA>/install.sh | sudo bash
+```
+
 The installer will:
 1. Install Docker and WireGuard tools
 2. Free port 53 from systemd-resolved (needed by the DNS filter) and enable IP forwarding
