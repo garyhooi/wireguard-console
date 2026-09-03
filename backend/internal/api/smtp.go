@@ -85,10 +85,10 @@ func UpdateSMTPConfig(store *Store) http.HandlerFunc {
 		} else {
 			_, err := store.pool.Exec(ctx, `
 				INSERT INTO config (id, smtp_host, smtp_port, smtp_username, smtp_from)
-				VALUES (1, $1, $2, $3, $5)
+				VALUES (1, $1, $2, $3, $4)
 				ON CONFLICT (id) DO UPDATE SET
 					smtp_host = $1, smtp_port = $2, smtp_username = $3,
-					smtp_from = $5, updated_at = now()
+					smtp_from = $4, updated_at = now()
 			`, req.Host, req.Port, req.Username, req.From)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "Failed to save SMTP config")
