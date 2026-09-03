@@ -9,6 +9,8 @@ services:
       - "443:443"
     environment:
       CONSOLE_DOMAIN: ${CONSOLE_DOMAIN}
+      # Empty for domain mode; "tls internal" for IP-only deployments.
+      WGCONSOLE_TLS: ${WGCONSOLE_TLS:-}
     volumes:
       - caddy-data:/data
       - caddy-config:/config

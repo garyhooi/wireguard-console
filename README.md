@@ -39,9 +39,18 @@ The installer will:
 1. Install Docker and WireGuard tools
 2. Free port 53 from systemd-resolved (needed by the DNS filter) and enable IP forwarding
 3. Clone the repository to `/opt/wireguard-console`
-4. Generate secure secrets and prompt for your domain (`CONSOLE_DOMAIN=vpn.example.com bash install.sh` runs non-interactively)
+4. Generate secure secrets and prompt for your domain or public IP (`CONSOLE_DOMAIN=vpn.example.com bash install.sh` runs non-interactively)
 5. Open the firewall (80/tcp, 443/tcp, 51820/udp) if ufw is active
 6. Build and start all services — re-run the script any time to update
+
+### Deploying without a domain (public IP only)
+
+You don't need a domain. Enter the server's public IPv4 when prompted (or run `CONSOLE_DOMAIN=203.0.113.5 bash install.sh`):
+
+- Caddy serves HTTPS using its **internal CA** — public certificate authorities can't issue certificates for bare IPs. Your browser will show a one-time self-signed certificate warning; the connection is still fully encrypted (passwords, TOTP codes, and session cookies are never sent in plaintext).
+- WireGuard peer endpoints automatically use `203.0.113.5:51820`, and invite links become `https://203.0.113.5/claim/...`.
+- **Want a browser-trusted certificate without buying a domain?** Use a wildcard DNS service like [sslip.io](https://sslip.io): set `CONSOLE_DOMAIN=203.0.113.5.sslip.io` (and empty `WGCONSOLE_TLS`) — sslip.io resolves to your IP, so Caddy's normal ACME flow issues a real, trusted certificate.
+- IPv6-only hosts aren't supported for the console URL (use a domain or an sslip.io address there).
 
 ### Manual Setup
 

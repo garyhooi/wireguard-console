@@ -1,4 +1,11 @@
+# WGCONSOLE_TLS: leave empty for domain names (public ACME certificates,
+# the default). For IP-only deployments (no domain), install.sh sets it to
+# "tls internal" so Caddy serves HTTPS with its internal CA — public
+# certificate authorities cannot issue certificates for bare IPs.
 {$CONSOLE_DOMAIN} {
+	# Expands to "tls internal" for IP-only deployments, blank for domains.
+	{$WGCONSOLE_TLS:}
+
 	encode gzip
 
 	# Backend API — everything under /api/ goes to the Go service.

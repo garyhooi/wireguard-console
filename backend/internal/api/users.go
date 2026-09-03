@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/wireguard-console/backend/internal/db"
@@ -119,8 +120,11 @@ func CreateUser(store *Store) http.HandlerFunc {
 			return
 		}
 
-		// Enqueue email job
-		inviteLink := os.Getenv("CONSOLE_DOMAIN") + "/claim/" + token
+		// Enqueue email job. CONSOLE_DOMAIN may be a domain or a public IP;
+		// tolerate a scheme already being present, and always emit https.
+		domain := os.Getenv("CONSOLE_DOMAIN")
+		domain = strings.TrimPrefix(strings.TrimPrefix(domain, "https://"), "http://")
+		inviteLink := "https://" + domain + "/claim/" + token
 		queue := email.NewQueue(store.pool, nil)
 		if err := queue.EnqueueUserInvite(ctx, req.Email, req.FullName, inviteLink); err != nil {
 			log.Printf("Failed to enqueue invite email: %v", err)
