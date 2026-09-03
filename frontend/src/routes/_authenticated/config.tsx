@@ -1,5 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 interface SMTPConfig {
@@ -31,16 +31,19 @@ function ConfigPage() {
       if (!res.ok) throw new Error('Failed to fetch SMTP config')
       return res.json()
     },
-    onSuccess: (data) => {
+  })
+
+  useEffect(() => {
+    if (smtp) {
       setForm((f) => ({
         ...f,
-        host: data.host,
-        port: String(data.port || 587),
-        username: data.username,
-        from: data.from,
+        host: smtp.host,
+        port: String(smtp.port || 587),
+        username: smtp.username,
+        from: smtp.from,
       }))
-    },
-  })
+    }
+  }, [smtp])
 
   const saveMutation = useMutation({
     mutationFn: async () => {
