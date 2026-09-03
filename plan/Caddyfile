@@ -1,0 +1,22 @@
+{$CONSOLE_DOMAIN} {
+	encode gzip
+
+	# Backend API — everything under /api/ goes to the Go service.
+	handle /api/* {
+		reverse_proxy api:8080
+	}
+
+	# Everything else is the React SPA. try_files falls back to index.html
+	# so client-side routes (TanStack Router) survive a hard refresh.
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+	}
+}

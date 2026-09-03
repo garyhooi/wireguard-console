@@ -1,0 +1,101 @@
+services:
+  # Caddy + the built React app in one image: TLS termination, static
+  # frontend serving, and reverse-proxying /api/* to the backend.
+  console:
+    build: ./frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      CONSOLE_DOMAIN: ${CONSOLE_DOMAIN}
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://wgconsole:${POSTGRES_PASSWORD}@postgres:5432/wgconsole?sslmode=disable
+      WG_HELPER_SOCKET: /run/wg-helper/wg-helper.sock
+      # AdGuard Home runs on the host network; reach it via the host gateway.
+      ADGUARD_URL: http://host.docker.internal:3000
+      # Read by the backup service (pg_dump / psql).
+      PGHOST: postgres
+      POSTGRES_USER: wgconsole
+      POSTGRES_DB: wgconsole
+      BACKUP_DIR: /var/backups/wgconsole
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - wg-helper-sock:/run/wg-helper
+      - backups:/var/backups/wgconsole
+    depends_on:
+      postgres:
+        condition: service_healthy
+      wg-helper:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-s", "-o", "/dev/null", "http://localhost:8080/api/auth/login"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # The only privileged component. Holds CAP_NET_ADMIN so nothing else in
+  # the stack has to. Talks to the API over a Unix socket, not the network.
+  wg-helper:
+    build: ./wg-helper
+    restart: unless-stopped
+    # WG_HELPER_SOCKET is the *directory* the helper creates its socket in.
+    environment:
+      WG_HELPER_SOCKET: /run/wg-helper
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    network_mode: host
+    volumes:
+      - /lib/modules:/lib/modules:ro
+      - wg-config:/etc/wireguard
+      - wg-helper-sock:/run/wg-helper
+
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: wgconsole
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: wgconsole
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wgconsole -d wgconsole"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # DNS filtering engine for global + per-user domain blocking (see the
+  # build guide, section 7). Runs on the host network so it can bind :53
+  # directly. Pinned to the latest stable release (v0.108+ is still beta).
+  adguardhome:
+    image: adguard/adguardhome:v0.107.79
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - agh-work:/opt/adguardhome/work
+      - agh-conf:/opt/adguardhome/conf
+
+volumes:
+  caddy-data:
+  caddy-config:
+  pg-data:
+  wg-config:
+  wg-helper-sock:
+  agh-work:
+  agh-conf:
+  backups:

@@ -1,0 +1,15 @@
+# Builds the Go API server. Static binary, distroless runtime image —
+# this container never needs CAP_NET_ADMIN; it talks to wg-helper over
+# a Unix socket instead of touching the WireGuard interface directly.
+
+FROM golang:1.23 AS build
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -o /out/api ./cmd/api
+
+FROM gcr.io/distroless/static-debian12
+COPY --from=build /out/api /api
+EXPOSE 8080
+ENTRYPOINT ["/api"]
