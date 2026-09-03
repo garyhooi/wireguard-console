@@ -6,7 +6,9 @@ import (
 	"net/http"
 
 	"github.com/google/uuid"
+	"github.com/wireguard-console/backend/internal/auth"
 	"github.com/wireguard-console/backend/internal/db"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
 func ListServers(store *Store) http.HandlerFunc {
@@ -94,6 +96,53 @@ func CreateServer(store *Store) http.HandlerFunc {
 
 		ctx := context.Background()
 		adminID := getAdminID(r)
+
+		// Defaults so the "just works" path needs only name + endpoint.
+		if req.InterfaceName == "" {
+			req.InterfaceName = "wg0"
+		}
+		if req.ListenPort == 0 {
+			req.ListenPort = 51820
+		}
+		if req.NetworkCIDR == "" {
+			req.NetworkCIDR = "10.8.0.0/24"
+		}
+		if len(req.DNSServers) == 0 {
+			req.DNSServers = []string{"1.1.1.1", "8.8.8.8"}
+		}
+		if req.DefaultAllowedIPs == "" {
+			req.DefaultAllowedIPs = "0.0.0.0/0, ::/0"
+		}
+		if req.MTU == 0 {
+			req.MTU = 1420
+		}
+		if req.PersistentKeepalive == 0 {
+			req.PersistentKeepalive = 25
+		}
+
+		// Generate the server keypair here when the client doesn't supply
+		// one — a browser cannot produce the AES-encrypted private key
+		// format the database stores. The private key is encrypted with
+		// APP_ENCRYPTION_KEY before it is ever persisted.
+		if req.ServerPrivateKeyEnc == "" || req.ServerPublicKey == "" {
+			priv, err := wgtypes.GeneratePrivateKey()
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to generate server keys")
+				return
+			}
+			encSvc, err := auth.NewEncryptionService()
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "Encryption is not configured")
+				return
+			}
+			encPriv, err := encSvc.Encrypt(priv.String())
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to encrypt server key")
+				return
+			}
+			req.ServerPublicKey = priv.PublicKey().String()
+			req.ServerPrivateKeyEnc = encPriv
+		}
 
 		_, err := store.pool.Exec(ctx, `
 			INSERT INTO servers (name, public_endpoint, listen_port, interface_name, server_public_key,

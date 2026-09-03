@@ -3,12 +3,61 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/wireguard-console/backend/internal/db"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
+
+// nextAvailableIP returns the first unused host address in the server's
+// network CIDR (starting at .2 — .1 is treated as the gateway).
+func nextAvailableIP(ctx context.Context, pool *pgxpool.Pool, serverID string) (string, error) {
+	var cidr string
+	if err := pool.QueryRow(ctx, `SELECT network_cidr FROM servers WHERE id = $1`, serverID).Scan(&cidr); err != nil {
+		return "", fmt.Errorf("server not found: %w", err)
+	}
+
+	_, ipnet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return "", fmt.Errorf("invalid server network %q: %w", cidr, err)
+	}
+	base := ipnet.IP.To4()
+	if base == nil {
+		return "", fmt.Errorf("peer IP allocation currently supports IPv4 networks only")
+	}
+
+	used := map[string]bool{}
+	rows, err := pool.Query(ctx, `SELECT allowed_ip FROM peers WHERE server_id = $1`, serverID)
+	if err != nil {
+		return "", fmt.Errorf("failed to list peers: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ip string
+		if err := rows.Scan(&ip); err != nil {
+			return "", fmt.Errorf("failed to scan peer: %w", err)
+		}
+		used[ip] = true
+	}
+
+	// Skip the network address and .1 (gateway), scan to the last host.
+	ip := make(net.IP, len(base))
+	copy(ip, base)
+	ip[3] = 2
+	for ip[3] < 255 {
+		candidate := ip.String()
+		if !used[candidate] {
+			return candidate, nil
+		}
+		ip[3]++
+	}
+	return "", fmt.Errorf("no free addresses left in %s", cidr)
+}
 
 func ListPeers(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -84,9 +133,33 @@ func CreatePeer(store *Store) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
+		if req.Name == "" {
+			writeError(w, http.StatusBadRequest, "name is required")
+			return
+		}
 
 		ctx := context.Background()
 		adminID := getAdminID(r)
+
+		// The browser shouldn't have to generate keys or pick an IP —
+		// generate the peer keypair and allocate the next free address
+		// from the server's network when the client doesn't supply them.
+		if req.PublicKey == "" {
+			k, err := wgtypes.GenerateKey()
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to generate peer key")
+				return
+			}
+			req.PublicKey = k.PublicKey().String()
+		}
+		if req.AllowedIP == "" {
+			ip, err := nextAvailableIP(ctx, store.pool, req.ServerID.String())
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			req.AllowedIP = ip
+		}
 
 		_, err := store.pool.Exec(ctx, `
 			INSERT INTO peers (user_id, server_id, name, public_key, allowed_ip, status)
@@ -100,7 +173,11 @@ func CreatePeer(store *Store) http.HandlerFunc {
 
 		logAudit(ctx, store, adminID, "peer.create", "peer", "", nil)
 
-		writeJSON(w, http.StatusCreated, map[string]string{"status": "created"})
+		writeJSON(w, http.StatusCreated, map[string]string{
+			"status":     "created",
+			"public_key": req.PublicKey,
+			"allowed_ip": req.AllowedIP,
+		})
 	}
 }
 
