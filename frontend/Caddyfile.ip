@@ -1,6 +1,16 @@
 # IP-only mode: no domain, so public CAs can't issue a certificate.
 # Caddy uses its internal CA instead, and binds all interfaces because
 # the site's IP address is the host's, not the container's.
+#
+# Clients do NOT send SNI when connecting to a raw IP, so Caddy would
+# match by the connection's destination IP (which inside the container is
+# 172.x/192.168.x, not the public IP) and find no certificate — handshake
+# dies with 'tlsv1 alert internal error'. default_sni pins the lookup to
+# the console address (see caddyserver/caddy#6364).
+{
+	default_sni {$CONSOLE_DOMAIN}
+}
+
 {$CONSOLE_DOMAIN} {
 	tls internal
 	bind 0.0.0.0
