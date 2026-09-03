@@ -9,15 +9,10 @@ services:
       - "443:443"
     environment:
       CONSOLE_DOMAIN: ${CONSOLE_DOMAIN}
-      # WGCONSOLE_TLS_LINE/WGCONSOLE_BIND_LINE: empty for domain mode
-      # (public ACME certs). For IP-only deployments any non-empty
-      # WGCONSOLE_TLS expands them to "tls internal" and "bind 0.0.0.0" so
-      # Caddy uses its internal CA and listens on all interfaces (the
-      # site's IP isn't inside the container). IMPORTANT: the :+ word must
-      # stay UNQUOTED — quotes end up in the env value and the Caddyfile
-      # then sees the whole line as one unknown directive.
-      WGCONSOLE_TLS_LINE: ${WGCONSOLE_TLS:+tls internal}
-      WGCONSOLE_BIND_LINE: ${WGCONSOLE_TLS:+bind 0.0.0.0}
+      # Any non-empty value ("internal") selects IP-only mode: Caddy's
+      # entrypoint picks the Caddyfile variant (internal CA + bind all
+      # interfaces). Empty/absent = domain mode with public ACME certs.
+      WGCONSOLE_TLS: ${WGCONSOLE_TLS:-}
     volumes:
       - caddy-data:/data
       - caddy-config:/config
