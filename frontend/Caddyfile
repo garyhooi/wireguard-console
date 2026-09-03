@@ -1,8 +1,12 @@
 # WGCONSOLE_TLS_LINE: expands to "tls internal" for IP-only deployments
 # (no domain — public CAs can't issue certificates for bare IPs). Empty
 # for domain names, where Caddy's normal ACME flow obtains public certs.
+# WGCONSOLE_BIND_LINE: "bind 0.0.0.0" in IP-only mode — with an IP site
+# address Caddy would bind that specific IP, which doesn't exist inside
+# the container; binding all interfaces keeps the published ports working.
 {$CONSOLE_DOMAIN} {
 	{$WGCONSOLE_TLS_LINE:}
+	{$WGCONSOLE_BIND_LINE:}
 
 	encode gzip
 
