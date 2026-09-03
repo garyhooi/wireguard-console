@@ -20,6 +20,19 @@ function UsersPage() {
   const [showInviteModal, setShowInviteModal] = useState(false)
   const [inviteEmail, setInviteEmail] = useState('')
   const [inviteName, setInviteName] = useState('')
+  const [inviteLink, setInviteLink] = useState('')
+  const [copied, setCopied] = useState(false)
+
+  const { data: smtp } = useQuery<{ configured: boolean }>({
+    queryKey: ['smtp-config'],
+    queryFn: async () => {
+      const res = await fetch('/api/config/smtp', {
+        headers: { Authorization: localStorage.getItem('token')! },
+      })
+      if (!res.ok) throw new Error('Failed to fetch SMTP config')
+      return res.json()
+    },
+  })
 
   const { data: users, isLoading, refetch } = useQuery<User[]>({
     queryKey: ['users'],
@@ -45,10 +58,11 @@ function UsersPage() {
       if (!res.ok) throw new Error('Failed to invite user')
       return res.json()
     },
-    onSuccess: () => {
-      setShowInviteModal(false)
-      setInviteEmail('')
-      setInviteName('')
+    onSuccess: (data) => {
+      setInviteLink(data.invite_link || '')
+      setCopied(false)
+      // Keep the modal open so the invite link can be copied; the list
+      // refreshes underneath.
       refetch()
     },
   })
@@ -56,6 +70,23 @@ function UsersPage() {
   const handleInvite = (e: React.FormEvent) => {
     e.preventDefault()
     inviteMutation.mutate({ email: inviteEmail, full_name: inviteName })
+  }
+
+  const copyLink = async () => {
+    if (!inviteLink) return
+    try {
+      await navigator.clipboard.writeText(inviteLink)
+      setCopied(true)
+    } catch {
+      // Fallback for non-secure contexts
+      const el = document.createElement('textarea')
+      el.value = inviteLink
+      document.body.appendChild(el)
+      el.select()
+      document.execCommand('copy')
+      document.body.removeChild(el)
+      setCopied(true)
+    }
   }
 
   return (
@@ -113,13 +144,55 @@ function UsersPage() {
                 </button>
                 <button
                   type="submit"
-                  disabled={inviteMutation.isPending}
+                  disabled={inviteMutation.isPending || !!inviteLink}
                   className="flex-1 bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-4 rounded-md disabled:opacity-50"
                 >
-                  {inviteMutation.isPending ? 'Sending...' : 'Send Invite'}
+                  {inviteMutation.isPending ? 'Creating...' : 'Invite User'}
                 </button>
               </div>
             </form>
+
+            {inviteLink && (
+              <div className="mt-4 border border-neutral-700 rounded-md p-4">
+                {smtp?.configured ? (
+                  <p className="text-sm text-neutral-300 mb-2">
+                    Invite email queued — the link is also here if you want to share it directly:
+                  </p>
+                ) : (
+                  <p className="text-sm text-yellow-300 mb-2">
+                    SMTP is not configured, so the invite email will not be sent. Share this invite
+                    link manually:
+                  </p>
+                )}
+                <div className="flex items-center gap-2">
+                  <input
+                    readOnly
+                    value={inviteLink}
+                    onFocus={(e) => e.target.select()}
+                    className="flex-1 bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-sm text-neutral-300 font-mono focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={copyLink}
+                    className="bg-neutral-700 hover:bg-neutral-600 text-white text-sm font-medium py-2 px-3 rounded-md"
+                  >
+                    {copied ? 'Copied ✓' : 'Copy'}
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowInviteModal(false)
+                    setInviteLink('')
+                    setInviteEmail('')
+                    setInviteName('')
+                  }}
+                  className="mt-3 w-full bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-4 rounded-md"
+                >
+                  Done
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}

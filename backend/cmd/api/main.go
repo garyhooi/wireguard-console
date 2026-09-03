@@ -61,6 +61,7 @@ func main() {
 
 	go worker.NewTrafficWorker(conn.Pool(), 30*time.Second).Start(ctx)
 	go worker.NewRollupWorker(conn.Pool()).Start(ctx)
+	go worker.NewMailWorker(conn.Pool()).Start(ctx)
 
 	// Liveness probe (used by the container healthcheck — succeeds whatever
 	// the auth state is).

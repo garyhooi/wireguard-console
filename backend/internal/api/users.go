@@ -132,7 +132,13 @@ func CreateUser(store *Store) http.HandlerFunc {
 
 		logAudit(ctx, store, adminID, "user.create", "user", "", nil)
 
-		writeJSON(w, http.StatusCreated, map[string]string{"status": "created"})
+		// Always return the invite link: without configured SMTP the email
+		// is never delivered, and even with SMTP the admin may want to
+		// share it directly (or if the mail worker is still catching up).
+		writeJSON(w, http.StatusCreated, map[string]string{
+			"status":      "created",
+			"invite_link": inviteLink,
+		})
 	}
 }
 
