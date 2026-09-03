@@ -239,7 +239,23 @@ fi
 # 10. Build and start
 # ---------------------------------------------------------------------------
 info "Building images and starting the stack (this can take a few minutes on first run)..."
-docker compose up -d --build
+if ! docker compose up -d --build; then
+  error "docker compose failed. Diagnose with:
+  docker compose -f ${INSTALL_DIR}/docker-compose.yml ps -a
+  docker compose -f ${INSTALL_DIR}/docker-compose.yml logs --tail=50 postgres
+  docker logs --tail=50 wireguard-console-postgres-1
+  df -h /var/lib/docker
+  Then fix the cause and re-run this script."
+fi
+
+# Post-start sanity: flag unhealthy containers instead of printing a happy
+# summary while half the stack is down.
+UNHEALTHY="$(docker compose ps 2>/dev/null | awk 'NR>1 && $0 ~ /unhealthy/ {print $1}' || true)"
+if [[ -n "${UNHEALTHY}" ]]; then
+  warn "Some containers are not healthy yet: ${UNHEALTHY}"
+  warn "Watch them with: docker compose -f ${INSTALL_DIR}/docker-compose.yml ps"
+  warn "Logs: docker compose -f ${INSTALL_DIR}/docker-compose.yml logs -f"
+fi
 
 # ---------------------------------------------------------------------------
 # 11. Summary

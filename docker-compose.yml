@@ -80,6 +80,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+      start_period: 20s
 
   # DNS filtering engine for global + per-user domain blocking (see the
   # build guide, section 7). Runs on the host network so it can bind :53
