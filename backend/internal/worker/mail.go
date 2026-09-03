@@ -3,7 +3,6 @@ package worker
 import (
 	"context"
 	"log"
-	"os"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -32,14 +31,13 @@ func (w *MailWorker) Start(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if os.Getenv("SMTP_HOST") == "" {
-				continue // SMTP not configured yet — leave jobs queued
-			}
-			svc, err := email.NewService()
-			if err != nil {
-				log.Printf("Mail worker: %v", err)
+			// SMTP config now lives in the database (set from the console
+			// UI, with env vars as a fallback). No config, no sending.
+			cfg := email.LoadConfig(ctx, w.pool)
+			if cfg.Host == "" {
 				continue
 			}
+			svc := email.NewServiceWithConfig(cfg)
 			q := email.NewQueue(w.pool, svc)
 			if err := q.ProcessNext(ctx); err != nil {
 				log.Printf("Mail worker: %v", err)

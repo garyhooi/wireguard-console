@@ -1,9 +1,14 @@
 package email
 
 import (
+	"context"
 	"fmt"
 	"net/smtp"
 	"os"
+	"strconv"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/wireguard-console/backend/internal/auth"
 )
 
 type Config struct {
@@ -21,6 +26,11 @@ type Service struct {
 func NewService() (*Service, error) {
 	host := os.Getenv("SMTP_HOST")
 	port := 587
+	if p := os.Getenv("SMTP_PORT"); p != "" {
+		if v, err := strconv.Atoi(p); err == nil {
+			port = v
+		}
+	}
 	username := os.Getenv("SMTP_USERNAME")
 	password := os.Getenv("SMTP_PASSWORD")
 	from := os.Getenv("SMTP_FROM_ADDRESS")
@@ -29,15 +39,63 @@ func NewService() (*Service, error) {
 		return nil, fmt.Errorf("SMTP_HOST environment variable is required")
 	}
 
-	return &Service{
-		config: &Config{
-			Host:     host,
-			Port:     port,
-			Username: username,
-			Password: password,
-			From:     from,
-		},
-	}, nil
+	return NewServiceWithConfig(&Config{
+		Host:     host,
+		Port:     port,
+		Username: username,
+		Password: password,
+		From:     from,
+	}), nil
+}
+
+// NewServiceWithConfig builds a service from an explicit config (e.g. the
+// one stored in the database and administered from the console UI).
+func NewServiceWithConfig(config *Config) *Service {
+	return &Service{config: config}
+}
+
+func (s *Service) Config() *Config {
+	return s.config
+}
+
+// LoadConfig returns the SMTP configuration stored in the console's
+// database (set from the console UI). Falls back to environment variables
+// when nothing is stored yet, so .env-based setups keep working. Returns
+// a config with empty Host when no SMTP is configured at all.
+func LoadConfig(ctx context.Context, pool *pgxpool.Pool) *Config {
+	cfg := &Config{Port: 587}
+
+	var enc string
+	err := pool.QueryRow(ctx, `
+		SELECT smtp_host, smtp_port, smtp_username, smtp_password_enc, smtp_from
+		FROM config WHERE id = 1
+	`).Scan(&cfg.Host, &cfg.Port, &cfg.Username, &enc, &cfg.From)
+	if err == nil && cfg.Host != "" {
+		if enc != "" {
+			if svc, e := auth.NewEncryptionService(); e == nil {
+				if plain, e := svc.Decrypt(enc); e == nil {
+					cfg.Password = plain
+				}
+			}
+		}
+		return cfg
+	}
+
+	// Fall back to environment variables.
+	if host := os.Getenv("SMTP_HOST"); host != "" {
+		cfg.Host = host
+		if p := os.Getenv("SMTP_PORT"); p != "" {
+			if v, e := strconv.Atoi(p); e == nil {
+				cfg.Port = v
+			}
+		}
+		cfg.Username = os.Getenv("SMTP_USERNAME")
+		cfg.Password = os.Getenv("SMTP_PASSWORD")
+		cfg.From = os.Getenv("SMTP_FROM_ADDRESS")
+		return cfg
+	}
+
+	return &Config{Port: 587}
 }
 
 func (s *Service) Send(to, subject, body string) error {
