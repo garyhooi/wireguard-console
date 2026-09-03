@@ -9,8 +9,11 @@ services:
       - "443:443"
     environment:
       CONSOLE_DOMAIN: ${CONSOLE_DOMAIN}
-      # Empty for domain mode; "tls internal" for IP-only deployments.
-      WGCONSOLE_TLS: ${WGCONSOLE_TLS:-}
+      # Empty for domain mode (public ACME certs). For IP-only deployments
+      # any non-empty WGCONSOLE_TLS (install.sh uses "internal") makes this
+      # expand to "tls internal", so Caddy serves HTTPS with its internal
+      # CA. The :+ expansion ignores quote styling in .env values.
+      WGCONSOLE_TLS_LINE: ${WGCONSOLE_TLS:+"tls internal"}
     volumes:
       - caddy-data:/data
       - caddy-config:/config
