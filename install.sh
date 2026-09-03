@@ -81,7 +81,7 @@ fi
 # ---------------------------------------------------------------------------
 info "Installing WireGuard tools..."
 apt-get update -qq
-apt-get install -y -qq wireguard wireguard-tools git openssl >/dev/null
+apt-get install -y -qq wireguard wireguard-tools git openssl curl >/dev/null
 
 if ! modprobe wireguard 2>/dev/null; then
   warn "Could not load the WireGuard kernel module directly."
@@ -151,13 +151,35 @@ else
 
   info "Generating configuration (.env)..."
 
+  # Best-effort auto-detection of this server's public IPv4, so a plain
+  # Enter at the prompt deploys with the detected address.
+  DETECTED_IP=""
+  if command -v curl >/dev/null 2>&1; then
+    DETECTED_IP="$(curl -4 -fsS --max-time 10 https://api.ipify.org 2>/dev/null || true)"
+    [[ "${DETECTED_IP}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || DETECTED_IP=""
+  fi
+
   # Prompt only when a controlling terminal actually opens (works even
   # when stdin is a pipe, e.g. curl ... | sudo bash). Note: `-r /dev/tty`
   # is NOT enough — bash's test is stat-based and lies when there is no
-  # controlling terminal (cron, `container exec`, SSH command mode).
-  if [[ -z "${CONSOLE_DOMAIN:-}" ]] && exec 3<>/dev/tty 2>/dev/null; then
-    read -rp "Domain or public IP this console will be reachable at (e.g. vpn.yourcompany.com, or 203.0.113.5): " CONSOLE_DOMAIN <&3
-    exec 3<&- 2>/dev/null || true
+  # controlling terminal (cron, `container exec`, SSH command mode). And
+  # never `exec 3<>/dev/tty` as the probe — a failed exec redirection is
+  # FATAL for the shell. `true 2>/dev/null < /dev/tty` fails gracefully;
+  # the 2> must come FIRST — redirections apply left-to-right, so a
+  # leading `< /dev/tty` failure would bypass the stderr suppression.
+  if [[ -z "${CONSOLE_DOMAIN:-}" ]] && true 2>/dev/null < /dev/tty; then
+    if [[ -n "${DETECTED_IP:-}" ]]; then
+      read -rp "Console address — domain, public IP, or Enter to use the detected IP ${DETECTED_IP}: " CONSOLE_DOMAIN < /dev/tty || true
+      CONSOLE_DOMAIN="${CONSOLE_DOMAIN:-${DETECTED_IP}}"
+    else
+      read -rp "Domain or public IP this console will be reachable at (e.g. vpn.yourcompany.com, or 203.0.113.5): " CONSOLE_DOMAIN < /dev/tty || true
+    fi
+  fi
+  # Headless (no terminal, e.g. cron/CI): fall back to the detected public
+  # IP rather than aborting — it is the address peers will reach, after all.
+  if [[ -z "${CONSOLE_DOMAIN:-}" && -n "${DETECTED_IP:-}" ]]; then
+    warn "No interactive terminal and CONSOLE_DOMAIN unset — using detected public IP ${DETECTED_IP}. Override with CONSOLE_DOMAIN=... if this server is behind NAT with port-forwarding."
+    CONSOLE_DOMAIN="${DETECTED_IP}"
   fi
   [[ -n "${CONSOLE_DOMAIN:-}" ]] || error "CONSOLE_DOMAIN is required. Re-run with: CONSOLE_DOMAIN=vpn.yourcompany.com bash install.sh (a domain gets automatic HTTPS; a public IP works too, with a self-signed certificate)"
 
