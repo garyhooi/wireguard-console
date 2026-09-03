@@ -297,7 +297,8 @@ cat <<SUMMARY
 
 ${REACH_NOTE}
 
- First visit walks you through creating the first super_admin account.
- Enroll 2FA immediately — see the build guide, section 6.
+ First admin is NOT auto-created — follow 'Create the first admin
+ account' (gen-password + psql) in the README, then log in and enroll
+ 2FA immediately.
 ==================================================================
 SUMMARY

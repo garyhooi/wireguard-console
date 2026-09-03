@@ -85,7 +85,33 @@ You don't need a domain. Enter the server's public IPv4 when prompted (or run `C
    ```
 
 4. **Access the console**
-   Navigate to `https://YOUR_DOMAIN` and create your first super_admin account.
+   Navigate to `https://YOUR_DOMAIN`.
+
+## Create the first admin account (required)
+
+There are **no default credentials**, and the first-run setup wizard is not implemented yet — the first `super_admin` must be created manually with `gen-password` (a small Go tool in the repo), which prints the exact SQL to insert into the database:
+
+```bash
+# From a machine with Go installed (or any dev machine with the repo):
+cd backend
+go run ./cmd/gen-password 'YourPassw0rd!'
+
+# No local Go? Run it in a throwaway container on the server instead:
+docker run --rm -v /opt/wireguard-console/backend:/app -w /app golang:1.27 go run ./cmd/gen-password 'YourPassw0rd!'
+```
+
+The tool prints an email, the hash and a ready-to-use SQL line. Run that SQL against the database:
+
+```bash
+# On the server (replace <SQL> with the printed INSERT statement, or set the
+# email/hash explicitly):
+docker exec wireguard-console-postgres-1 \
+  psql -U wgconsole -d wgconsole -c "<INSERT ...>"
+```
+
+Expect `INSERT 0 1`. Then log in at `https://YOUR_DOMAIN` with the email/password you chose — **2FA enrollment is mandatory** on first login (keep the backup codes).
+
+Note: passwords must be at least 12 chars and contain upper/lowercase, a digit and a special character (enforced when the console validates passwords later).
 
 ## Upgrading
 
