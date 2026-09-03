@@ -6,13 +6,14 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o /out/api ./cmd/api
 
-# Debian slim runtime (not distroless) so the container includes pg_dump /
-# psql / gzip for the built-in backup & restore endpoints, plus curl for
-# the compose healthcheck and CA certificates for outbound TLS.
-FROM debian:12-slim
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates postgresql-client curl gzip \
-    && rm -rf /var/lib/apt/lists/*
+# Runtime is postgres:18-alpine itself (not distroless/debian) so the
+# container ships pg_dump/psql matching the running server major version —
+# the built-in backup & restore endpoints need them, and pg_dump refuses to
+# dump a NEWER server than its own version. Also provides gzip + busybox
+# wget (used by the compose healthcheck against /healthz).
+FROM postgres:18-alpine
 COPY --from=build /out/api /api
+COPY --from=build /app/migrations /migrations
+ENV MIGRATIONS_DIR=/migrations
 EXPOSE 8080
 ENTRYPOINT ["/api"]

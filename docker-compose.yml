@@ -41,7 +41,7 @@ services:
       wg-helper:
         condition: service_started
     healthcheck:
-      test: ["CMD", "curl", "-s", "-o", "/dev/null", "http://localhost:8080/api/auth/login"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8080/healthz"]
       interval: 10s
       timeout: 5s
       retries: 10

@@ -62,6 +62,14 @@ func main() {
 	go worker.NewTrafficWorker(conn.Pool(), 30*time.Second).Start(ctx)
 	go worker.NewRollupWorker(conn.Pool()).Start(ctx)
 
+	// Liveness probe (used by the container healthcheck — succeeds whatever
+	// the auth state is).
+	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"ok"}`))
+	})
+
 	r.Route("/api", func(r chi.Router) {
 		// Public routes
 		r.Post("/auth/login", api.Login(store))
