@@ -182,11 +182,12 @@ else
     CONSOLE_DOMAIN="${DETECTED_IP}"
   fi
   [[ -n "${CONSOLE_DOMAIN:-}" ]] || error "CONSOLE_DOMAIN is required. Re-run with: CONSOLE_DOMAIN=vpn.yourcompany.com bash install.sh (a domain gets automatic HTTPS; a public IP works too, with a self-signed certificate)"
+  info "Console will be reachable at ${CONSOLE_DOMAIN}"
 
-  if [[ -z "${WG_PUBLIC_ENDPOINT:-}" ]] && exec 3<>/dev/tty 2>/dev/null; then
-    read -rp "WireGuard public endpoint, host:port [${CONSOLE_DOMAIN}:${WG_DEFAULT_PORT}]: " WG_PUBLIC_ENDPOINT <&3
-    exec 3<&- 2>/dev/null || true
-  fi
+  # WG_PUBLIC_ENDPOINT is not prompted for — the default
+  # CONSOLE_DOMAIN:51820 is correct for the vast majority of deployments
+  # and every extra prompt is a chance to appear "stuck". Override via
+  # WG_PUBLIC_ENDPOINT=host:port if your tunnel endpoint differs.
   WG_PUBLIC_ENDPOINT="${WG_PUBLIC_ENDPOINT:-${CONSOLE_DOMAIN}:${WG_DEFAULT_PORT}}"
 
   # IP-only deployments get Caddy's internal CA — public certificate
