@@ -1,0 +1,351 @@
+// Package e2e boots the real API binary against a PostgreSQL database and
+// exercises the critical contracts: auth, server/peer provisioning (keygen,
+// IP allocation, config download), SMTP persistence, and node agent state.
+//
+// Requires TEST_DATABASE_URL (e.g. the CI postgres service). Skips when unset.
+package e2e
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/crypto/argon2"
+)
+
+var (
+	baseURL string
+	binPath string
+)
+
+func TestMain(m *testing.M) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		fmt.Println("TEST_DATABASE_URL not set — skipping e2e suite")
+		os.Exit(0)
+	}
+
+	pkgDir, err := os.Getwd() // backend/e2e
+	if err != nil {
+		fmt.Println("getwd:", err)
+		os.Exit(1)
+	}
+	repoRoot := filepath.Clean(filepath.Join(pkgDir, ".."))
+
+	tmp, err := os.MkdirTemp("", "wgc-e2e-")
+	if err != nil {
+		fmt.Println("mkdtemp:", err)
+		os.Exit(1)
+	}
+	binPath = filepath.Join(tmp, "api")
+	build := exec.Command("go", "build", "-o", binPath, "./cmd/api")
+	build.Dir = repoRoot
+	build.Stderr = os.Stderr
+	if err := build.Run(); err != nil {
+		fmt.Println("build api:", err)
+		os.Exit(1)
+	}
+
+	port := "18099"
+	baseURL = "http://127.0.0.1:" + port
+	cmd := exec.Command(binPath)
+	cmd.Env = append(os.Environ(),
+		"DATABASE_URL="+dbURL,
+		"PORT="+port,
+		"WG_HELPER_SOCKET=/tmp/wgc-e2e-helper.sock",
+		"APP_ENCRYPTION_KEY="+randomHex(32),
+		"SESSION_SIGNING_KEY="+randomHex(32),
+		"CONSOLE_DOMAIN=console.test",
+		"MIGRATIONS_DIR="+filepath.Join(repoRoot, "migrations"),
+		"PGHOST=localhost",
+		"POSTGRES_USER="+os.Getenv("E2E_PG_USER"),
+		"POSTGRES_DB="+os.Getenv("E2E_PG_DB"),
+		"BACKUP_DIR="+tmp,
+	)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		fmt.Println("start api:", err)
+		os.Exit(1)
+	}
+	defer cmd.Process.Kill()
+
+	// Wait for the API to accept connections.
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(baseURL + "/healthz")
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == 200 {
+				break
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	code := m.Run()
+	cmd.Process.Kill()
+	os.Exit(code)
+}
+
+func randomHex(n int) string {
+	b := make([]byte, n)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// seedAdmin inserts a super_admin with a KNOWN password hash.
+func seedAdmin(t *testing.T, dbURL string) {
+	t.Helper()
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("connect db: %v", err)
+	}
+	defer pool.Close()
+
+	salt := make([]byte, 16)
+	rand.Read(salt)
+	hash := argon2.IDKey([]byte("e2e-Passw0rd!"), salt, 1<<15, 1, 4, 32)
+	passwordHash := hex.EncodeToString(salt) + ":" + hex.EncodeToString(hash)
+
+	_, err = pool.Exec(ctx, `
+		INSERT INTO admins (email, password_hash, role, status)
+		VALUES ('e2e@console.test', $1, 'super_admin', 'active')
+		ON CONFLICT (email) DO NOTHING
+	`, passwordHash)
+	if err != nil {
+		t.Fatalf("seed admin: %v", err)
+	}
+}
+
+func api(t *testing.T, method, path, token string, body interface{}) (*http.Response, map[string]interface{}) {
+	t.Helper()
+	var buf bytes.Buffer
+	if body != nil {
+		json.NewEncoder(&buf).Encode(body)
+	}
+	req, err := http.NewRequest(method, baseURL+path, &buf)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", token)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	var out map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&out)
+	resp.Body.Close()
+	return resp, out
+}
+
+func expectStatus(t *testing.T, resp *http.Response, want int, path string) {
+	t.Helper()
+	if resp.StatusCode != want {
+		t.Fatalf("%s: status %d, want %d", path, resp.StatusCode, want)
+	}
+}
+
+func TestEndToEnd(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	seedAdmin(t, dbURL)
+
+	// Login
+	resp, out := api(t, "POST", "/api/auth/login", "", map[string]string{
+		"email": "e2e@console.test", "password": "e2e-Passw0rd!",
+	})
+	expectStatus(t, resp, 200, "/api/auth/login")
+	token, _ := out["token"].(string)
+	if token == "" {
+		t.Fatal("login returned no token")
+	}
+
+	// Server create -> auto keygen -> list scan (cidr regression)
+	resp, _ = api(t, "POST", "/api/servers", token, map[string]interface{}{
+		"name": "E2E", "public_endpoint": "203.0.113.5:51820",
+	})
+	expectStatus(t, resp, 201, "POST /api/servers")
+
+	var serverRows []map[string]interface{}
+	json.Unmarshal([]byte(rawGet(t, baseURL+"/api/servers", token)), &serverRows)
+	if len(serverRows) != 1 {
+		t.Fatalf("GET /api/servers: expected 1 server, got %d", len(serverRows))
+	}
+	serverID, _ := serverRows[0]["id"].(string)
+	if serverID == "" {
+		t.Fatal("server id missing")
+	}
+	if cidr, _ := serverRows[0]["network_cidr"].(string); cidr != "10.8.0.0/24" {
+		t.Fatalf("network_cidr scan mismatch: %q", cidr)
+	}
+	if pub, _ := serverRows[0]["server_public_key"].(string); len(pub) < 20 {
+		t.Fatalf("server public key not generated: %q", pub)
+	}
+
+	// User invite -> link
+	resp, out = api(t, "POST", "/api/users", token, map[string]string{
+		"email": "user@example.com", "full_name": "E2E User",
+	})
+	expectStatus(t, resp, 201, "POST /api/users")
+	inviteLink, _ := out["invite_link"].(string)
+	if !strings.HasPrefix(inviteLink, "https://console.test/claim/") {
+		t.Fatalf("bad invite link: %q", inviteLink)
+	}
+
+	// Peer create -> auto key + auto IP
+	userID := firstID(t, "/api/users", token)
+	resp, out = api(t, "POST", "/api/peers", token, map[string]interface{}{
+		"name": "E2E MacBook", "server_id": serverID, "user_id": userID,
+	})
+	expectStatus(t, resp, 201, "POST /api/peers")
+	allowedIP, _ := out["allowed_ip"].(string)
+	if allowedIP != "10.8.0.2" {
+		t.Fatalf("auto IP = %q, want 10.8.0.2", allowedIP)
+	}
+
+	// Peer config download (real private key, no redaction)
+	peerID := firstID(t, "/api/peers", token)
+	cfgResp := rawGet(t, baseURL+"/api/peers/"+peerID+"/config", token)
+	if !strings.Contains(cfgResp, "PrivateKey = ") || strings.Contains(cfgResp, "[REDACTED]") {
+		t.Fatalf("peer config invalid:\n%s", cfgResp)
+	}
+	if !strings.Contains(cfgResp, "PersistentKeepalive = 25") {
+		t.Fatalf("peer config keepalive wrong:\n%s", cfgResp)
+	}
+
+	// Peer rename + server edit
+	resp, _ = api(t, "PATCH", "/api/peers/"+peerID, token, map[string]string{"name": "E2E MacBook Pro"})
+	expectStatus(t, resp, 200, "PATCH /api/peers/{id}")
+	resp, _ = api(t, "PATCH", "/api/servers/"+serverID, token, map[string]interface{}{
+		"name": "E2E Renamed", "public_endpoint": "203.0.113.9:51821", "listen_port": 51821,
+		"network_cidr": "10.9.0.0/24", "dns_servers": []string{"1.1.1.1"},
+		"default_allowed_ips": "0.0.0.0/0", "mtu": 1420, "persistent_keepalive": 25,
+	})
+	expectStatus(t, resp, 200, "PATCH /api/servers/{id}")
+
+	// SMTP: save with password, encrypt, preserve on empty password
+	resp, _ = api(t, "PATCH", "/api/config/smtp", token, map[string]interface{}{
+		"host": "smtp.example.com", "port": 587, "username": "u",
+		"password": "S3cret!", "from": "noreply@example.com",
+	})
+	expectStatus(t, resp, 200, "PATCH /api/config/smtp (with password)")
+	resp, smtpOut := api(t, "GET", "/api/config/smtp", token, nil)
+	expectStatus(t, resp, 200, "GET /api/config/smtp")
+	if _, leaked := smtpOut["password"]; leaked {
+		t.Fatal("GET smtp leaked the password")
+	}
+	if pwSet, _ := smtpOut["password_set"].(bool); !pwSet {
+		t.Fatal("password_set should be true")
+	}
+	resp, _ = api(t, "PATCH", "/api/config/smtp", token, map[string]interface{}{
+		"host": "smtp.other.com", "port": 587, "username": "u",
+		"from": "noreply@example.com",
+	})
+	expectStatus(t, resp, 200, "PATCH /api/config/smtp (preserve)")
+	resp, smtpOut = api(t, "GET", "/api/config/smtp", token, nil)
+	expectStatus(t, resp, 200, "GET /api/config/smtp (after preserve)")
+	if pwSet, _ := smtpOut["password_set"].(bool); !pwSet {
+		t.Fatal("password not preserved on empty-password PATCH")
+	}
+
+	// Node: create -> agent state endpoint (token auth) -> report
+	resp, nodeOut := api(t, "POST", "/api/nodes", token, map[string]string{
+		"name": "Remote Node", "location": "SG",
+	})
+	expectStatus(t, resp, 201, "POST /api/nodes")
+	nodeID, _ := nodeOut["node_id"].(string)
+	nodeToken, _ := nodeOut["token"].(string)
+	if nodeID == "" || nodeToken == "" {
+		t.Fatal("node create missing id/token")
+	}
+
+	// Remote server assigned to the node
+	resp, _ = api(t, "POST", "/api/servers", token, map[string]interface{}{
+		"name": "Remote-1", "public_endpoint": "13.212.0.1:51820",
+		"managed_mode": "remote", "node_id": nodeID,
+	})
+	expectStatus(t, resp, 201, "POST /api/servers (remote)")
+
+	// Agent state with the node token (authorization enforced)
+	resp, state := api(t, "GET", "/api/nodes/"+nodeID+"/state", "Bearer "+nodeToken, nil)
+	expectStatus(t, resp, 200, "GET /api/nodes/{id}/state")
+	serversArr, _ := state["servers"].([]interface{})
+	if len(serversArr) != 1 {
+		t.Fatalf("node state: expected 1 server, got %d", len(serversArr))
+	}
+	firstServer := serversArr[0].(map[string]interface{})
+	if iface, _ := firstServer["interface_name"].(string); iface != "wg0" {
+		t.Fatalf("node state interface: %q", iface)
+	}
+	if priv, _ := firstServer["private_key"].(string); len(priv) < 20 {
+		t.Fatal("node state missing decrypted private key")
+	}
+
+	// Unauthorized without token
+	resp, _ = api(t, "GET", "/api/nodes/"+nodeID+"/state", "Bearer wrong", nil)
+	if resp.StatusCode != 401 {
+		t.Fatalf("node state with bad token: status %d, want 401", resp.StatusCode)
+	}
+
+	// Agent report updates last_seen
+	resp, _ = api(t, "POST", "/api/nodes/"+nodeID+"/report", "Bearer "+nodeToken, map[string]string{
+		"status": "ok", "details": "",
+	})
+	expectStatus(t, resp, 200, "POST /api/nodes/{id}/report")
+	resp, nodesOut := api(t, "GET", "/api/nodes", token, nil)
+	expectStatus(t, resp, 200, "GET /api/nodes")
+	_ = nodesOut
+
+	// Cleanup: delete local server (cascade peers) must succeed
+	resp, _ = api(t, "DELETE", "/api/servers/"+serverID, token, nil)
+	expectStatus(t, resp, 200, "DELETE /api/servers/{id}")
+}
+
+func firstID(t *testing.T, path, token string) string {
+	t.Helper()
+	resp := rawGet(t, baseURL+path, token)
+	var rows []map[string]interface{}
+	json.NewDecoder(bytes.NewReader([]byte(resp))).Decode(&rows)
+	if len(rows) == 0 {
+		t.Fatalf("%s: no rows", path)
+	}
+	id, _ := rows[0]["id"].(string)
+	if id == "" {
+		t.Fatalf("%s: row without id: %s", path, resp)
+	}
+	return id
+}
+
+func rawGet(t *testing.T, url, token string) string {
+	t.Helper()
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	buf := new(bytes.Buffer)
+	buf.ReadFrom(resp.Body)
+	return buf.String()
+}
