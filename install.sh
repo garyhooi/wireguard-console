@@ -260,6 +260,17 @@ if ! docker compose up -d --build; then
   Then fix the cause and re-run this script."
 fi
 
+# ---------------------------------------------------------------------------
+# 10b. Provision AdGuard Home (first run): write AdGuardHome.yaml directly
+#      into its config volume so DNS filtering + the block page work out of
+#      the box. Idempotent — safe to re-run on updates.
+# ---------------------------------------------------------------------------
+info "Provisioning AdGuard Home..."
+if ! bash configure-adguard.sh 2>&1 | sed 's/^/  [adguard] /'; then
+  warn "AdGuard provisioning reported a problem — domain blocking may not work until"
+  warn "it is fixed. Re-run: sudo bash ${INSTALL_DIR}/configure-adguard.sh"
+fi
+
 # Post-start sanity: flag unhealthy containers instead of printing a happy
 # summary while half the stack is down.
 UNHEALTHY="$(docker compose ps 2>/dev/null | awk 'NR>1 && $0 ~ /unhealthy/ {print $1}' || true)"
@@ -299,8 +310,9 @@ cat <<SUMMARY
 
 ${REACH_NOTE}
 
- First admin is NOT auto-created — follow 'Create the first admin
- account' (gen-password + psql) in the README, then log in and enroll
- 2FA immediately.
+ On a fresh install the first admin is auto-created — see the api
+ container logs for its one-time password (docker logs
+ wireguard-console-api-1 | grep 'Password'), log in, and change it in
+ Profile. Re-running on an existing install keeps your admins.
 ==================================================================
 SUMMARY

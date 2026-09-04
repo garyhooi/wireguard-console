@@ -39,6 +39,12 @@ func main() {
 		log.Fatalf("Failed to run migrations: %v", err)
 	}
 
+	// Fresh installs get their first super_admin automatically (env
+	// ADMIN_EMAIL/ADMIN_PASSWORD, else random credentials printed once).
+	if err := api.BootstrapAdmin(conn.Pool(), log.Printf); err != nil {
+		log.Fatalf("Failed to bootstrap admin: %v", err)
+	}
+
 	r := chi.NewRouter()
 
 	r.Use(middleware.Logger)

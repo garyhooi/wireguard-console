@@ -71,6 +71,8 @@ func TestMain(m *testing.M) {
 		"APP_ENCRYPTION_KEY="+randomHex(32),
 		"SESSION_SIGNING_KEY="+randomHex(32),
 		"CONSOLE_DOMAIN=console.test",
+		"ADMIN_EMAIL=e2e@console.test",
+		"ADMIN_PASSWORD=e2e-Passw0rd!",
 		"MIGRATIONS_DIR="+filepath.Join(repoRoot, "migrations"),
 		"PGHOST=localhost",
 		"POSTGRES_USER="+os.Getenv("E2E_PG_USER"),
@@ -109,13 +111,12 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
-// seedAdmin inserts a super_admin with a KNOWN password hash.
-func seedAdmin(t *testing.T, dbURL string) {
-	t.Helper()
+// seedAdminDirect inserts the e2e super_admin with a KNOWN password hash.
+func seedAdminDirect(dbURL string) error {
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dbURL)
 	if err != nil {
-		t.Fatalf("connect db: %v", err)
+		return err
 	}
 	defer pool.Close()
 
@@ -130,7 +131,7 @@ func seedAdmin(t *testing.T, dbURL string) {
 	if err == pgx.ErrNoRows {
 		exists = false
 	} else if err != nil {
-		t.Fatalf("check admin: %v", err)
+		return err
 	}
 	if !exists {
 		_, err = pool.Exec(ctx, `
@@ -138,12 +139,10 @@ func seedAdmin(t *testing.T, dbURL string) {
 			VALUES ('e2e@console.test', $1, 'super_admin', 'active')
 		`, passwordHash)
 		if err != nil {
-			t.Fatalf("seed admin: %v", err)
+			return err
 		}
 	}
-	if err != nil {
-		t.Fatalf("seed admin: %v", err)
-	}
+	return nil
 }
 
 func api(t *testing.T, method, path, token string, body interface{}) (*http.Response, map[string]interface{}) {
@@ -194,7 +193,7 @@ func expectStatus(t *testing.T, resp *http.Response, want int, path string) {
 
 func TestEndToEnd(t *testing.T) {
 	dbURL := os.Getenv("TEST_DATABASE_URL")
-	seedAdmin(t, dbURL)
+	seedAdminDirect(dbURL) // ensure the e2e admin exists (idempotent)
 
 	// Login
 	token := login(t, "e2e@console.test", "e2e-Passw0rd!")

@@ -4,16 +4,26 @@ A self-hosted, production-grade web console for issuing, monitoring, and revokin
 
 ## Features
 
-- **Multi-admin support** with role-based access control (super_admin, admin, auditor)
-- **Mandatory 2FA** for all admin accounts
-- **Peer management** - create, suspend, resume, and remove WireGuard peers
-- **User management** - invite users and manage their VPN access
-- **Server management** - configure and monitor WireGuard servers
-- **Traffic statistics** - monitor bandwidth usage per peer and user
-- **Audit logging** - immutable log of all admin actions
-- **Domain blocking** - global and per-user DNS filtering via AdGuard Home
-- **Self-service onboarding** - users can claim their own peer via invite link
-- **Backup & restore** - one-click database backups via the admin API
+- **Two account types, clearly separated**: *Admins* (console operators —
+  super_admin / admin / auditor, invited with emailed credentials) and
+  *VPN Users* (people who receive tunnel access via a self-service claim link)
+- **Mandatory 2FA** for all admin accounts (enroll/disable from Profile)
+- **Peer management** — create, suspend, resume, remove; each peer shows its
+  owning VPN user; optional e-mail of the ready `wg-quick` config
+- **Profile page** — change password, manage 2FA, see your role
+- **Distributed nodes** — one console manages many machines across regions
+  (each node runs wg-helper in agent mode; setup is a one-liner)
+- **Domain blocking** — global and per-user DNS filtering via AdGuard Home,
+  with an editable branded block page (Caddy catch-all)
+- **Email templates** — editable invite / peer-config / admin-invite emails
+  (CMS in Configuration), sent when SMTP is configured
+- **Traffic usage reports** — per peer or per VPN user within any date range,
+  with CSV export (Statistics → Usage report)
+- **Filters everywhere** — status tabs + search on VPN Users and Admins
+- **Audit logging** — immutable log of all admin actions
+- **Backup & restore** — one-click database backups via the admin API
+- **Automated tests** — backend unit + real E2E against Postgres 18,
+  frontend component tests, CI workflow (`scripts/test.sh`)
 
 ## Tech Stack
 
@@ -47,12 +57,17 @@ curl -fsSL https://raw.githubusercontent.com/garyhooi/wireguard-console/<COMMIT_
 ```
 
 The installer will:
-1. Install Docker and WireGuard tools
+1. Install Docker + Compose and WireGuard tools
 2. Free port 53 from systemd-resolved (needed by the DNS filter) and enable IP forwarding
 3. Clone the repository to `/opt/wireguard-console`
 4. Generate secure secrets and prompt for your domain or public IP (`CONSOLE_DOMAIN=vpn.example.com bash install.sh` runs non-interactively)
 5. Open the firewall (80/tcp, 443/tcp, 51820/udp) if ufw is active
-6. Build and start all services — re-run the script any time to update
+6. Build and start all services, **provision AdGuard Home** (write its config:
+   matching admin password, DNS bound to the tunnel gateway, blocked domains
+   resolving to the branded block page)
+7. **Auto-create the first `super_admin`** on a fresh database — the one-time
+   password is printed to the api container logs
+8. Re-run the script any time to update (existing admins/data are kept)
 
 ### Deploying without a domain (public IP only)
 
@@ -72,6 +87,26 @@ agent installs itself (Docker + wg-helper), polls the console, applies WireGuard
 interfaces locally and reports stats back — no inbound ports or SSH needed.
 Then create servers with **Managed by: [node]** and everything happens
 automatically on that node.
+
+### Domain blocking & the block page
+
+DNS filtering runs through the built-in **AdGuard Home** and is set up
+automatically by the installer. Peers use the tunnel gateway
+(`DNS = 10.8.0.1`) as their resolver, so every lookup passes the filter:
+
+- Add rules under **Security → Domain Rules** (`google.com` — global, or per
+  VPN user). The console pushes them to AdGuard automatically.
+- Blocked domains resolve to `10.8.0.1`, where Caddy serves the branded
+  **"Access blocked — VPN policy"** page over HTTP.
+- Re-run `sudo bash configure-adguard.sh` any time to re-provision AdGuard
+  (it writes `AdGuardHome.yaml` directly into the config volume — never
+  depends on the interactive first-run wizard). `--diag` prints the current
+  state for troubleshooting.
+
+**Note:** browsers force HTTPS on most sites, so `https://blocked.example`
+shows a connection error rather than the page — the DNS block still stops the
+connection (that is the protection). The branded page renders for HTTP
+requests and can be customized by editing `frontend/public/blocked.html`.
 
 ### Manual Setup
 
@@ -97,31 +132,23 @@ automatically on that node.
 4. **Access the console**
    Navigate to `https://YOUR_DOMAIN`.
 
-## Create the first admin account (required)
+## First admin account (auto-created)
 
-There are **no default credentials**, and the first-run setup wizard is not implemented yet — the first `super_admin` must be created manually with `gen-password` (a small Go tool in the repo), which prints the exact SQL to insert into the database:
-
-```bash
-# From a machine with Go installed (or any dev machine with the repo):
-cd backend
-go run ./cmd/gen-password 'YourPassw0rd!'
-
-# No local Go? Run it in a throwaway container on the server instead:
-docker run --rm -v /opt/wireguard-console/backend:/app -w /app golang:1.27 go run ./cmd/gen-password 'YourPassw0rd!'
-```
-
-The tool prints an email, the hash and a ready-to-use SQL line. Run that SQL against the database:
+On a **fresh** install the API bootstraps the first `super_admin` automatically — no manual SQL. Find its one-time credentials:
 
 ```bash
-# On the server (replace <SQL> with the printed INSERT statement, or set the
-# email/hash explicitly):
-docker exec wireguard-console-postgres-1 \
-  psql -U wgconsole -d wgconsole -c "<INSERT ...>"
+docker logs wireguard-console-api-1 | grep -A1 'Email:\|Password:'
 ```
 
-Expect `INSERT 0 1`. Then log in at `https://YOUR_DOMAIN` with the email/password you chose — **2FA enrollment is mandatory** on first login (keep the backup codes).
+Log in at `https://YOUR_DOMAIN`, change the password in **Profile**, and enroll 2FA immediately (mandatory; keep the backup codes).
 
-Note: passwords must be at least 12 chars and contain upper/lowercase, a digit and a special character (enforced when the console validates passwords later).
+Prefer fixed credentials? Set them before the first boot (they are used only when no admin exists yet):
+
+```bash
+ADMIN_EMAIL=ops@company.com ADMIN_PASSWORD='Str0ngPassw0rd!' bash install.sh
+```
+
+Passwords must be ≥ 12 chars with upper/lowercase, a digit and a special character. To add more operators afterwards, use **System → Admins → Invite Admin** (they receive emailed temporary credentials) — and manage VPN users under **Directory → VPN Users**.
 
 ## Upgrading
 
@@ -137,8 +164,9 @@ curl -fsSL https://raw.githubusercontent.com/garyhooi/wireguard-console/main/ins
 
 ```
 wireguard-console/
-├── install.sh         # One-command Ubuntu installer
-├── docker-compose.yml # Full hosting stack (Caddy, API, wg-helper, Postgres, AdGuard)
+├── install.sh         # One-command Ubuntu installer (auto: AGH + first admin)
+├── configure-adguard.sh  # (Re)provision AdGuard Home deterministically
+├── docker-compose.yml # Full stack (Caddy+SPA, API, wg-helper, Postgres 18, AdGuard, block page)
 ├── .env.example       # Environment template
 ├── backend/           # Go API server
 │   ├── cmd/api/       # Main entry point (runs migrations on boot)
@@ -146,19 +174,26 @@ wireguard-console/
 │   │   ├── api/       # HTTP handlers
 │   │   ├── auth/      # Authentication
 │   │   ├── db/        # Database models and queries
-│   │   └── wg/        # WireGuard integration
-│   ├── migrations/    # SQL migrations
+│   │   ├── email/     # Mail queue + worker
+│   │   ├── adguard/   # AdGuard Home /control API client
+│   │   └── worker/    # Traffic sampler, rollup, mail worker
+│   ├── cmd/api/       # API entrypoint (migrations + admin bootstrap)
+│   ├── cmd/aghenc/    # bcrypt helper for the AdGuard config
+│   ├── migrations/    # SQL migrations (001-008)
+│   ├── e2e/           # End-to-end tests (boot the real API + Postgres)
 │   └── Dockerfile
 ├── frontend/          # React SPA (served by Caddy + TLS in one container)
 │   ├── src/
 │   │   ├── routes/    # TanStack Router pages
-│   │   ├── lib/       # Utilities and API client
-│   │   └── components/ # Reusable UI components
+│   │   ├── lib/       # Utilities + UI primitives (ui.tsx)
+│   │   └── styles/    # Design tokens (Geist, dark ops theme)
 │   └── Dockerfile
 ├── wg-helper/         # WireGuard kernel interface helper (CAP_NET_ADMIN only)
-│   ├── cmd/wg-helper/
+│   ├── cmd/wg-helper/ # Local socket OR distributed-node agent mode
 │   ├── internal/
 │   └── Dockerfile
+├── scripts/test.sh    # Run the full test suite locally
+├── .github/workflows/ci.yml  # Backend unit + E2E, frontend, shell checks
 └── plan/              # Architecture documentation (build guide)
 ```
 
@@ -168,6 +203,8 @@ wireguard-console/
 
 ```bash
 cd backend
+# Requires DATABASE_URL, WG_HELPER_SOCKET, APP_ENCRYPTION_KEY,
+# SESSION_SIGNING_KEY and a reachable Postgres — see docker-compose.yml.
 go run ./cmd/api
 ```
 
@@ -185,6 +222,23 @@ bun run dev
 cd wg-helper
 go run ./cmd/wg-helper
 ```
+
+## Testing
+
+`scripts/test.sh` runs the whole suite locally — backend unit tests, a real
+**E2E suite** (boots the API binary against a throwaway PostgreSQL 18, then
+walks the contracts: login, server/peer provisioning, config download, SMTP,
+claims, admin/user lifecycle, traffic usage, node agent), frontend component
+tests, and a production build:
+
+```bash
+scripts/test.sh          # uses docker (or Apple container) Postgres
+```
+
+CI (`.github/workflows/ci.yml`) runs the same four jobs on every push:
+backend unit+vet, backend E2E against a `postgres:18` service, frontend
+tests + build, and installer-script syntax checks. (Pushing the workflow
+file requires a GitHub token with the `workflow` scope.)
 
 ## Security
 

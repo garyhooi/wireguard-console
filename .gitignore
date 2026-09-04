@@ -34,3 +34,7 @@ docker-compose.override.yml
 *.log
 # CI workflow requires a token with the workflow scope to push; add it manually
 .github/workflows/
+
+# built binaries
+backend/aghenc
+backend/aghenc.exe

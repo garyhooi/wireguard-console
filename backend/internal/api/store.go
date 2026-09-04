@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -77,6 +78,58 @@ func subtleConstantTimeCompare(a, b []byte) bool {
 		v |= a[i] ^ b[i]
 	}
 	return v == 0
+}
+
+// BootstrapAdmin creates the first super_admin on a fresh database.
+// Called once at startup after migrations. If no admin exists at all, it
+// inserts one with the credentials from env (ADMIN_EMAIL/ADMIN_PASSWORD)
+// or a randomly generated password when unset (printed to logs once).
+// Idempotent: never touches an existing admin set.
+func BootstrapAdmin(pool *pgxpool.Pool, logf func(format string, a ...interface{})) error {
+	ctx := context.Background()
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM admins`).Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil // admins already exist — never reseed
+	}
+
+	email := os.Getenv("ADMIN_EMAIL")
+	password := os.Getenv("ADMIN_PASSWORD")
+	if email == "" {
+		email = "admin@company.com"
+	}
+	generated := false
+	if password == "" {
+		password = randomPassword(16)
+		generated = true
+	}
+	if len(password) < 12 {
+		password = password + randomPassword(12) // meet the strength rule
+	}
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO admins (email, password_hash, role, status)
+		VALUES ($1, $2, 'super_admin', 'active')
+	`, email, hashPassword(password)); err != nil {
+		return err
+	}
+
+	if logf != nil {
+		if generated {
+			logf("==================================================================")
+			logf(" First admin auto-created (fresh install).")
+			logf("   Email:    %s", email)
+			logf("   Password: %s", password)
+			logf("   Change it in Profile after login, and enroll 2FA.")
+			logf("   (Set ADMIN_EMAIL / ADMIN_PASSWORD to pre-choose credentials.)")
+			logf("==================================================================")
+		} else {
+			logf("First admin auto-created from env: %s (password from ADMIN_PASSWORD)", email)
+		}
+	}
+	return nil
 }
 
 func hashToken(token string) string {
