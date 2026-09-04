@@ -37,31 +37,73 @@ AGH_CONTAINER="$(docker ps -q -f name=adguardhome | head -1)"
 [[ -n "$AGH_CONTAINER" ]] || error "AdGuard Home container is not running. Run 'docker compose up -d' first."
 
 # ---- Optional hard reset: wipe AGH config and start fresh ----
+if [[ "${1:-}" == "--diag" ]]; then
+  echo "== port 80 listeners =="
+  (ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null) | grep -E ':80 ' || echo "nothing on :80"
+  echo "== docker containers =="
+  docker ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Ports}}' | grep -iE 'NAMES|console|adguard|blockpage|80' || true
+  echo "== adguard volumes =="
+  docker volume ls -q | grep -iE 'adguard|agh' || true
+  echo "== AGH endpoints =="
+  for ep in install/configure control/status; do
+    code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:3000/$ep" || true)"
+    echo "  /$ep -> HTTP $code"
+  done
+  exit 0
+fi
+
 if [[ "${RESET}" == "--reset" ]]; then
+  info "Removing any stale console/blockpage containers holding port 80..."
+  docker ps -a --format '{{.Names}}' | grep -E 'blockpage|console' | while read -r c; do
+    docker rm -f "$c" >/dev/null 2>&1 || true
+  done
+
   info "Wiping AdGuard Home config volume (user rules, filters, settings)..."
   (cd "$COMPOSE_DIR" && docker compose stop adguardhome >/dev/null 2>&1 || true)
-  docker rm -f "$AGH_CONTAINER" >/dev/null 2>&1 || true
-  VOL="$(docker volume ls -q | grep -iE 'adguard|agh' | grep -i conf | head -1)"
-  [[ -n "$VOL" ]] && docker volume rm "$VOL" >/dev/null 2>&1 || true
-  (cd "$COMPOSE_DIR" && docker compose up -d adguardhome >/dev/null 2>&1)
+  # Remove EVERY AdGuard container + conf volume regardless of name.
+  docker ps -a --format '{{.Names}} {{.Image}}' | grep -i adguard | awk '{print $1}' | while read -r c; do
+    docker rm -f "$c" >/dev/null 2>&1 || true
+  done
+  docker volume ls -q | grep -iE 'adguard|agh' | while read -r v; do
+    docker volume rm "$v" >/dev/null 2>&1 || true
+  done
+
+  # Remove orphaned containers (blockpage etc.) not in the current compose.
+  (cd "$COMPOSE_DIR" && docker compose up -d --remove-orphans >/dev/null 2>&1 || true)
   info "AdGuard restarted fresh. Waiting for the wizard to come up..."
-  sleep 8
+  for i in $(seq 1 15); do
+    code="$(curl -s -o /dev/null -w '%{http_code}' "$AGH_URL/install/configure" 2>/dev/null || true)"
+    # Wizard endpoint returns 200/405 while active; 404/302 after config.
+    if [[ "$code" == "200" || "$code" == "405" || "$code" == "404" ]]; then
+      break
+    fi
+    sleep 2
+  done
+  sleep 3
 fi
 
 # ---- Step 1: is AdGuard in wizard mode (install endpoints live)? ----
 WIZARD_CODE="$(curl -s -o /dev/null -w '%{http_code}' "$AGH_URL/install/configure" || true)"
-if [[ "$WIZARD_CODE" == "200" || "$WIZARD_CODE" == "405" ]]; then
-  info "AdGuard is in first-run mode — applying initial setup..."
-  GATEWAY="10.8.0.1"
-  PAYLOAD="{\"web\":{\"ip\":\"0.0.0.0\",\"port\":3000,\"username\":\"$ADGUARD_API_USER\",\"password\":\"$ADGUARD_API_PASSWORD\"},\"dns\":{\"ip\":\"0.0.0.0\",\"port\":53,\"upstream_dns\":[\"https://dns10.quad9.net/dns-query\",\"1.1.1.1\"],\"bind_hosts\":[\"0.0.0.0\",\"$GATEWAY\"]}}"
-  curl -s "$AGH_URL/install/configure" -H 'Content-Type: application/json' -d "$PAYLOAD" \
-    >/dev/null || error "install/configure failed."
-  info "AdGuard initial setup applied. Restarting..."
-  docker restart "$AGH_CONTAINER" >/dev/null 2>&1 || true
-  sleep 6
-else
-  info "AdGuard is already configured (install wizard inactive)."
-fi
+# 200/405 = wizard active; 404 = endpoints gone (already configured).
+case "$WIZARD_CODE" in
+  200|405)
+    info "AdGuard is in first-run mode — applying initial setup..."
+    GATEWAY="10.8.0.1"
+    PAYLOAD="{\"web\":{\"ip\":\"0.0.0.0\",\"port\":3000,\"username\":\"$ADGUARD_API_USER\",\"password\":\"$ADGUARD_API_PASSWORD\"},\"dns\":{\"ip\":\"0.0.0.0\",\"port\":53,\"upstream_dns\":[\"https://dns10.quad9.net/dns-query\",\"1.1.1.1\"],\"bind_hosts\":[\"0.0.0.0\",\"$GATEWAY\"]}}"
+    curl -s "$AGH_URL/install/configure" -H 'Content-Type: application/json' -d "$PAYLOAD" >/dev/null \
+      || error "install/configure failed."
+    info "AdGuard initial setup applied. Restarting..."
+    docker restart "$AGH_CONTAINER" >/dev/null 2>&1 || true
+    sleep 6
+    ;;
+  404)
+    info "AdGuard is already configured (install wizard inactive)."
+    ;;
+  *)
+    info "AdGuard did not answer the wizard probe (HTTP $WIZARD_CODE). If --reset was"
+    info "just run, the wipe may have failed — see the diagnostics above."
+    ;;
+esac
 
 AUTH="$ADGUARD_API_USER:$ADGUARD_API_PASSWORD"
 
