@@ -119,7 +119,7 @@ func ListAuditLogs(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := context.Background()
 
-		var logs []db.AuditLog
+		logs := []db.AuditLog{}
 		rows, err := store.pool.Query(ctx, `
 			SELECT id, actor_admin_id, action, target_type, target_id, metadata, ip_address, created_at
 			FROM audit_logs

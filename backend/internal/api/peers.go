@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/wireguard-console/backend/internal/auth"
 	"github.com/wireguard-console/backend/internal/db"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
@@ -63,7 +66,7 @@ func ListPeers(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := context.Background()
 
-		var peers []db.Peer
+		peers := []db.Peer{}
 		rows, err := store.pool.Query(ctx, `
 			SELECT p.id, p.user_id, p.server_id, p.name, p.public_key, host(p.allowed_ip), 
 			       p.status, p.last_handshake_at, p.created_at, p.suspended_at, p.removed_at
@@ -123,11 +126,12 @@ func GetPeer(store *Store) http.HandlerFunc {
 func CreatePeer(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID    uuid.UUID `json:"user_id"`
-			ServerID  uuid.UUID `json:"server_id"`
-			Name      string    `json:"name"`
-			PublicKey string    `json:"public_key"`
-			AllowedIP string    `json:"allowed_ip"`
+			UserID        uuid.UUID `json:"user_id"`
+			ServerID      uuid.UUID `json:"server_id"`
+			Name          string    `json:"name"`
+			PublicKey     string    `json:"public_key"`
+			AllowedIP     string    `json:"allowed_ip"`
+			PrivateKeyEnc string    `json:"private_key_enc"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
@@ -151,6 +155,21 @@ func CreatePeer(store *Store) http.HandlerFunc {
 				return
 			}
 			req.PublicKey = k.PublicKey().String()
+
+			// Keep the private key (encrypted) so the admin can download a
+			// working client config / QR for this peer later. Peers created
+			// with an externally supplied key have no private key stored.
+			encSvc, err := auth.NewEncryptionService()
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "Encryption is not configured")
+				return
+			}
+			encPriv, err := encSvc.Encrypt(k.String())
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to encrypt peer key")
+				return
+			}
+			req.PrivateKeyEnc = encPriv
 		}
 		if req.AllowedIP == "" {
 			ip, err := nextAvailableIP(ctx, store.pool, req.ServerID.String())
@@ -162,9 +181,9 @@ func CreatePeer(store *Store) http.HandlerFunc {
 		}
 
 		_, err := store.pool.Exec(ctx, `
-			INSERT INTO peers (user_id, server_id, name, public_key, allowed_ip, preshared_key_encrypted, status)
-			VALUES ($1, $2, $3, $4, $5, '', 'active')
-		`, req.UserID, req.ServerID, req.Name, req.PublicKey, req.AllowedIP)
+			INSERT INTO peers (user_id, server_id, name, public_key, allowed_ip, preshared_key_encrypted, private_key_encrypted, status)
+			VALUES ($1, $2, $3, $4, $5, '', $6, 'active')
+		`, req.UserID, req.ServerID, req.Name, req.PublicKey, req.AllowedIP, req.PrivateKeyEnc)
 
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to create peer")
@@ -201,7 +220,7 @@ func UpdatePeer(store *Store) http.HandlerFunc {
 		adminID := getAdminID(r)
 
 		_, err = store.pool.Exec(ctx, `
-			UPDATE peers SET name = $1, updated_at = now() WHERE id = $2
+			UPDATE peers SET name = $1 WHERE id = $2
 		`, req.Name, peerID)
 
 		if err != nil {
@@ -338,7 +357,26 @@ func GetPeerConfig(store *Store) http.HandlerFunc {
 			return
 		}
 
-		config := generateWireGuardConfig(&peer, &server)
+		// A downloadable client config needs the peer's private key, which
+		// is only available for peers created here (generated keys). Peers
+		// created with an external key have none stored.
+		var privKeyEnc string
+		if err := store.pool.QueryRow(ctx, `SELECT private_key_encrypted FROM peers WHERE id = $1`, peerID).Scan(&privKeyEnc); err != nil || privKeyEnc == "" {
+			writeError(w, http.StatusConflict, "No private key stored for this peer (it was created with an external key)")
+			return
+		}
+		encSvc, err := auth.NewEncryptionService()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Encryption is not configured")
+			return
+		}
+		privKey, err := encSvc.Decrypt(privKeyEnc)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to decrypt peer private key")
+			return
+		}
+
+		config := generateWireGuardConfig(&peer, &server, privKey)
 
 		w.Header().Set("Content-Type", "text/plain")
 		w.Header().Set("Content-Disposition", "attachment; filename="+peer.Name+".conf")
@@ -346,17 +384,19 @@ func GetPeerConfig(store *Store) http.HandlerFunc {
 	}
 }
 
-func generateWireGuardConfig(peer *db.Peer, server *db.Server) string {
+func generateWireGuardConfig(peer *db.Peer, server *db.Server, privateKey string) string {
+	dns := strings.Join(server.DNSServers, ", ")
+
 	config := `[Interface]
-PrivateKey = [REDACTED]
-Address = ` + peer.AllowedIP + `
+PrivateKey = ` + privateKey + `
+Address = ` + peer.AllowedIP + `/32
+DNS = ` + dns + `
 
 [Peer]
 PublicKey = ` + server.ServerPublicKey + `
-PresharedKey = [REDACTED]
 Endpoint = ` + server.PublicEndpoint + `
 AllowedIPs = ` + server.DefaultAllowedIPs + `
-PersistentKeepalive = ` + string(rune(server.PersistentKeepalive+'0'))
-
+PersistentKeepalive = ` + strconv.Itoa(server.PersistentKeepalive) + `
+`
 	return config
 }

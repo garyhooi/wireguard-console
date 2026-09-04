@@ -15,7 +15,7 @@ func ListServers(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := context.Background()
 
-		var servers []db.Server
+		servers := []db.Server{}
 		rows, err := store.pool.Query(ctx, `
 			SELECT id, name, public_endpoint, listen_port, interface_name, server_public_key,
 			       network_cidr::text, dns_servers, default_allowed_ips, mtu, persistent_keepalive, status, created_at
@@ -220,11 +220,23 @@ func DeleteServer(store *Store) http.HandlerFunc {
 		ctx := context.Background()
 		adminID := getAdminID(r)
 
-		_, err = store.pool.Exec(ctx, `
-			UPDATE servers SET status = 'disabled' WHERE id = $1
-		`, serverID)
-
+		// Remove the server and everything attached to it (peers).
+		tx, err := store.pool.Begin(ctx)
 		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to delete server")
+			return
+		}
+		defer tx.Rollback(ctx)
+
+		if _, err := tx.Exec(ctx, `DELETE FROM peers WHERE server_id = $1`, serverID); err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to delete server peers")
+			return
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM servers WHERE id = $1`, serverID); err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to delete server")
+			return
+		}
+		if err := tx.Commit(ctx); err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to delete server")
 			return
 		}

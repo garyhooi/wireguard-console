@@ -1,6 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
+import QRCode from 'qrcode'
 
 interface Peer {
   id: string
@@ -29,18 +30,20 @@ export const Route = createFileRoute('/_authenticated/peers')({
   component: PeersPage,
 })
 
+const auth = { Authorization: localStorage.getItem('token')! }
+
 function PeersPage() {
   const queryClient = useQueryClient()
   const [showAdd, setShowAdd] = useState(false)
+  const [editing, setEditing] = useState<Peer | null>(null)
   const [error, setError] = useState('')
+  const [qr, setQr] = useState<{ name: string; dataUrl: string } | null>(null)
   const [form, setForm] = useState({ name: '', server_id: '', user_id: '' })
 
   const { data: peers, isLoading } = useQuery<Peer[]>({
     queryKey: ['peers'],
     queryFn: async () => {
-      const res = await fetch('/api/peers', {
-        headers: { Authorization: localStorage.getItem('token')! },
-      })
+      const res = await fetch('/api/peers', { headers: auth })
       if (!res.ok) throw new Error('Failed to fetch peers')
       return res.json()
     },
@@ -50,9 +53,7 @@ function PeersPage() {
   const { data: servers } = useQuery<Server[]>({
     queryKey: ['servers'],
     queryFn: async () => {
-      const res = await fetch('/api/servers', {
-        headers: { Authorization: localStorage.getItem('token')! },
-      })
+      const res = await fetch('/api/servers', { headers: auth })
       if (!res.ok) throw new Error('Failed to fetch servers')
       return res.json()
     },
@@ -61,9 +62,7 @@ function PeersPage() {
   const { data: users } = useQuery<User[]>({
     queryKey: ['users'],
     queryFn: async () => {
-      const res = await fetch('/api/users', {
-        headers: { Authorization: localStorage.getItem('token')! },
-      })
+      const res = await fetch('/api/users', { headers: auth })
       if (!res.ok) throw new Error('Failed to fetch users')
       return res.json()
     },
@@ -73,10 +72,7 @@ function PeersPage() {
     mutationFn: async () => {
       const res = await fetch('/api/peers', {
         method: 'POST',
-        headers: {
-          Authorization: localStorage.getItem('token')!,
-          'Content-Type': 'application/json',
-        },
+        headers: { ...auth, 'Content-Type': 'application/json' },
         body: JSON.stringify(form),
       })
       if (!res.ok) throw new Error('Failed to create peer')
@@ -87,53 +83,117 @@ function PeersPage() {
       setError('')
       setForm({ name: '', server_id: '', user_id: '' })
       queryClient.invalidateQueries({ queryKey: ['peers'] })
-      if (data?.public_key || data?.allowed_ip) {
-        setError(
-          `Created — peer public key ${(data.public_key || '').substring(0, 12)}…, IP ${data.allowed_ip || ''}`
-        )
-      }
+      if (data?.allowed_ip) setError(`Created — peer IP ${data.allowed_ip}`)
     },
     onError: (e: Error) => setError(e.message),
   })
+
+  const updateMutation = useMutation({
+    mutationFn: async () => {
+      if (!editing) return
+      const res = await fetch(`/api/peers/${editing.id}`, {
+        method: 'PATCH',
+        headers: { ...auth, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: form.name }),
+      })
+      if (!res.ok) throw new Error('Failed to update peer')
+      return res.json()
+    },
+    onSuccess: () => {
+      setEditing(null)
+      setError('')
+      queryClient.invalidateQueries({ queryKey: ['peers'] })
+    },
+    onError: (e: Error) => setError(e.message),
+  })
+
+  const removeMutation = useMutation({
+    mutationFn: async (peer: Peer) => {
+      const res = await fetch(`/api/peers/${peer.id}`, {
+        method: 'DELETE',
+        headers: auth,
+      })
+      if (!res.ok) throw new Error('Failed to remove peer')
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['peers'] }),
+    onError: (e: Error) => setError(e.message),
+  })
+
+  const fetchConfigText = async (peer: Peer): Promise<string | null> => {
+    const res = await fetch(`/api/peers/${peer.id}/config`, { headers: auth })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      setError(err.error || 'Failed to get config')
+      return null
+    }
+    return res.text()
+  }
+
+  const downloadConfig = async (peer: Peer) => {
+    const text = await fetchConfigText(peer)
+    if (!text) return
+    const blob = new Blob([text], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${peer.name}.conf`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const showQR = async (peer: Peer) => {
+    const text = await fetchConfigText(peer)
+    if (!text) return
+    const dataUrl = await QRCode.toDataURL(text, { width: 320, margin: 1 })
+    setQr({ name: peer.name, dataUrl })
+  }
 
   if (isLoading) {
     return <div className="text-neutral-400">Loading...</div>
   }
 
+  const activePeers = (peers || []).filter((p) => p.status !== 'removed')
   const noServers = !servers || servers.length === 0
   const noUsers = !users || users.length === 0
+  const modalOpen = showAdd || editing !== null
 
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-white">Peers</h1>
         <button
-          onClick={() => setShowAdd(true)}
+          onClick={() => {
+            setEditing(null)
+            setForm({ name: '', server_id: '', user_id: '' })
+            setShowAdd(true)
+          }}
           className="bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-4 rounded-md"
         >
           Add Peer
         </button>
       </div>
 
-      {showAdd && (
+      {error && <p className="text-red-400 text-sm mb-3">{error}</p>}
+
+      {modalOpen && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-6 max-w-md w-full mx-4">
-            <h2 className="text-xl font-bold text-white mb-1">Add Peer</h2>
+            <h2 className="text-xl font-bold text-white mb-1">{editing ? 'Edit Peer' : 'Add Peer'}</h2>
             <p className="text-sm text-neutral-400 mb-4">
-              A peer is one device (laptop, phone…) for a user on a server. Keys and the tunnel IP
-              are generated automatically.
+              {editing
+                ? 'Rename the device.'
+                : 'A peer is one device (laptop, phone…) for a user on a server. Keys and the tunnel IP are generated automatically.'}
             </p>
-            {(noServers || noUsers) && (
+            {(noServers || noUsers) && !editing && (
               <div className="bg-yellow-900/40 border border-yellow-700 text-yellow-200 text-sm rounded-md p-3 mb-4">
                 {noServers && <p>Create a server first (Servers → Add Server).</p>}
                 {noUsers && <p>Create a user first (Users → Invite User).</p>}
               </div>
             )}
-            {error && <p className="text-red-400 text-sm mb-3">{error}</p>}
             <form
               onSubmit={(e) => {
                 e.preventDefault()
-                createMutation.mutate()
+                editing ? updateMutation.mutate() : createMutation.mutate()
               }}
               className="space-y-4"
             >
@@ -150,65 +210,92 @@ function PeersPage() {
                   className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
                 />
               </div>
-              <div>
-                <label htmlFor="pServer" className="block text-sm font-medium text-neutral-400 mb-2">
-                  Server
-                </label>
-                <select
-                  id="pServer"
-                  required
-                  value={form.server_id}
-                  onChange={(e) => setForm((f) => ({ ...f, server_id: e.target.value }))}
-                  className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
-                >
-                  <option value="" disabled>
-                    {noServers ? 'No servers — create one first' : 'Select a server…'}
-                  </option>
-                  {servers?.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label htmlFor="pUser" className="block text-sm font-medium text-neutral-400 mb-2">
-                  User
-                </label>
-                <select
-                  id="pUser"
-                  required
-                  value={form.user_id}
-                  onChange={(e) => setForm((f) => ({ ...f, user_id: e.target.value }))}
-                  className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
-                >
-                  <option value="" disabled>
-                    {noUsers ? 'No users — invite one first' : 'Select a user…'}
-                  </option>
-                  {users?.map((u) => (
-                    <option key={u.id} value={u.id}>
-                      {u.full_name || u.email}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              {!editing && (
+                <>
+                  <div>
+                    <label htmlFor="pServer" className="block text-sm font-medium text-neutral-400 mb-2">
+                      Server
+                    </label>
+                    <select
+                      id="pServer"
+                      required
+                      value={form.server_id}
+                      onChange={(e) => setForm((f) => ({ ...f, server_id: e.target.value }))}
+                      className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
+                    >
+                      <option value="" disabled>
+                        {noServers ? 'No servers — create one first' : 'Select a server…'}
+                      </option>
+                      {servers?.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label htmlFor="pUser" className="block text-sm font-medium text-neutral-400 mb-2">
+                      User
+                    </label>
+                    <select
+                      id="pUser"
+                      required
+                      value={form.user_id}
+                      onChange={(e) => setForm((f) => ({ ...f, user_id: e.target.value }))}
+                      className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
+                    >
+                      <option value="" disabled>
+                        {noUsers ? 'No users — invite one first' : 'Select a user…'}
+                      </option>
+                      {users?.map((u) => (
+                        <option key={u.id} value={u.id}>
+                          {u.full_name || u.email}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </>
+              )}
               <div className="flex space-x-3">
                 <button
                   type="submit"
-                  disabled={createMutation.isPending || noServers || noUsers}
+                  disabled={
+                    createMutation.isPending || updateMutation.isPending || (!editing && (noServers || noUsers))
+                  }
                   className="bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-4 rounded-md disabled:opacity-50"
                 >
-                  {createMutation.isPending ? 'Creating...' : 'Create Peer'}
+                  {createMutation.isPending || updateMutation.isPending ? 'Saving…' : editing ? 'Save' : 'Create Peer'}
                 </button>
                 <button
                   type="button"
-                  onClick={() => setShowAdd(false)}
+                  onClick={() => {
+                    setShowAdd(false)
+                    setEditing(null)
+                  }}
                   className="bg-neutral-700 hover:bg-neutral-600 text-white font-medium py-2 px-4 rounded-md"
                 >
                   Cancel
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {qr && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-6 text-center">
+            <h2 className="text-lg font-bold text-white mb-4">{qr.name}</h2>
+            <img src={qr.dataUrl} alt={`${qr.name} config QR`} className="mx-auto rounded-md" />
+            <p className="text-sm text-neutral-400 mt-4 mb-4">
+              Scan in the WireGuard app (import from QR code)
+            </p>
+            <button
+              onClick={() => setQr(null)}
+              className="bg-neutral-700 hover:bg-neutral-600 text-white font-medium py-2 px-6 rounded-md"
+            >
+              Close
+            </button>
           </div>
         </div>
       )}
@@ -232,10 +319,13 @@ function PeersPage() {
               <th className="px-6 py-3 text-left text-xs font-medium text-neutral-400 uppercase tracking-wider">
                 Last Handshake
               </th>
+              <th className="px-6 py-3 text-right text-xs font-medium text-neutral-400 uppercase tracking-wider">
+                Actions
+              </th>
             </tr>
           </thead>
           <tbody className="bg-neutral-900 divide-y divide-neutral-800">
-            {peers?.map((peer) => (
+            {activePeers.map((peer) => (
               <tr key={peer.id}>
                 <td className="px-6 py-4 whitespace-nowrap text-sm text-white">{peer.name}</td>
                 <td className="px-6 py-4 whitespace-nowrap text-sm text-neutral-400 font-mono">
@@ -261,6 +351,37 @@ function PeersPage() {
                   {peer.last_handshake_at
                     ? new Date(peer.last_handshake_at).toLocaleString()
                     : 'Never'}
+                </td>
+                <td className="px-6 py-4 whitespace-nowrap text-right text-sm">
+                  <div className="flex justify-end gap-2">
+                    <button
+                      onClick={() => {
+                        setEditing(peer)
+                        setForm({ name: peer.name, server_id: peer.server_id, user_id: peer.user_id })
+                        setShowAdd(false)
+                      }}
+                      className="text-teal-400 hover:text-teal-300"
+                    >
+                      Edit
+                    </button>
+                    <button
+                      onClick={() => downloadConfig(peer)}
+                      className="text-blue-400 hover:text-blue-300"
+                    >
+                      Config
+                    </button>
+                    <button onClick={() => showQR(peer)} className="text-purple-400 hover:text-purple-300">
+                      QR
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (confirm(`Remove peer "${peer.name}"?`)) removeMutation.mutate(peer)
+                      }}
+                      className="text-red-400 hover:text-red-300"
+                    >
+                      Remove
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}

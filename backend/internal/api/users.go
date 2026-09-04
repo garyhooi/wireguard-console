@@ -17,7 +17,7 @@ func ListUsers(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := context.Background()
 
-		var users []db.User
+		users := []db.User{}
 		rows, err := store.pool.Query(ctx, `
 			SELECT id, email, full_name, status, invited_by, invited_at, activated_at, created_at, updated_at
 			FROM users
