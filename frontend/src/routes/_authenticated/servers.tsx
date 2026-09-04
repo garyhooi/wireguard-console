@@ -46,7 +46,6 @@ const emptyForm = {
   name: '',
   public_endpoint: '',
   interface_name: 'wg0',
-  listen_port: '51820',
   network_cidr: '10.8.0.0/24',
   dns_servers: '', // empty = backend default (tunnel gateway/AdGuard)
   default_allowed_ips: '0.0.0.0/0, ::/0',
@@ -54,6 +53,13 @@ const emptyForm = {
   persistent_keepalive: '25',
   managed_mode: 'local',
   node_id: '',
+}
+
+// The WireGuard listen port is the port the host interface binds, taken
+// from the public endpoint (host:port) — one port, not two.
+function listenPortFromEndpoint(endpoint: string): string {
+  const match = endpoint.trim().match(/:(\d+)$/)
+  return match ? match[1] : '51820'
 }
 
 function ServersPage() {
@@ -89,7 +95,7 @@ function ServersPage() {
         name: form.name,
         public_endpoint: form.public_endpoint,
         interface_name: form.interface_name,
-        listen_port: Number(form.listen_port),
+        listen_port: Number(listenPortFromEndpoint(form.public_endpoint)),
         network_cidr: form.network_cidr,
         dns_servers: form.dns_servers.split(',').map((s) => s.trim()).filter(Boolean),
         default_allowed_ips: form.default_allowed_ips,
@@ -137,7 +143,6 @@ function ServersPage() {
       name: server.name,
       public_endpoint: server.public_endpoint,
       interface_name: server.interface_name,
-      listen_port: String(server.listen_port),
       network_cidr: server.network_cidr,
       dns_servers: (server.dns_servers || []).join(', '),
       default_allowed_ips: server.default_allowed_ips,
@@ -296,29 +301,21 @@ function ServersPage() {
               </p>
             )}
           </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label htmlFor="sIface" className={labelCls}>
-                Interface name
-              </label>
-              <input
-                id="sIface"
-                value={form.interface_name}
-                onChange={set('interface_name')}
-                className={inputCls}
-              />
-            </div>
-            <div>
-              <label htmlFor="sPort" className={labelCls}>
-                Listen port
-              </label>
-              <input
-                id="sPort"
-                value={form.listen_port}
-                onChange={set('listen_port')}
-                className={inputCls}
-              />
-            </div>
+          <div>
+            <label htmlFor="sIface" className={labelCls}>
+              Interface name
+            </label>
+            <input
+              id="sIface"
+              value={form.interface_name}
+              onChange={set('interface_name')}
+              className={inputCls}
+            />
+            <p className="text-xs text-zinc-500 mt-2">
+              The WireGuard listen port follows the public endpoint above — e.g.{' '}
+              <code className="text-zinc-400">vpn.example.com:51820</code> listens on{' '}
+              <code className="text-zinc-400">51820</code>.
+            </p>
           </div>
           <div>
             <label htmlFor="sCidr" className={labelCls}>
