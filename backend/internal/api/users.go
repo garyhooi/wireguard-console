@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/wireguard-console/backend/internal/db"
 	"github.com/wireguard-console/backend/internal/email"
 )
@@ -206,6 +207,9 @@ func DeleteUser(store *Store) http.HandlerFunc {
 		}
 
 		logAudit(ctx, store, adminID, "user.delete", "user", userID.String(), nil)
+
+		resyncServersOfUser(ctx, store, userID)
+
 		writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
 	}
 }
@@ -253,6 +257,9 @@ func SuspendUser(store *Store) http.HandlerFunc {
 
 		logAudit(ctx, store, adminID, "user.suspend", "user", userID.String(), nil)
 
+		// Drop the user's peers from the kernel interfaces immediately.
+		resyncServersOfUser(ctx, store, userID)
+
 		writeJSON(w, http.StatusOK, map[string]string{"status": "suspended"})
 	}
 }
@@ -299,6 +306,28 @@ func ResumeUser(store *Store) http.HandlerFunc {
 
 		logAudit(ctx, store, adminID, "user.resume", "user", userID.String(), nil)
 
+		// Re-add the user's peers to the kernel interfaces.
+		resyncServersOfUser(ctx, store, userID)
+
 		writeJSON(w, http.StatusOK, map[string]string{"status": "resumed"})
+	}
+}
+
+// resyncServersOfUser pushes every server the user has peers on to
+// wg-helper, so peer status changes (suspend/resume/remove) take effect
+// on the kernel interfaces immediately.
+func resyncServersOfUser(ctx context.Context, store *Store, userID uuid.UUID) {
+	rows, err := store.pool.Query(ctx, `
+		SELECT DISTINCT server_id FROM peers WHERE user_id = $1
+	`, userID)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var serverID uuid.UUID
+		if err := rows.Scan(&serverID); err == nil {
+			syncServerLogged(ctx, store.pool, serverID)
+		}
 	}
 }
