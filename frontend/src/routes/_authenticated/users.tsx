@@ -23,6 +23,8 @@ function UsersPage() {
   const [inviteEmail, setInviteEmail] = useState('')
   const [inviteName, setInviteName] = useState('')
   const [inviteLink, setInviteLink] = useState('')
+  const [statusFilter, setStatusFilter] = useState('all')
+  const [search, setSearch] = useState('')
   const [copied, setCopied] = useState(false)
 
   const { data: smtp } = useQuery<{ configured: boolean }>({
@@ -113,9 +115,21 @@ function UsersPage() {
     }
   }
 
+  const filtered = (users || []).filter((u) => {
+    if (statusFilter !== 'all' && u.status !== statusFilter) return false
+    const q = search.trim().toLowerCase()
+    if (!q) return true
+    return (u.email || '').toLowerCase().includes(q) || (u.full_name || '').toLowerCase().includes(q)
+  })
+  const statusCounts = (users || []).reduce<Record<string, number>>((acc, u) => {
+    acc[u.status] = (acc[u.status] || 0) + 1
+    return acc
+  }, {})
+  const TABS = ['all', 'invited', 'active', 'suspended', 'removed']
+
   return (
     <div>
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex items-center justify-between mb-4">
         <h1 className="text-2xl font-bold text-white">VPN Users</h1>
         <button
           onClick={() => setShowInviteModal(true)}
@@ -221,8 +235,41 @@ function UsersPage() {
         </div>
       )}
 
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        <div className="flex rounded-lg border border-neutral-700 overflow-hidden">
+          {TABS.map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setStatusFilter(tab)}
+              className={`px-3 py-1.5 text-xs font-medium transition-colors ${
+                statusFilter === tab
+                  ? 'bg-neutral-700 text-white'
+                  : 'bg-neutral-900 text-neutral-400 hover:text-white'
+              }`}
+            >
+              {tab === 'all' ? 'All' : tab[0].toUpperCase() + tab.slice(1)}
+              <span className="ml-1 text-neutral-500">
+                {tab === 'all' ? users?.length ?? 0 : statusCounts[tab] || 0}
+              </span>
+            </button>
+          ))}
+        </div>
+        <input
+          type="search"
+          placeholder="Search name or email…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="bg-neutral-800 border border-neutral-700 rounded-md px-3 py-1.5 text-sm text-white placeholder:text-neutral-500 focus:outline-none focus:ring-2 focus:ring-teal-500"
+        />
+        <span className="text-xs text-neutral-500">{filtered.length} shown</span>
+      </div>
+
       {isLoading ? (
         <div className="text-neutral-400">Loading...</div>
+      ) : filtered.length === 0 ? (
+        <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-10 text-center text-neutral-500 text-sm">
+          No users match this filter.
+        </div>
       ) : (
         <div className="bg-neutral-900 border border-neutral-800 rounded-lg overflow-hidden">
           <table className="min-w-full divide-y divide-neutral-800">
@@ -246,7 +293,7 @@ function UsersPage() {
               </tr>
             </thead>
             <tbody className="bg-neutral-900 divide-y divide-neutral-800">
-              {users?.map((user) => (
+              {filtered.map((user) => (
                 <tr key={user.id}>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-white">
                     {user.full_name || '-'}

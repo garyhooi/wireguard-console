@@ -39,11 +39,19 @@ export const Route = createFileRoute('/_authenticated/statistics')({
 })
 
 function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B'
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
   const k = 1024
   const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
   const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1)
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
+}
+
+// Recharts v3 can hand the formatter NaN, arrays, or undefined depending on
+// hover state; normalize before formatting so the label never reads
+// "NaN undefined".
+const fmtTooltip = (v: unknown): string => {
+  const n = Array.isArray(v) ? Number(v[0] ?? v[1] ?? 0) : Number(v)
+  return formatBytes(Number.isFinite(n) ? n : 0)
 }
 
 const auth = { Authorization: localStorage.getItem('token')! }
@@ -139,8 +147,8 @@ function StatisticsPage() {
                 <AreaChart data={traffic?.series} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
                   <XAxis dataKey="time" stroke="#71717a" tick={{ fontSize: 11 }} tickLine={false} />
-                  <YAxis stroke="#71717a" tick={{ fontSize: 11 }} tickFormatter={formatBytes} tickLine={false} />
-                  <Tooltip contentStyle={chartTooltipStyle} formatter={(v) => formatBytes(Number(v ?? 0))} />
+                  <YAxis stroke="#71717a" tick={{ fontSize: 11 }} tickFormatter={(v: number) => formatBytes(Number.isFinite(Number(v)) ? Number(v) : 0)} tickLine={false} />
+                  <Tooltip contentStyle={chartTooltipStyle} formatter={fmtTooltip} />
                   <Area type="monotone" dataKey="rx" stroke="#14b8a6" fill="#14b8a6" fillOpacity={0.18} name="Download" strokeWidth={1.5} />
                   <Area type="monotone" dataKey="tx" stroke="#71717a" fill="#71717a" fillOpacity={0.14} name="Upload" strokeWidth={1.5} />
                   <Legend wrapperStyle={{ fontSize: 12 }} />
@@ -172,8 +180,8 @@ function StatisticsPage() {
                     tickLine={false}
                     interval={0}
                   />
-                  <YAxis stroke="#71717a" tick={{ fontSize: 11 }} tickFormatter={formatBytes} tickLine={false} />
-                  <Tooltip contentStyle={chartTooltipStyle} formatter={(v) => formatBytes(Number(v ?? 0))} />
+                  <YAxis stroke="#71717a" tick={{ fontSize: 11 }} tickFormatter={(v: number) => formatBytes(Number.isFinite(Number(v)) ? Number(v) : 0)} tickLine={false} />
+                  <Tooltip contentStyle={chartTooltipStyle} formatter={fmtTooltip} />
                   <Bar dataKey="rx" stackId="a" fill="#14b8a6" name="Download" />
                   <Bar dataKey="tx" stackId="a" fill="#52525b" name="Upload" />
                   <Legend wrapperStyle={{ fontSize: 12 }} />

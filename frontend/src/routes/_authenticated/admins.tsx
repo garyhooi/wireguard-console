@@ -39,6 +39,8 @@ function AdminsPage() {
   const [showInvite, setShowInvite] = useState(false)
   const [form, setForm] = useState({ email: '', role: 'admin' })
   const [error, setError] = useState('')
+  const [statusFilter, setStatusFilter] = useState('all')
+  const [search, setSearch] = useState('')
   const [notice, setNotice] = useState('')
 
   const { data: admins, isLoading } = useQuery<Admin[]>({
@@ -114,6 +116,18 @@ function AdminsPage() {
     onError: (e: Error) => setError(e.message),
   })
 
+  const filtered = (admins || []).filter((a) => {
+    if (statusFilter !== 'all' && a.status !== statusFilter) return false
+    const q = search.trim().toLowerCase()
+    if (!q) return true
+    return (a.email || '').toLowerCase().includes(q)
+  })
+  const statusCounts = (admins || []).reduce<Record<string, number>>((acc, a) => {
+    acc[a.status] = (acc[a.status] || 0) + 1
+    return acc
+  }, {})
+  const TABS = ['all', 'active', 'disabled']
+
   return (
     <div>
       <PageHeader
@@ -176,14 +190,43 @@ function AdminsPage() {
         </div>
       )}
 
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        <div className="flex rounded-lg border border-zinc-700 overflow-hidden">
+          {TABS.map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setStatusFilter(tab)}
+              className={`px-3 py-1.5 text-xs font-medium transition-colors ${
+                statusFilter === tab
+                  ? 'bg-zinc-700 text-white'
+                  : 'bg-zinc-900 text-zinc-400 hover:text-white'
+              }`}
+            >
+              {tab === 'all' ? 'All' : tab[0].toUpperCase() + tab.slice(1)}
+              <span className="ml-1 text-zinc-500">
+                {tab === 'all' ? admins?.length ?? 0 : statusCounts[tab] || 0}
+              </span>
+            </button>
+          ))}
+        </div>
+        <input
+          type="search"
+          placeholder="Search email…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="bg-zinc-800/60 border border-zinc-700 rounded-md px-3 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-teal-500"
+        />
+        <span className="text-xs text-zinc-500">{filtered.length} shown</span>
+      </div>
+
       <Panel>
         {isLoading ? (
           <div className="p-5 space-y-3">
             <Skeleton className="h-10 w-full" />
             <Skeleton className="h-10 w-full" />
           </div>
-        ) : !admins || admins.length === 0 ? (
-          <EmptyState title="No admins" hint="Only the first super_admin exists so far." />
+        ) : filtered.length === 0 ? (
+          <EmptyState title="No admins match this filter" hint="Adjust the filter or invite a new admin." />
         ) : (
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-zinc-800/80">
@@ -198,7 +241,7 @@ function AdminsPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800/60">
-                {admins?.map((a) => (
+                {filtered.map((a) => (
                   <tr key={a.id} className="hover:bg-zinc-800/40 transition-colors">
                     <td className="px-5 py-3 text-sm text-zinc-200">{a.email}</td>
                     <td className="px-5 py-3">
