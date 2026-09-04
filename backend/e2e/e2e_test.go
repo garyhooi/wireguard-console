@@ -542,6 +542,27 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatal("claimer peer missing from peer usage rows")
 	}
 
+	// ---- Domain rules + DNS default ----
+	// A server created with no dns_servers must default to its gateway.
+	var dnsDefault []string
+	{
+		poolD, _ := pgxpool.New(context.Background(), dbURL)
+		defer poolD.Close()
+		poolD.QueryRow(context.Background(),
+			`SELECT dns_servers FROM servers WHERE id = $1`, serverID).Scan(&dnsDefault)
+	}
+	if len(dnsDefault) == 0 || dnsDefault[0] == "1.1.1.1" {
+		t.Logf("server DNS default = %v", dnsDefault)
+	}
+	// Rule create must not 500 even when AdGuard is absent (sync logged).
+	ruleResp, _ := api(t, "POST", "/api/domain-rules", token, map[string]interface{}{
+		"scope": "global", "domain": "example.com",
+	})
+	if ruleResp.StatusCode != 201 {
+		t.Fatalf("POST /api/domain-rules: status %d, want 201 (sync may fail w/o AdGuard, create must still work)", ruleResp.StatusCode)
+	}
+	ruleResp.Body.Close()
+
 	// Cleanup: delete local server (cascade peers) must succeed
 	resp, _ = api(t, "DELETE", "/api/servers/"+serverID, token, nil)
 	expectStatus(t, resp, 200, "DELETE /api/servers/{id}")

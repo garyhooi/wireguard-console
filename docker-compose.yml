@@ -99,6 +99,17 @@ services:
       - agh-work:/opt/adguardhome/work
       - agh-conf:/opt/adguardhome/conf
 
+  # Serves the branded "blocked by VPN policy" page. AdGuard Home resolves
+  # blocked domains to the WireGuard tunnel gateway; this container listens
+  # there on :80 (host network) and shows the page.
+  blockpage:
+    build:
+      context: ./blockpage
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      BLOCKPAGE_ADDR: "${BLOCKPAGE_ADDR:-0.0.0.0:80}"
+
 volumes:
   caddy-data:
   caddy-config:

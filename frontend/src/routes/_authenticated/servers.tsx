@@ -33,7 +33,7 @@ const emptyForm = {
   interface_name: 'wg0',
   listen_port: '51820',
   network_cidr: '10.8.0.0/24',
-  dns_servers: '1.1.1.1, 8.8.8.8',
+  dns_servers: '', // empty = backend default (tunnel gateway/AdGuard)
   default_allowed_ips: '0.0.0.0/0, ::/0',
   mtu: '1420',
   persistent_keepalive: '25',

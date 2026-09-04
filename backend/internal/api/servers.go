@@ -120,7 +120,14 @@ func CreateServer(store *Store) http.HandlerFunc {
 			req.NetworkCIDR = "10.8.0.0/24"
 		}
 		if len(req.DNSServers) == 0 {
-			req.DNSServers = []string{"1.1.1.1", "8.8.8.8"}
+			// Default DNS is the tunnel gateway: AdGuard Home listens there
+			// (host), so every peer's queries pass the domain filter.
+			gw, _, gerr := gatewayForCIDR(req.NetworkCIDR)
+			if gerr == nil {
+				req.DNSServers = []string{gw}
+			} else {
+				req.DNSServers = []string{"1.1.1.1", "8.8.8.8"}
+			}
 		}
 		if req.DefaultAllowedIPs == "" {
 			req.DefaultAllowedIPs = "0.0.0.0/0, ::/0"

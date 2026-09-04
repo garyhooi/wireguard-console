@@ -221,6 +221,8 @@ APP_ENCRYPTION_KEY=$(openssl rand -hex 32)
 SESSION_SIGNING_KEY=$(openssl rand -hex 32)
 POSTGRES_PASSWORD=$(openssl rand -hex 24)
 ADGUARD_API_PASSWORD=$(openssl rand -hex 16)
+# AdGuard Home login user for the /control API (Basic auth).
+ADGUARD_API_USER=admin
 
 # --- Optional: SMTP for user/admin invite emails ---
 # Configurable later from Configuration → Email in the console itself.
