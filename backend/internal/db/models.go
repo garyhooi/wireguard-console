@@ -70,6 +70,7 @@ type Server struct {
 	DefaultAllowedIPs   string    `json:"default_allowed_ips"`
 	MTU                 int       `json:"mtu"`
 	PersistentKeepalive int       `json:"persistent_keepalive"`
+	ManagedMode         string    `json:"managed_mode"`
 	Status              string    `json:"status"`
 	CreatedAt           time.Time `json:"created_at"`
 }

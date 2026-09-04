@@ -14,6 +14,7 @@ interface Server {
   default_allowed_ips: string
   mtu: number
   persistent_keepalive: number
+  managed_mode: string
   status: string
   created_at: string
 }
@@ -34,6 +35,7 @@ const emptyForm = {
   default_allowed_ips: '0.0.0.0/0, ::/0',
   mtu: '1420',
   persistent_keepalive: '25',
+  managed_mode: 'local',
 }
 
 function ServersPage() {
@@ -66,6 +68,7 @@ function ServersPage() {
         default_allowed_ips: form.default_allowed_ips,
         mtu: Number(form.mtu),
         persistent_keepalive: Number(form.persistent_keepalive),
+        managed_mode: form.managed_mode,
       }
       const res = await fetch(editing ? `/api/servers/${editing.id}` : '/api/servers', {
         method: editing ? 'PATCH' : 'POST',
@@ -112,6 +115,7 @@ function ServersPage() {
       default_allowed_ips: server.default_allowed_ips,
       mtu: String(server.mtu),
       persistent_keepalive: String(server.persistent_keepalive),
+      managed_mode: server.managed_mode || 'local',
     })
     setShowAdd(false)
   }
@@ -214,6 +218,28 @@ function ServersPage() {
                   placeholder="e.g. 15.232.201.12:51820"
                   className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
                 />
+              </div>
+              <div>
+                <label htmlFor="sMode" className="block text-sm font-medium text-neutral-400 mb-2">
+                  Managed by
+                </label>
+                <select
+                  id="sMode"
+                  value={form.managed_mode}
+                  onChange={(e) => setForm((f) => ({ ...f, managed_mode: e.target.value }))}
+                  className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
+                >
+                  <option value="local">
+                    This console (automatic — interface is created and synced on this host)
+                  </option>
+                  <option value="manual">Remote node (I will apply via Host Setup)</option>
+                </select>
+                {form.managed_mode === 'manual' && (
+                  <p className="text-sm text-yellow-300 mt-2">
+                    Kernel sync is skipped for this server. After creating it, use the Host Setup
+                    button to get the node config.
+                  </p>
+                )}
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
@@ -369,6 +395,11 @@ function ServersPage() {
                   >
                     {server.status}
                   </span>
+                  {server.managed_mode === 'manual' && (
+                    <span className="ml-2 px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800">
+                      manual
+                    </span>
+                  )}
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap text-right text-sm">
                   <div className="flex justify-end gap-2">

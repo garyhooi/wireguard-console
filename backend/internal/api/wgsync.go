@@ -33,13 +33,17 @@ func syncServerToKernel(ctx context.Context, pool *pgxpool.Pool, serverID uuid.U
 		listenPort int
 		privEnc    string
 		cidr       string
+		mode       string
 	)
 	err := pool.QueryRow(ctx, `
-		SELECT interface_name, listen_port, server_private_key_encrypted, network_cidr::text
+		SELECT interface_name, listen_port, server_private_key_encrypted, network_cidr::text, managed_mode
 		FROM servers WHERE id = $1
-	`, serverID).Scan(&ifaceName, &listenPort, &privEnc, &cidr)
+	`, serverID).Scan(&ifaceName, &listenPort, &privEnc, &cidr, &mode)
 	if err != nil {
 		return fmt.Errorf("server lookup: %w", err)
+	}
+	if mode == "manual" {
+		return nil // interface lives on a remote node — Host Setup panel covers it
 	}
 	if privEnc == "" {
 		return fmt.Errorf("server has no private key stored")

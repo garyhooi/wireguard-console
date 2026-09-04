@@ -24,7 +24,7 @@ func ListServers(store *Store) http.HandlerFunc {
 		servers := []db.Server{}
 		rows, err := store.pool.Query(ctx, `
 			SELECT id, name, public_endpoint, listen_port, interface_name, server_public_key,
-			       network_cidr::text, dns_servers, default_allowed_ips, mtu, persistent_keepalive, status, created_at
+			       network_cidr::text, dns_servers, default_allowed_ips, mtu, persistent_keepalive, managed_mode, status, created_at
 			FROM servers
 			ORDER BY created_at DESC
 		`)
@@ -38,7 +38,7 @@ func ListServers(store *Store) http.HandlerFunc {
 			var s db.Server
 			if err := rows.Scan(&s.ID, &s.Name, &s.PublicEndpoint, &s.ListenPort, &s.InterfaceName,
 				&s.ServerPublicKey, &s.NetworkCIDR, &s.DNSServers, &s.DefaultAllowedIPs,
-				&s.MTU, &s.PersistentKeepalive, &s.Status, &s.CreatedAt); err != nil {
+				&s.MTU, &s.PersistentKeepalive, &s.ManagedMode, &s.Status, &s.CreatedAt); err != nil {
 				writeError(w, http.StatusInternalServerError, "Failed to scan server")
 				return
 			}
@@ -94,6 +94,7 @@ func CreateServer(store *Store) http.HandlerFunc {
 			DefaultAllowedIPs   string   `json:"default_allowed_ips"`
 			MTU                 int      `json:"mtu"`
 			PersistentKeepalive int      `json:"persistent_keepalive"`
+			ManagedMode         string   `json:"managed_mode"` // "local" (auto) | "manual" (remote node)
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
@@ -125,6 +126,13 @@ func CreateServer(store *Store) http.HandlerFunc {
 		if req.PersistentKeepalive == 0 {
 			req.PersistentKeepalive = 25
 		}
+		if req.ManagedMode == "" {
+			req.ManagedMode = "local"
+		}
+		if req.ManagedMode != "local" && req.ManagedMode != "manual" {
+			writeError(w, http.StatusBadRequest, "managed_mode must be 'local' or 'manual'")
+			return
+		}
 
 		// Generate the server keypair here when the client doesn't supply
 		// one — a browser cannot produce the AES-encrypted private key
@@ -154,12 +162,12 @@ func CreateServer(store *Store) http.HandlerFunc {
 		err := store.pool.QueryRow(ctx, `
 			INSERT INTO servers (name, public_endpoint, listen_port, interface_name, server_public_key,
 			                     server_private_key_encrypted, network_cidr, dns_servers, default_allowed_ips,
-			                     mtu, persistent_keepalive, status)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'active')
+			                     mtu, persistent_keepalive, managed_mode, status)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'active')
 			RETURNING id
 		`, req.Name, req.PublicEndpoint, req.ListenPort, req.InterfaceName, req.ServerPublicKey,
 			req.ServerPrivateKeyEnc, req.NetworkCIDR, req.DNSServers, req.DefaultAllowedIPs,
-			req.MTU, req.PersistentKeepalive).Scan(&newID)
+			req.MTU, req.PersistentKeepalive, req.ManagedMode).Scan(&newID)
 
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to create server")
@@ -168,11 +176,16 @@ func CreateServer(store *Store) http.HandlerFunc {
 
 		logAudit(ctx, store, adminID, "server.create", "server", "", nil)
 
-		// Automatically provision the interface on the host (wg-helper).
-		warning := syncServerLogged(ctx, store.pool, newID)
+		// Automatically provision the interface on the host (wg-helper) —
+		// unless this server lives on a remote node (manual mode).
+		warning := ""
+		if req.ManagedMode == "local" {
+			warning = syncServerLogged(ctx, store.pool, newID)
+		}
 
 		writeJSON(w, http.StatusCreated, map[string]string{
 			"status":        "created",
+			"managed_mode":  req.ManagedMode,
 			"apply_warning": warning,
 		})
 	}
