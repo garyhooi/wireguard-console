@@ -21,3 +21,20 @@
 		X-Content-Type-Options "nosniff"
 	}
 }
+
+# Catch-all: any host that is not the console domain (e.g. a blocked
+# domain resolved by AdGuard to this server) shows the branded block page.
+# Served over plain HTTP — browsers hitting a blocked site get the page
+# instead of a connection error. HTTPS for arbitrary blocked domains can't
+# work (no valid cert), but the DNS block still stops the connection.
+http://:80 {
+	root * /srv
+	handle {
+		rewrite * /blocked.html
+		file_server
+	}
+	header {
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+	}
+}

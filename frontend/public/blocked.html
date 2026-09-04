@@ -1,18 +1,4 @@
-// blockpage serves the branded "blocked by VPN policy" page.
-//
-// AdGuard Home is configured (via the console) to resolve blocked domains
-// to this server's IP (the WireGuard tunnel gateway). When a peer's browser
-// hits http://<blocked-domain>/ it reaches this listener and gets the page.
-package main
-
-import (
-	"log"
-	"net/http"
-	"os"
-	"strings"
-)
-
-const page = `<!doctype html>
+<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -51,32 +37,12 @@ const page = `<!doctype html>
   <div class="card">
     <span class="badge"><span class="dot"></span> VPN Policy</span>
     <h1>Access blocked</h1>
-    <div class="domain">%DOMAIN%</div>
+    <div class="domain" id="d">This domain is blocked</div>
     <p class="desc">This site is blocked by your organization's VPN policy.
       If you believe this is a mistake, contact your network administrator.</p>
     <div class="sep"></div>
     <p class="foot">Blocked by the WireGuard Console domain filter</p>
   </div>
+  <script>document.getElementById('d').textContent = location.hostname || location.host;</script>
 </body>
-</html>`
-
-func handler(w http.ResponseWriter, r *http.Request) {
-	domain := strings.Split(r.Host, ":")[0]
-	body := strings.ReplaceAll(page, "%DOMAIN%", domain)
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(body))
-}
-
-func main() {
-	addr := os.Getenv("BLOCKPAGE_ADDR")
-	if addr == "" {
-		addr = ":80"
-	}
-	http.HandleFunc("/", handler)
-	log.Printf("blockpage listening on %s", addr)
-	if err := http.ListenAndServe(addr, nil); err != nil {
-		log.Fatal(err)
-	}
-}
+</html>
