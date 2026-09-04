@@ -27,7 +27,7 @@ func syncDomainRulesToAdGuard(store *Store, rules []db.DomainRule) error {
 			// Get peer IP for this user
 			var allowedIP string
 			store.pool.QueryRow(ctx, `
-				SELECT allowed_ip FROM peers 
+				SELECT allowed_ip::text FROM peers 
 				WHERE user_id = $1 AND status = 'active' AND server_id = (SELECT id FROM servers WHERE status = 'active' LIMIT 1)
 				LIMIT 1
 			`, *rule.UserID).Scan(&allowedIP)

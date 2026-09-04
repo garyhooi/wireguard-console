@@ -18,7 +18,7 @@ func ListServers(store *Store) http.HandlerFunc {
 		var servers []db.Server
 		rows, err := store.pool.Query(ctx, `
 			SELECT id, name, public_endpoint, listen_port, interface_name, server_public_key,
-			       network_cidr, dns_servers, default_allowed_ips, mtu, persistent_keepalive, status, created_at
+			       network_cidr::text, dns_servers, default_allowed_ips, mtu, persistent_keepalive, status, created_at
 			FROM servers
 			ORDER BY created_at DESC
 		`)
@@ -56,7 +56,7 @@ func GetServer(store *Store) http.HandlerFunc {
 		var s db.Server
 		err = store.pool.QueryRow(ctx, `
 			SELECT id, name, public_endpoint, listen_port, interface_name, server_public_key,
-			       network_cidr, dns_servers, default_allowed_ips, mtu, persistent_keepalive, status, created_at
+			       network_cidr::text, dns_servers, default_allowed_ips, mtu, persistent_keepalive, status, created_at
 			FROM servers
 			WHERE id = $1
 		`, serverID).Scan(

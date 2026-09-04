@@ -76,7 +76,7 @@ func ClaimUser(store *Store) http.HandlerFunc {
 		// Get server and calculate allowed IP
 		var server serverInfo
 		err = store.pool.QueryRow(ctx, `
-			SELECT id, listen_port, network_cidr, dns_servers, default_allowed_ips, server_public_key, public_endpoint
+			SELECT id, listen_port, network_cidr::text, dns_servers, default_allowed_ips, server_public_key, public_endpoint
 			FROM servers
 			WHERE status = 'active'
 			LIMIT 1
@@ -93,8 +93,8 @@ func ClaimUser(store *Store) http.HandlerFunc {
 		// Create peer
 		peerID := uuid.New()
 		_, err = store.pool.Exec(ctx, `
-			INSERT INTO peers (id, user_id, server_id, name, public_key, allowed_ip, status)
-			VALUES ($1, $2, $3, $4, $5, $6, 'active')
+			INSERT INTO peers (id, user_id, server_id, name, public_key, allowed_ip, preshared_key_encrypted, status)
+			VALUES ($1, $2, $3, $4, $5, $6, '', 'active')
 		`, peerID, invite.UserID, server.ID, req.FullName+"'s Device", peerKey.PublicKey().String(), allowedIP)
 
 		if err != nil {

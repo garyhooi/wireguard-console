@@ -18,7 +18,7 @@ import (
 // network CIDR (starting at .2 — .1 is treated as the gateway).
 func nextAvailableIP(ctx context.Context, pool *pgxpool.Pool, serverID string) (string, error) {
 	var cidr string
-	if err := pool.QueryRow(ctx, `SELECT network_cidr FROM servers WHERE id = $1`, serverID).Scan(&cidr); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT network_cidr::text FROM servers WHERE id = $1`, serverID).Scan(&cidr); err != nil {
 		return "", fmt.Errorf("server not found: %w", err)
 	}
 
@@ -32,7 +32,7 @@ func nextAvailableIP(ctx context.Context, pool *pgxpool.Pool, serverID string) (
 	}
 
 	used := map[string]bool{}
-	rows, err := pool.Query(ctx, `SELECT allowed_ip FROM peers WHERE server_id = $1`, serverID)
+	rows, err := pool.Query(ctx, `SELECT host(allowed_ip) FROM peers WHERE server_id = $1`, serverID)
 	if err != nil {
 		return "", fmt.Errorf("failed to list peers: %w", err)
 	}
@@ -65,7 +65,7 @@ func ListPeers(store *Store) http.HandlerFunc {
 
 		var peers []db.Peer
 		rows, err := store.pool.Query(ctx, `
-			SELECT p.id, p.user_id, p.server_id, p.name, p.public_key, p.allowed_ip, 
+			SELECT p.id, p.user_id, p.server_id, p.name, p.public_key, host(p.allowed_ip), 
 			       p.status, p.last_handshake_at, p.created_at, p.suspended_at, p.removed_at
 			FROM peers p
 			ORDER BY p.created_at DESC
@@ -102,7 +102,7 @@ func GetPeer(store *Store) http.HandlerFunc {
 
 		var p db.Peer
 		err = store.pool.QueryRow(ctx, `
-			SELECT id, user_id, server_id, name, public_key, allowed_ip, 
+			SELECT id, user_id, server_id, name, public_key, host(allowed_ip), 
 			       status, last_handshake_at, created_at, suspended_at, removed_at
 			FROM peers
 			WHERE id = $1
@@ -162,8 +162,8 @@ func CreatePeer(store *Store) http.HandlerFunc {
 		}
 
 		_, err := store.pool.Exec(ctx, `
-			INSERT INTO peers (user_id, server_id, name, public_key, allowed_ip, status)
-			VALUES ($1, $2, $3, $4, $5, 'active')
+			INSERT INTO peers (user_id, server_id, name, public_key, allowed_ip, preshared_key_encrypted, status)
+			VALUES ($1, $2, $3, $4, $5, '', 'active')
 		`, req.UserID, req.ServerID, req.Name, req.PublicKey, req.AllowedIP)
 
 		if err != nil {
@@ -308,7 +308,7 @@ func GetPeerConfig(store *Store) http.HandlerFunc {
 		var peer db.Peer
 		var server db.Server
 		err = store.pool.QueryRow(ctx, `
-			SELECT p.id, p.user_id, p.server_id, p.name, p.public_key, p.allowed_ip, 
+			SELECT p.id, p.user_id, p.server_id, p.name, p.public_key, host(p.allowed_ip), 
 			       p.status, p.last_handshake_at, p.created_at, p.suspended_at, p.removed_at
 			FROM peers p
 			WHERE p.id = $1
@@ -324,7 +324,7 @@ func GetPeerConfig(store *Store) http.HandlerFunc {
 
 		err = store.pool.QueryRow(ctx, `
 			SELECT id, name, public_endpoint, listen_port, interface_name, server_public_key,
-			       network_cidr, dns_servers, default_allowed_ips, mtu, persistent_keepalive
+			       network_cidr::text, dns_servers, default_allowed_ips, mtu, persistent_keepalive
 			FROM servers
 			WHERE id = $1
 		`, peer.ServerID).Scan(
