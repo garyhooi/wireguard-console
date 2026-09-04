@@ -1,14 +1,24 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
+import { IconMailPlus, IconUserPlus } from '@tabler/icons-react'
 import {
+  Badge,
   EmptyState,
   GhostButton,
+  Modal,
   PageHeader,
-  Panel,
   PrimaryButton,
   Skeleton,
   StatusBadge,
+  tableCls,
+  tableWrapCls,
+  tdCls,
+  thCls,
+  toolbarCls,
+  tabGroupCls,
+  toolbarTab,
+  searchCls,
   inputCls,
   labelCls,
 } from '../../lib/ui'
@@ -179,73 +189,68 @@ function AdminsPage() {
         title="Admins"
         description="People who operate this console (separate from VPN users — those live under VPN Users and only receive tunnel configs)."
         actions={
-          <PrimaryButton onClick={() => setShowInvite(true)}>Invite Admin</PrimaryButton>
+          <PrimaryButton onClick={() => setShowInvite(true)}>
+            <IconUserPlus size={16} stroke={1.6} aria-hidden="true" />
+            Invite Admin
+          </PrimaryButton>
         }
       />
 
       {error && <p className="text-red-400 text-sm mb-3">{error}</p>}
       {notice && <p className="text-teal-400 text-sm mb-3">{notice}</p>}
 
-      {showInvite && (
-        <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50">
-          <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6 max-w-md w-full mx-4">
-            <h2 className="text-lg font-semibold text-zinc-100 mb-4">Invite Admin</h2>
-            <form
-              onSubmit={(e) => {
-                e.preventDefault()
-                inviteMutation.mutate()
-              }}
-              className="space-y-4"
-            >
-              <div>
-                <label className={labelCls}>Email</label>
-                <input
-                  type="email"
-                  required
-                  className={inputCls}
-                  placeholder="operator@company.com"
-                  value={form.email}
-                  onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
-                />
-              </div>
-              <div>
-                <label className={labelCls}>Role</label>
-                <select
-                  className="w-full bg-zinc-800/60 border border-zinc-700 rounded-md px-3 py-2 text-sm text-zinc-100"
-                  value={form.role}
-                  onChange={(e) => setForm((f) => ({ ...f, role: e.target.value }))}
-                >
-                  <option value="admin">Admin — manage users, peers, servers</option>
-                  <option value="super_admin">Super admin — everything</option>
-                  <option value="auditor">Auditor — read-only</option>
-                </select>
-              </div>
-              <p className="text-xs text-zinc-500">
-                The invited admin receives temporary credentials by email and must change them in
-                Profile on first login (2FA is enforced policy).
-              </p>
-              <div className="flex gap-3">
-                <PrimaryButton type="submit" disabled={inviteMutation.isPending}>
-                  {inviteMutation.isPending ? 'Inviting…' : 'Send Invite'}
-                </PrimaryButton>
-                <GhostButton onClick={() => setShowInvite(false)}>Cancel</GhostButton>
-              </div>
-            </form>
+      <Modal
+        open={showInvite}
+        onClose={() => setShowInvite(false)}
+        title="Invite Admin"
+        className="max-w-md"
+      >
+        <form
+          onSubmit={(e) => {
+            e.preventDefault()
+            inviteMutation.mutate()
+          }}
+          className="space-y-4"
+        >
+          <div>
+            <label className={labelCls}>Email</label>
+            <input
+              type="email"
+              required
+              className={inputCls}
+              placeholder="operator@company.com"
+              value={form.email}
+              onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
+            />
           </div>
-        </div>
-      )}
+          <div>
+            <label className={labelCls}>Role</label>
+            <select className={inputCls} value={form.role} onChange={(e) => setForm((f) => ({ ...f, role: e.target.value }))}>
+              <option value="admin">Admin — manage users, peers, servers</option>
+              <option value="super_admin">Super admin — everything</option>
+              <option value="auditor">Auditor — read-only</option>
+            </select>
+          </div>
+          <p className="text-xs text-zinc-500">
+            The invited admin receives temporary credentials by email and must change them in
+            Profile on first login (2FA is enforced policy).
+          </p>
+          <div className="flex justify-end gap-3 pt-2">
+            <GhostButton onClick={() => setShowInvite(false)}>Cancel</GhostButton>
+            <PrimaryButton type="submit" disabled={inviteMutation.isPending}>
+              {inviteMutation.isPending ? 'Inviting…' : 'Send Invite'}
+            </PrimaryButton>
+          </div>
+        </form>
+      </Modal>
 
-      <div className="mb-4 flex flex-wrap items-center gap-3">
-        <div className="flex rounded-lg border border-zinc-700 overflow-hidden">
+      <div className={toolbarCls}>
+        <div className={tabGroupCls}>
           {TABS.map((tab) => (
             <button
               key={tab}
               onClick={() => setStatusFilter(tab)}
-              className={`px-3 py-1.5 text-xs font-medium transition-colors ${
-                statusFilter === tab
-                  ? 'bg-zinc-700 text-white'
-                  : 'bg-zinc-900 text-zinc-400 hover:text-white'
-              }`}
+              className={toolbarTab(statusFilter === tab, 'bg-zinc-700 text-white')}
             >
               {tab === 'all' ? 'All' : tab[0].toUpperCase() + tab.slice(1)}
               <span className="ml-1 text-zinc-500">
@@ -259,12 +264,12 @@ function AdminsPage() {
           placeholder="Search email…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          className="bg-zinc-800/60 border border-zinc-700 rounded-md px-3 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-teal-500"
+          className={searchCls}
         />
         <span className="text-xs text-zinc-500">{filtered.length} shown</span>
       </div>
 
-      <Panel>
+      <div className={tableWrapCls}>
         {isLoading ? (
           <div className="p-5 space-y-3">
             <Skeleton className="h-10 w-full" />
@@ -274,20 +279,20 @@ function AdminsPage() {
           <EmptyState title="No admins match this filter" hint="Adjust the filter or invite a new admin." />
         ) : (
           <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-zinc-800/80">
+            <table className={tableCls}>
               <thead>
-                <tr className="text-left text-[11px] uppercase tracking-wider text-zinc-600">
-                  <th className="px-5 py-2.5 font-medium">Email</th>
-                  <th className="px-5 py-2.5 font-medium">Role</th>
-                  <th className="px-5 py-2.5 font-medium">2FA</th>
-                  <th className="px-5 py-2.5 font-medium">Status</th>
-                  <th className="px-5 py-2.5 font-medium">Created</th>
-                  <th className="px-5 py-2.5 font-medium text-right">Actions</th>
+                <tr className="text-left text-[11px] uppercase tracking-wider text-zinc-500 bg-zinc-800/40">
+                  <th className={thCls}>Email</th>
+                  <th className={thCls}>Role</th>
+                  <th className={thCls}>2FA</th>
+                  <th className={thCls}>Status</th>
+                  <th className={thCls}>Created</th>
+                  <th className={thCls + ' text-right'}>Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800/60">
                 {filtered.map((a) => (
-                  <tr key={a.id} className="hover:bg-zinc-800/40 transition-colors">
+                  <tr key={a.id} className="hover:bg-zinc-800/30 transition-colors">
                     <td className="px-5 py-3 text-sm">
                       {editingId === a.id ? (
                         <div className="flex items-center gap-2">
@@ -330,9 +335,9 @@ function AdminsPage() {
                         <span className="flex items-center gap-2 text-zinc-200">
                           {a.email}
                           {me?.id === a.id && (
-                            <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-teal-500/10 text-teal-400 border border-teal-500/20">
+                            <Badge tone="accent" label="you">
                               You
-                            </span>
+                            </Badge>
                           )}
                           {a.status === 'active' && (
                             <button
@@ -351,7 +356,7 @@ function AdminsPage() {
                     </td>
                     <td className="px-5 py-3">
                       <select
-                        className="bg-zinc-800/60 border border-zinc-700 rounded-md px-2 py-1 text-xs text-zinc-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="bg-zinc-800/60 border border-zinc-700 rounded-md px-2 py-1 text-xs text-zinc-200 disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-teal-500"
                         value={a.role}
                         disabled={me?.id === a.id}
                         onChange={(e) => a.status === 'active' && roleMutation.mutate({ id: a.id, role: e.target.value })}
@@ -367,18 +372,18 @@ function AdminsPage() {
                     <td className="px-5 py-3">
                       <StatusBadge status={a.status} />
                     </td>
-                    <td className="px-5 py-3 text-sm text-zinc-500 font-mono tabular-nums">
+                    <td className={tdCls + ' font-mono tabular-nums'}>
                       {a.created_at ? new Date(a.created_at).toLocaleDateString() : '—'}
                     </td>
                     <td className="px-5 py-3 text-right text-sm">
-                      <div className="flex justify-end gap-3">
+                      <div className="flex justify-end gap-1">
                         {a.status === 'active' ? (
                           <>
                             <button
                               onClick={() => {
                                 if (confirm(`Reset password for "${a.email}"?`)) resetPwMutation.mutate(a)
                               }}
-                              className="text-teal-400 hover:text-teal-300"
+                              className="inline-flex items-center text-sm rounded-md px-2 py-1 text-teal-400 hover:text-teal-300 hover:bg-teal-500/10 transition-colors"
                             >
                               Reset password
                             </button>
@@ -387,7 +392,7 @@ function AdminsPage() {
                                 onClick={() => {
                                   if (confirm(`Disable admin "${a.email}"?`)) statusMutation.mutate(a)
                                 }}
-                                className="text-red-400 hover:text-red-300"
+                                className="inline-flex items-center text-sm rounded-md px-2 py-1 text-red-400 hover:text-red-300 hover:bg-red-500/10 transition-colors"
                               >
                                 Disable
                               </button>
@@ -396,7 +401,7 @@ function AdminsPage() {
                         ) : (
                           <button
                             onClick={() => statusMutation.mutate(a)}
-                            className="text-teal-400 hover:text-teal-300"
+                            className="inline-flex items-center text-sm rounded-md px-2 py-1 text-teal-400 hover:text-teal-300 hover:bg-teal-500/10 transition-colors"
                           >
                             Enable
                           </button>
@@ -409,7 +414,7 @@ function AdminsPage() {
             </table>
           </div>
         )}
-      </Panel>
+      </div>
     </div>
   )
 }

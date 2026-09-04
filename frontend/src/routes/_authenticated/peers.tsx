@@ -2,6 +2,23 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import QRCode from 'qrcode'
+import { IconDownload, IconPlus, IconQrcode } from '@tabler/icons-react'
+import {
+  ActionLink,
+  Badge,
+  EmptyState,
+  GhostButton,
+  Modal,
+  PageHeader,
+  PrimaryButton,
+  Skeleton,
+  tableCls,
+  tableWrapCls,
+  tdCls,
+  thCls,
+  inputCls,
+  labelCls,
+} from '../../lib/ui'
 
 interface Peer {
   id: string
@@ -151,262 +168,265 @@ function PeersPage() {
   }
 
   if (isLoading) {
-    return <div className="text-neutral-400">Loading...</div>
+    return (
+      <div className="space-y-6">
+        <div className="h-8 w-56 wgc-skeleton rounded-md" />
+        <div className="h-64 w-full wgc-skeleton rounded-lg" />
+      </div>
+    )
   }
 
   const activePeers = (peers || []).filter((p) => p.status !== 'removed')
   const noServers = !servers || servers.length === 0
   const noUsers = !users || users.length === 0
-  const modalOpen = showAdd || editing !== null
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold text-white">Peers</h1>
-        <button
-          onClick={() => {
-            setEditing(null)
-            setForm({ name: '', server_id: '', user_id: '', send_email: false })
-            setShowAdd(true)
-          }}
-          className="bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-4 rounded-md"
-        >
-          Add Peer
-        </button>
-      </div>
+      <PageHeader
+        title="Peers"
+        description="One peer is one device (laptop, phone…) for a user on a server. Keys and the tunnel IP are generated automatically."
+        actions={
+          <PrimaryButton
+            onClick={() => {
+              setEditing(null)
+              setForm({ name: '', server_id: '', user_id: '', send_email: false })
+              setShowAdd(true)
+            }}
+          >
+            <IconPlus size={16} stroke={1.6} aria-hidden="true" />
+            Add Peer
+          </PrimaryButton>
+        }
+      />
 
       {error && <p className="text-red-400 text-sm mb-3">{error}</p>}
 
-      {modalOpen && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-6 max-w-md w-full mx-4">
-            <h2 className="text-xl font-bold text-white mb-1">{editing ? 'Edit Peer' : 'Add Peer'}</h2>
-            <p className="text-sm text-neutral-400 mb-4">
-              {editing
-                ? 'Rename the device.'
-                : 'A peer is one device (laptop, phone…) for a user on a server. Keys and the tunnel IP are generated automatically.'}
-            </p>
-            {(noServers || noUsers) && !editing && (
-              <div className="bg-yellow-900/40 border border-yellow-700 text-yellow-200 text-sm rounded-md p-3 mb-4">
-                {noServers && <p>Create a server first (Servers → Add Server).</p>}
-                {noUsers && <p>Create a user first (Users → Invite User).</p>}
-              </div>
-            )}
-            <form
-              onSubmit={(e) => {
-                e.preventDefault()
-                editing ? updateMutation.mutate() : createMutation.mutate()
-              }}
-              className="space-y-4"
-            >
+      {/* Add / edit modal */}
+      <Modal
+        open={showAdd || editing !== null}
+        onClose={() => {
+          setShowAdd(false)
+          setEditing(null)
+        }}
+        title={editing ? 'Edit Peer' : 'Add Peer'}
+        description={
+          editing
+            ? 'Rename the device.'
+            : 'A peer is one device for a user on a server. Keys and the tunnel IP are generated automatically.'
+        }
+      >
+        {(noServers || noUsers) && !editing && (
+          <div className="bg-amber-500/10 border border-amber-500/30 text-amber-300 text-sm rounded-md p-3 mb-4">
+            {noServers && <p>Create a server first (Servers → Add Server).</p>}
+            {noUsers && <p>Create a user first (Users → Invite User).</p>}
+          </div>
+        )}
+        <form
+          onSubmit={(e) => {
+            e.preventDefault()
+            editing ? updateMutation.mutate() : createMutation.mutate()
+          }}
+          className="space-y-4"
+        >
+          <div>
+            <label htmlFor="pName" className={labelCls}>
+              Device name
+            </label>
+            <input
+              id="pName"
+              required
+              value={form.name}
+              onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+              placeholder="e.g. Gary's MacBook"
+              className={inputCls}
+            />
+          </div>
+          {!editing && (
+            <>
               <div>
-                <label htmlFor="pName" className="block text-sm font-medium text-neutral-400 mb-2">
-                  Device name
+                <label htmlFor="pServer" className={labelCls}>
+                  Server
                 </label>
-                <input
-                  id="pName"
+                <select
+                  id="pServer"
                   required
-                  value={form.name}
-                  onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-                  placeholder="e.g. Gary's MacBook"
-                  className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
-                />
+                  value={form.server_id}
+                  onChange={(e) => setForm((f) => ({ ...f, server_id: e.target.value }))}
+                  className={inputCls}
+                >
+                  <option value="" disabled>
+                    {noServers ? 'No servers — create one first' : 'Select a server…'}
+                  </option>
+                  {servers?.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
               </div>
-              {!editing && (
-                <>
-                  <div>
-                    <label htmlFor="pServer" className="block text-sm font-medium text-neutral-400 mb-2">
-                      Server
-                    </label>
-                    <select
-                      id="pServer"
-                      required
-                      value={form.server_id}
-                      onChange={(e) => setForm((f) => ({ ...f, server_id: e.target.value }))}
-                      className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
-                    >
-                      <option value="" disabled>
-                        {noServers ? 'No servers — create one first' : 'Select a server…'}
-                      </option>
-                      {servers?.map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {s.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label htmlFor="pUser" className="block text-sm font-medium text-neutral-400 mb-2">
-                      User
-                    </label>
-                    <select
-                      id="pUser"
-                      required
-                      value={form.user_id}
-                      onChange={(e) => setForm((f) => ({ ...f, user_id: e.target.value }))}
-                      className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
-                    >
-                      <option value="" disabled>
-                        {noUsers ? 'No users — invite one first' : 'Select a user…'}
-                      </option>
-                      {users?.map((u) => (
-                        <option key={u.id} value={u.id}>
-                          {u.full_name || u.email}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </>
-              )}
-              {!editing && (
-                <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4 rounded border-zinc-700 bg-zinc-800 accent-teal-500"
-                    checked={form.send_email}
-                    onChange={(e) => setForm((f) => ({ ...f, send_email: e.target.checked }))}
-                  />
-                  Email the config to this user (sent when SMTP is configured)
+              <div>
+                <label htmlFor="pUser" className={labelCls}>
+                  User
                 </label>
-              )}
-              <div className="flex space-x-3">
-                <button
-                  type="submit"
-                  disabled={
-                    createMutation.isPending || updateMutation.isPending || (!editing && (noServers || noUsers))
-                  }
-                  className="bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-4 rounded-md disabled:opacity-50"
+                <select
+                  id="pUser"
+                  required
+                  value={form.user_id}
+                  onChange={(e) => setForm((f) => ({ ...f, user_id: e.target.value }))}
+                  className={inputCls}
                 >
-                  {createMutation.isPending || updateMutation.isPending ? 'Saving…' : editing ? 'Save' : 'Create Peer'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowAdd(false)
-                    setEditing(null)
-                  }}
-                  className="bg-neutral-700 hover:bg-neutral-600 text-white font-medium py-2 px-4 rounded-md"
-                >
-                  Cancel
-                </button>
+                  <option value="" disabled>
+                    {noUsers ? 'No users — invite one first' : 'Select a user…'}
+                  </option>
+                  {users?.map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.full_name || u.email}
+                    </option>
+                  ))}
+                </select>
               </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {qr && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-6 text-center">
-            <h2 className="text-lg font-bold text-white mb-4">{qr.name}</h2>
-            <img src={qr.dataUrl} alt={`${qr.name} config QR`} className="mx-auto rounded-md" />
-            <p className="text-sm text-neutral-400 mt-4 mb-4">
-              Scan in the WireGuard app (import from QR code)
-            </p>
-            <button
-              onClick={() => setQr(null)}
-              className="bg-neutral-700 hover:bg-neutral-600 text-white font-medium py-2 px-6 rounded-md"
+            </>
+          )}
+          {!editing && (
+            <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-pointer">
+              <input
+                type="checkbox"
+                className="h-4 w-4 rounded border-zinc-700 bg-zinc-800 accent-teal-500"
+                checked={form.send_email}
+                onChange={(e) => setForm((f) => ({ ...f, send_email: e.target.checked }))}
+              />
+              Email the config to this user (sent when SMTP is configured)
+            </label>
+          )}
+          <div className="flex justify-end gap-3 pt-2">
+            <GhostButton
+              type="button"
+              onClick={() => {
+                setShowAdd(false)
+                setEditing(null)
+              }}
             >
-              Close
-            </button>
+              Cancel
+            </GhostButton>
+            <PrimaryButton
+              type="submit"
+              disabled={
+                createMutation.isPending || updateMutation.isPending || (!editing && (noServers || noUsers))
+              }
+            >
+              {createMutation.isPending || updateMutation.isPending ? 'Saving…' : editing ? 'Save' : 'Create Peer'}
+            </PrimaryButton>
+          </div>
+        </form>
+      </Modal>
+
+      {/* QR modal */}
+      <Modal
+        open={qr !== null}
+        onClose={() => setQr(null)}
+        title={qr ? qr.name : undefined}
+        className="max-w-md"
+      >
+        <div className="text-center">
+          <img
+            src={qr?.dataUrl}
+            alt={`${qr?.name ?? 'Peer'} config QR`}
+            className="mx-auto rounded-md bg-white p-2"
+          />
+          <p className="text-sm text-zinc-400 mt-4 mb-4">
+            Scan in the WireGuard app (import from QR code)
+          </p>
+          <GhostButton onClick={() => setQr(null)}>Close</GhostButton>
+        </div>
+      </Modal>
+
+      {activePeers.length === 0 ? (
+        <EmptyState
+          title="No peers yet"
+          hint="Create a server, invite a user, then add a peer — the tunnel config is generated automatically."
+          action={
+            <PrimaryButton
+              onClick={() => {
+                setEditing(null)
+                setForm({ name: '', server_id: '', user_id: '', send_email: false })
+                setShowAdd(true)
+              }}
+            >
+              <IconPlus size={16} stroke={1.6} aria-hidden="true" />
+              Add peer
+            </PrimaryButton>
+          }
+        />
+      ) : (
+        <div className={tableWrapCls}>
+          <div className="overflow-x-auto">
+            <table className={tableCls}>
+              <thead>
+                <tr className="text-left text-[11px] uppercase tracking-wider text-zinc-500 bg-zinc-800/40">
+                  <th className={thCls}>Name</th>
+                  <th className={thCls}>User</th>
+                  <th className={thCls}>Public Key</th>
+                  <th className={thCls}>Allowed IP</th>
+                  <th className={thCls}>Status</th>
+                  <th className={thCls}>Last Handshake</th>
+                  <th className={thCls + ' text-right'}>Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-800/60">
+                {activePeers.map((peer) => (
+                  <tr key={peer.id} className="hover:bg-zinc-800/30 transition-colors">
+                    <td className="px-5 py-3.5 whitespace-nowrap text-sm text-zinc-200">{peer.name}</td>
+                    <td className={tdCls}>
+                      {peer.user_full_name || peer.user_email || '—'}
+                    </td>
+                    <td className={tdCls + ' font-mono'}>{peer.public_key.substring(0, 16)}...</td>
+                    <td className={tdCls + ' font-mono'}>{peer.allowed_ip}</td>
+                    <td className="px-5 py-3.5 whitespace-nowrap">
+                      <Badge tone={peer.status === 'active' ? 'good' : peer.status === 'suspended' ? 'warn' : 'bad'}>
+                        {peer.status}
+                      </Badge>
+                    </td>
+                    <td className={tdCls + ' font-mono tabular-nums'}>
+                      {peer.last_handshake_at ? new Date(peer.last_handshake_at).toLocaleString() : 'Never'}
+                    </td>
+                    <td className="px-5 py-3.5 whitespace-nowrap text-right text-sm">
+                      <div className="flex justify-end gap-1">
+                        <ActionLink
+                          onClick={() => {
+                            setEditing(peer)
+                            setForm({ name: peer.name, server_id: peer.server_id, user_id: peer.user_id, send_email: false })
+                            setShowAdd(false)
+                          }}
+                        >
+                          Edit
+                        </ActionLink>
+                        <ActionLink
+                          onClick={() => downloadConfig(peer)}
+                        >
+                          <IconDownload size={14} stroke={1.6} aria-hidden="true" />
+                          Config
+                        </ActionLink>
+                        <ActionLink onClick={() => showQR(peer)}>
+                          <IconQrcode size={14} stroke={1.6} aria-hidden="true" />
+                          QR
+                        </ActionLink>
+                        <ActionLink
+                          tone="danger"
+                          onClick={() => {
+                            if (confirm(`Remove peer "${peer.name}"?`)) removeMutation.mutate(peer)
+                          }}
+                        >
+                          Remove
+                        </ActionLink>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       )}
-
-      <div className="bg-neutral-900 border border-neutral-800 rounded-lg overflow-hidden">
-        <table className="min-w-full divide-y divide-neutral-800">
-          <thead className="bg-neutral-800">
-            <tr>
-              <th className="px-6 py-3 text-left text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                Name
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                User
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                Public Key
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                Allowed IP
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                Status
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                Last Handshake
-              </th>
-              <th className="px-6 py-3 text-right text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                Actions
-              </th>
-            </tr>
-          </thead>
-          <tbody className="bg-neutral-900 divide-y divide-neutral-800">
-            {activePeers.map((peer) => (
-              <tr key={peer.id}>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-white">{peer.name}</td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-400">
-                  {peer.user_full_name || peer.user_email || '—'}
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-neutral-400 font-mono">
-                  {peer.public_key.substring(0, 16)}...
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-neutral-400 font-mono">
-                  {peer.allowed_ip}
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap">
-                  <span
-                    className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
-                      peer.status === 'active'
-                        ? 'bg-green-100 text-green-800'
-                        : peer.status === 'suspended'
-                        ? 'bg-yellow-100 text-yellow-800'
-                        : 'bg-red-100 text-red-800'
-                    }`}
-                  >
-                    {peer.status}
-                  </span>
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-neutral-400">
-                  {peer.last_handshake_at
-                    ? new Date(peer.last_handshake_at).toLocaleString()
-                    : 'Never'}
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-right text-sm">
-                  <div className="flex justify-end gap-2">
-                    <button
-                      onClick={() => {
-                        setEditing(peer)
-                        setForm({ name: peer.name, server_id: peer.server_id, user_id: peer.user_id, send_email: false })
-                        setShowAdd(false)
-                      }}
-                      className="text-teal-400 hover:text-teal-300"
-                    >
-                      Edit
-                    </button>
-                    <button
-                      onClick={() => downloadConfig(peer)}
-                      className="text-blue-400 hover:text-blue-300"
-                    >
-                      Config
-                    </button>
-                    <button onClick={() => showQR(peer)} className="text-purple-400 hover:text-purple-300">
-                      QR
-                    </button>
-                    <button
-                      onClick={() => {
-                        if (confirm(`Remove peer "${peer.name}"?`)) removeMutation.mutate(peer)
-                      }}
-                      className="text-red-400 hover:text-red-300"
-                    >
-                      Remove
-                    </button>
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
     </div>
   )
 }

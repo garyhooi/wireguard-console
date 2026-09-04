@@ -104,4 +104,7 @@ type StatsOverview struct {
 	ActiveUsers    int `json:"active_users"`
 	TotalServers   int `json:"total_servers"`
 	ConnectedPeers int `json:"connected_peers"`
+	// Traffic over the last 24h (bytes), used by the Statistics KPI band.
+	TotalRXBytes int64 `json:"total_rx_bytes"`
+	TotalTXBytes int64 `json:"total_tx_bytes"`
 }

@@ -1,6 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
+import { PrimaryButton, inputCls, labelCls } from '../lib/ui'
 
 interface Verify2FARequest {
   code: string
@@ -55,17 +56,18 @@ function Verify2FAPage() {
   }
 
   return (
-    <div className="min-h-screen bg-neutral-950 flex items-center justify-center p-4">
-      <div className="max-w-md w-full bg-neutral-900 border border-neutral-800 rounded-lg p-8">
-        <h1 className="text-2xl font-bold text-white mb-6">Enter Authentication Code</h1>
-
-        <p className="text-neutral-400 mb-6">
+    <div className="min-h-screen bg-zinc-950 flex items-center justify-center px-4">
+      <div className="w-full max-w-md bg-zinc-900/60 border border-zinc-800 rounded-xl p-8 shadow-2xl">
+        <h1 className="text-xl font-semibold tracking-tight text-zinc-100 mb-1">
+          Enter Authentication Code
+        </h1>
+        <p className="text-zinc-500 text-sm mb-6">
           Enter the 6-digit code from your authenticator app to complete sign in.
         </p>
 
         <form onSubmit={handleSubmit}>
           <div className="mb-6">
-            <label htmlFor="code" className="block text-sm font-medium text-neutral-400 mb-2">
+            <label htmlFor="code" className={labelCls}>
               Authentication Code
             </label>
             <input
@@ -73,7 +75,7 @@ function Verify2FAPage() {
               type="text"
               maxLength={6}
               autoFocus
-              className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white text-center text-2xl tracking-widest focus:outline-none focus:ring-2 focus:ring-teal-500"
+              className={`${inputCls} text-center text-2xl tracking-widest`}
               placeholder="000000"
               value={code}
               onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))}
@@ -81,18 +83,12 @@ function Verify2FAPage() {
           </div>
 
           {verifyMutation.error && (
-            <div className="text-red-500 text-sm mb-4">
-              {verifyMutation.error.message}
-            </div>
+            <div className="text-red-400 text-sm mb-4">{verifyMutation.error.message}</div>
           )}
 
-          <button
-            type="submit"
-            disabled={verifyMutation.isPending || code.length !== 6}
-            className="w-full bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-4 rounded-md disabled:opacity-50"
-          >
-            {verifyMutation.isPending ? 'Verifying...' : 'Verify'}
-          </button>
+          <PrimaryButton type="submit" disabled={verifyMutation.isPending || code.length !== 6} className="w-full">
+            {verifyMutation.isPending ? 'Verifying…' : 'Verify'}
+          </PrimaryButton>
         </form>
       </div>
     </div>

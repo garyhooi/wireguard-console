@@ -1,6 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
+import { PrimaryButton, inputCls, labelCls } from '../lib/ui'
 
 interface TOTPSetupResponse {
   secret: string
@@ -75,47 +76,45 @@ function Setup2FAPage() {
   }
 
   return (
-    <div className="min-h-screen bg-neutral-950 flex items-center justify-center p-4">
-      <div className="max-w-md w-full bg-neutral-900 border border-neutral-800 rounded-lg p-8">
-        <h1 className="text-2xl font-bold text-white mb-6">Enable Two-Factor Authentication</h1>
+    <div className="min-h-screen bg-zinc-950 flex items-center justify-center px-4">
+      <div className="w-full max-w-md bg-zinc-900/60 border border-zinc-800 rounded-xl p-8 shadow-2xl">
+        <h1 className="text-xl font-semibold tracking-tight text-zinc-100 mb-6">
+          Enable Two-Factor Authentication
+        </h1>
 
         {step === 'setup' && (
           <div>
-            <p className="text-neutral-400 mb-6">
+            <p className="text-zinc-400 text-sm mb-6 leading-relaxed">
               Add an extra layer of security to your account. You'll need an authenticator app like Google Authenticator, Authy, or 1Password.
             </p>
-            <button
-              onClick={handleSetup}
-              disabled={setupMutation.isPending}
-              className="w-full bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-4 rounded-md disabled:opacity-50"
-            >
-              {setupMutation.isPending ? 'Generating...' : 'Setup 2FA'}
-            </button>
+            <PrimaryButton onClick={handleSetup} disabled={setupMutation.isPending} className="w-full">
+              {setupMutation.isPending ? 'Generating…' : 'Setup 2FA'}
+            </PrimaryButton>
           </div>
         )}
 
         {step === 'verify' && totpData && (
           <div>
             <div className="mb-6">
-              <h2 className="text-lg font-semibold text-white mb-4">Scan QR Code</h2>
+              <h2 className="text-base font-semibold text-zinc-100 mb-4">Scan QR Code</h2>
               <div className="bg-white p-4 rounded-lg inline-block">
                 <img src={totpData.qr_code_url} alt="QR Code" className="w-48 h-48" />
               </div>
-              <p className="text-neutral-400 text-sm mt-4">
+              <p className="text-zinc-400 text-sm mt-4">
                 Or enter this key manually in your authenticator app: <br />
-                <code className="bg-neutral-800 px-2 py-1 rounded text-teal-400">{totpData.secret}</code>
+                <code className="bg-zinc-800 px-2 py-1 rounded text-teal-400">{totpData.secret}</code>
               </p>
             </div>
 
             <div className="mb-6">
-              <label htmlFor="code" className="block text-sm font-medium text-neutral-400 mb-2">
+              <label htmlFor="code" className={labelCls}>
                 Enter 6-digit code
               </label>
               <input
                 id="code"
                 type="text"
                 maxLength={6}
-                className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
+                className={inputCls}
                 placeholder="000000"
                 value={code}
                 onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))}
@@ -123,26 +122,24 @@ function Setup2FAPage() {
             </div>
 
             {enableMutation.error && (
-              <div className="text-red-500 text-sm mb-4">
-                Invalid code. Please try again.
-              </div>
+              <div className="text-red-400 text-sm mb-4">Invalid code. Please try again.</div>
             )}
 
-            <button
+            <PrimaryButton
               onClick={handleVerify}
               disabled={enableMutation.isPending || code.length !== 6}
-              className="w-full bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-4 rounded-md disabled:opacity-50"
+              className="w-full"
             >
-              {enableMutation.isPending ? 'Enabling...' : 'Enable 2FA'}
-            </button>
+              {enableMutation.isPending ? 'Enabling…' : 'Enable 2FA'}
+            </PrimaryButton>
           </div>
         )}
 
         {step === 'complete' && (
           <div>
             <div className="mb-6">
-              <h2 className="text-lg font-semibold text-green-500 mb-2">2FA Enabled!</h2>
-              <p className="text-neutral-400 text-sm">
+              <h2 className="text-base font-semibold text-teal-400 mb-2">2FA Enabled!</h2>
+              <p className="text-zinc-400 text-sm">
                 {backupCodes.length > 0 && enableMutation.variables && (
                   <span>Save these backup codes. They can only be shown once and will be needed if you lose access to your authenticator app.</span>
                 )}
@@ -150,22 +147,19 @@ function Setup2FAPage() {
             </div>
 
             <div className="mb-6">
-              <h3 className="text-sm font-medium text-neutral-400 mb-2">Backup Codes</h3>
-              <div className="bg-neutral-800 rounded-md p-4">
+              <h3 className="text-sm font-medium text-zinc-400 mb-2">Backup Codes</h3>
+              <div className="bg-zinc-800 rounded-md p-4">
                 <div className="grid grid-cols-2 gap-2">
                   {backupCodes.map((code, index) => (
-                    <code key={index} className="text-sm text-neutral-300 font-mono">{code}</code>
+                    <code key={index} className="text-sm text-zinc-300 font-mono">{code}</code>
                   ))}
                 </div>
               </div>
             </div>
 
-            <button
-              onClick={() => window.location.href = '/dashboard'}
-              className="w-full bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-4 rounded-md"
-            >
+            <PrimaryButton onClick={() => window.location.href = '/dashboard'} className="w-full">
               Continue to Dashboard
-            </button>
+            </PrimaryButton>
           </div>
         )}
       </div>

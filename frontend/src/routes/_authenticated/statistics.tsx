@@ -13,7 +13,23 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { EmptyState, PageHeader, Panel, Skeleton, Stat, StatusBadge } from '../../lib/ui'
+import { IconDownload } from '@tabler/icons-react'
+import {
+  EmptyState,
+  PageHeader,
+  Panel,
+  Skeleton,
+  Stat,
+  StatusBadge,
+  tableCls,
+  tableWrapCls,
+  tdCls,
+  thCls,
+  toolbarCls,
+  tabGroupCls,
+  toolbarTab,
+  searchCls,
+} from '../../lib/ui'
 
 interface Overview {
   total_rx_bytes: number
@@ -257,13 +273,13 @@ function StatisticsPage() {
       <div className="mt-8">
         <Panel title="Peer state">
           <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-zinc-800/80">
+            <table className={tableCls}>
               <thead>
-                <tr className="text-left text-[11px] uppercase tracking-wider text-zinc-600">
-                  <th className="px-5 py-2.5 font-medium">Peer</th>
-                  <th className="px-5 py-2.5 font-medium">Tunnel IP</th>
-                  <th className="px-5 py-2.5 font-medium">Status</th>
-                  <th className="px-5 py-2.5 font-medium">Last handshake</th>
+                <tr className="text-left text-[11px] uppercase tracking-wider text-zinc-500">
+                  <th className={thCls}>Peer</th>
+                  <th className={thCls}>Tunnel IP</th>
+                  <th className={thCls}>Status</th>
+                  <th className={thCls}>Last handshake</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800/60">
@@ -298,14 +314,12 @@ function StatisticsPage() {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-3">
-            <div className="flex rounded-lg border border-zinc-700 overflow-hidden">
+            <div className={tabGroupCls}>
               {(['user', 'peer'] as const).map((sc) => (
                 <button
                   key={sc}
                   onClick={() => setUsageScope(sc)}
-                  className={`px-3 py-1.5 text-xs font-medium ${
-                    usageScope === sc ? 'bg-teal-600 text-white' : 'bg-zinc-900 text-zinc-400 hover:text-white'
-                  }`}
+                  className={toolbarTab(usageScope === sc, 'bg-teal-700 text-white')}
                 >
                   {sc === 'user' ? 'By VPN user' : 'By peer'}
                 </button>
@@ -334,8 +348,9 @@ function StatisticsPage() {
             <button
               onClick={downloadUsage}
               disabled={!(usageQuery.data?.rows?.length)}
-              className="inline-flex items-center gap-2 bg-transparent border border-zinc-700 hover:border-zinc-500 text-zinc-300 text-sm font-medium py-1.5 px-3 rounded-md disabled:opacity-40"
+              className="inline-flex items-center gap-2 bg-transparent border border-zinc-700 hover:border-zinc-500 text-zinc-300 text-sm font-medium py-1.5 px-3 rounded-md disabled:opacity-40 transition-colors"
             >
+              <IconDownload size={15} stroke={1.6} aria-hidden="true" />
               Export CSV
             </button>
           </div>
@@ -353,23 +368,23 @@ function StatisticsPage() {
             />
           ) : (
             <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-zinc-800/80">
+              <table className={tableCls}>
                 <thead>
-                  <tr className="text-left text-[11px] uppercase tracking-wider text-zinc-600">
+                  <tr className="text-left text-[11px] uppercase tracking-wider text-zinc-500">
                     {usageScope === 'user' ? (
                       <>
-                        <th className="px-5 py-2.5 font-medium">VPN user</th>
-                        <th className="px-5 py-2.5 font-medium">Peers</th>
+                        <th className={thCls}>VPN user</th>
+                        <th className={thCls}>Peers</th>
                       </>
                     ) : (
                       <>
-                        <th className="px-5 py-2.5 font-medium">Peer</th>
-                        <th className="px-5 py-2.5 font-medium">Tunnel IP</th>
+                        <th className={thCls}>Peer</th>
+                        <th className={thCls}>Tunnel IP</th>
                       </>
                     )}
-                    <th className="px-5 py-2.5 font-medium text-right">Download</th>
-                    <th className="px-5 py-2.5 font-medium text-right">Upload</th>
-                    <th className="px-5 py-2.5 font-medium text-right">Total</th>
+                    <th className={thCls + ' text-right'}>Download</th>
+                    <th className={thCls + ' text-right'}>Upload</th>
+                    <th className={thCls + ' text-right'}>Total</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-zinc-800/60">

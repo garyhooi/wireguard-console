@@ -1,6 +1,22 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
+import { IconPlus } from '@tabler/icons-react'
+import {
+  Badge,
+  EmptyState,
+  GhostButton,
+  Modal,
+  PageHeader,
+  PrimaryButton,
+  Skeleton,
+  tableCls,
+  tableWrapCls,
+  tdCls,
+  thCls,
+  inputCls,
+  labelCls,
+} from '../../lib/ui'
 
 interface DomainRule {
   id: string
@@ -89,170 +105,154 @@ function DomainRulesPage() {
     addMutation.mutate(data)
   }
 
+  const active = Array.isArray(rules) ? rules : []
+
   return (
     <div>
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold text-white">Domain Blocking</h1>
-        <button
-          onClick={() => setShowAddModal(true)}
-          className="bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-4 rounded-md"
-        >
-          Add Rule
-        </button>
-      </div>
+      <PageHeader
+        title="Domain Blocking"
+        description="AdGuard Home rules that block domains for all users or specific users. Changes sync to AdGuard immediately."
+        actions={
+          <PrimaryButton onClick={() => setShowAddModal(true)}>
+            <IconPlus size={16} stroke={1.6} aria-hidden="true" />
+            Add Rule
+          </PrimaryButton>
+        }
+      />
 
-      <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-6 mb-6">
-        <h2 className="text-lg font-semibold text-white mb-2">How It Works</h2>
-        <ul className="text-neutral-400 text-sm space-y-1">
-          <li>• <strong>Global rules</strong> block domains for all users</li>
-          <li>• <strong>User rules</strong> block domains for specific users only</li>
-          <li>• Rules use adblock-style syntax: <code className="bg-neutral-800 px-1 rounded">||example.com^</code></li>
-          <li>• Subdomains are blocked automatically (e.g., <code className="bg-neutral-800 px-1 rounded">||example.com^</code> blocks example.com and *.example.com)</li>
+      <Modal
+        open={showAddModal}
+        onClose={() => setShowAddModal(false)}
+        title="Add Domain Rule"
+        className="max-w-md"
+      >
+        <form onSubmit={handleAdd} className="space-y-4">
+          <div>
+            <label htmlFor="scope" className={labelCls}>
+              Scope
+            </label>
+            <select
+              id="scope"
+              className={inputCls}
+              value={scope}
+              onChange={(e) => setScope(e.target.value as 'global' | 'user')}
+            >
+              <option value="global">Global (all users)</option>
+              <option value="user">User-specific</option>
+            </select>
+          </div>
+
+          {scope === 'user' && (
+            <div>
+              <label htmlFor="userId" className={labelCls}>
+                User
+              </label>
+              <select
+                id="userId"
+                className={inputCls}
+                value={userId}
+                onChange={(e) => setUserId(e.target.value)}
+              >
+                <option value="">Select a user</option>
+                {users?.map((user) => (
+                  <option key={user.id} value={user.id}>
+                    {user.full_name || user.email}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          <div>
+            <label htmlFor="domain" className={labelCls}>
+              Domain
+            </label>
+            <input
+              id="domain"
+              type="text"
+              required
+              className={inputCls + ' font-mono'}
+              placeholder="example.com"
+              value={domain}
+              onChange={(e) => setDomain(e.target.value)}
+            />
+            <p className="text-zinc-500 text-xs mt-1">
+              Enter domain without protocol (e.g., <code className="bg-zinc-800 px-1 rounded">example.com</code>)
+            </p>
+          </div>
+
+          <div className="flex justify-end gap-3 pt-2">
+            <GhostButton type="button" onClick={() => setShowAddModal(false)}>
+              Cancel
+            </GhostButton>
+            <PrimaryButton type="submit" disabled={addMutation.isPending || !domain}>
+              {addMutation.isPending ? 'Adding…' : 'Add Rule'}
+            </PrimaryButton>
+          </div>
+        </form>
+      </Modal>
+
+      <div className="border border-zinc-800 rounded-lg bg-zinc-900/50 p-6 mb-6">
+        <h2 className="text-sm font-medium text-zinc-200 mb-3">How It Works</h2>
+        <ul className="text-zinc-400 text-sm space-y-1.5 leading-relaxed">
+          <li>• <strong className="text-zinc-200">Global rules</strong> block domains for all users</li>
+          <li>• <strong className="text-zinc-200">User rules</strong> block domains for specific users only</li>
+          <li>• Rules use adblock-style syntax: <code className="bg-zinc-800 px-1 rounded">||example.com^</code></li>
+          <li>• Subdomains are blocked automatically (e.g., <code className="bg-zinc-800 px-1 rounded">||example.com^</code> blocks example.com and *.example.com)</li>
           <li>• Changes are synced to AdGuard Home immediately</li>
         </ul>
       </div>
 
-      {showAddModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-6 max-w-md w-full mx-4">
-            <h2 className="text-xl font-bold text-white mb-4">Add Domain Rule</h2>
-            <form onSubmit={handleAdd} className="space-y-4">
-              <div>
-                <label htmlFor="scope" className="block text-sm font-medium text-neutral-400 mb-2">
-                  Scope
-                </label>
-                <select
-                  id="scope"
-                  className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
-                  value={scope}
-                  onChange={(e) => setScope(e.target.value as 'global' | 'user')}
-                >
-                  <option value="global">Global (all users)</option>
-                  <option value="user">User-specific</option>
-                </select>
-              </div>
-
-              {scope === 'user' && (
-                <div>
-                  <label htmlFor="userId" className="block text-sm font-medium text-neutral-400 mb-2">
-                    User
-                  </label>
-                  <select
-                    id="userId"
-                    className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
-                    value={userId}
-                    onChange={(e) => setUserId(e.target.value)}
-                  >
-                    <option value="">Select a user</option>
-                    {users?.map((user) => (
-                      <option key={user.id} value={user.id}>
-                        {user.full_name || user.email}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
-
-              <div>
-                <label htmlFor="domain" className="block text-sm font-medium text-neutral-400 mb-2">
-                  Domain
-                </label>
-                <input
-                  id="domain"
-                  type="text"
-                  required
-                  className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white font-mono focus:outline-none focus:ring-2 focus:ring-teal-500"
-                  placeholder="example.com"
-                  value={domain}
-                  onChange={(e) => setDomain(e.target.value)}
-                />
-                <p className="text-neutral-500 text-xs mt-1">
-                  Enter domain without protocol (e.g., <code className="bg-neutral-800 px-1 rounded">example.com</code>)
-                </p>
-              </div>
-
-              <div className="flex space-x-3">
-                <button
-                  type="button"
-                  onClick={() => setShowAddModal(false)}
-                  className="flex-1 bg-neutral-700 hover:bg-neutral-600 text-white font-medium py-2 px-4 rounded-md"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={addMutation.isPending || !domain}
-                  className="flex-1 bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-4 rounded-md disabled:opacity-50"
-                >
-                  {addMutation.isPending ? 'Adding...' : 'Add Rule'}
-                </button>
-              </div>
-            </form>
+      <div className={tableWrapCls}>
+        {isLoading ? (
+          <div className="p-5 space-y-3">
+            <Skeleton className="h-10 w-full" />
+            <Skeleton className="h-10 w-full" />
           </div>
-        </div>
-      )}
-
-      {isLoading ? (
-        <div className="text-neutral-400">Loading...</div>
-      ) : (
-        <div className="bg-neutral-900 border border-neutral-800 rounded-lg overflow-hidden">
-          <table className="min-w-full divide-y divide-neutral-800">
-            <thead className="bg-neutral-800">
-              <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                  Domain
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                  Scope
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                  User
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                  Created
-                </th>
-                <th className="px-6 py-3 text-right text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                  Actions
-                </th>
-              </tr>
-            </thead>
-            <tbody className="bg-neutral-900 divide-y divide-neutral-800">
-              {rules?.map((rule) => (
-                <tr key={rule.id}>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-white font-mono">
-                    ||{rule.domain}^
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <span
-                      className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
-                        rule.scope === 'global'
-                          ? 'bg-purple-100 text-purple-800'
-                          : 'bg-blue-100 text-blue-800'
-                      }`}
-                    >
-                      {rule.scope}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-neutral-400">
-                    {rule.user_id ? 'User' : '-'}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-neutral-400">
-                    {new Date(rule.created_at).toLocaleDateString()}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                    <button
-                      onClick={() => deleteMutation.mutate(rule.id)}
-                      className="text-red-400 hover:text-red-300"
-                    >
-                      Delete
-                    </button>
-                  </td>
+        ) : active.length === 0 ? (
+          <EmptyState
+            title="No domain rules yet"
+            hint="Add a rule to block domains via AdGuard Home for all users or a specific user."
+            action={<PrimaryButton onClick={() => setShowAddModal(true)}><IconPlus size={16} stroke={1.6} aria-hidden="true" />Add Rule</PrimaryButton>}
+          />
+        ) : (
+          <div className="overflow-x-auto">
+            <table className={tableCls}>
+              <thead>
+                <tr className="text-left text-[11px] uppercase tracking-wider text-zinc-500 bg-zinc-800/40">
+                  <th className={thCls}>Domain</th>
+                  <th className={thCls}>Scope</th>
+                  <th className={thCls}>User</th>
+                  <th className={thCls}>Created</th>
+                  <th className={thCls + ' text-right'}>Actions</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+              </thead>
+              <tbody className="divide-y divide-zinc-800/60">
+                {active.map((rule) => (
+                  <tr key={rule.id} className="hover:bg-zinc-800/30 transition-colors">
+                    <td className={tdCls + ' font-mono'}>{`||${rule.domain}^`}</td>
+                    <td className="px-5 py-3.5 whitespace-nowrap">
+                      <Badge tone={rule.scope === 'global' ? 'accent' : 'info'}>{rule.scope}</Badge>
+                    </td>
+                    <td className={tdCls}>{rule.user_id ? 'User' : '—'}</td>
+                    <td className={tdCls}>
+                      {new Date(rule.created_at).toLocaleDateString()}
+                    </td>
+                    <td className="px-5 py-3.5 whitespace-nowrap text-right text-sm font-medium">
+                      <button
+                        onClick={() => deleteMutation.mutate(rule.id)}
+                        className="inline-flex items-center text-sm rounded-md px-2 py-1 text-red-400 hover:text-red-300 hover:bg-red-500/10 transition-colors"
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   )
 }

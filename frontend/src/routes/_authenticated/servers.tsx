@@ -1,7 +1,22 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
-import { labelCls } from '../../lib/ui'
+import { IconCopy, IconPlus, IconTerminal2 } from '@tabler/icons-react'
+import {
+  ActionLink,
+  Badge,
+  GhostButton,
+  Modal,
+  PageHeader,
+  PrimaryButton,
+  Skeleton,
+  tableCls,
+  tableWrapCls,
+  tdCls,
+  thCls,
+  inputCls,
+  labelCls,
+} from '../../lib/ui'
 
 interface Server {
   id: string
@@ -173,304 +188,259 @@ function ServersPage() {
   }
 
   if (isLoading) {
-    return <div className="text-neutral-400">Loading...</div>
+    return (
+      <div className="space-y-6">
+        <div className="h-8 w-56 wgc-skeleton rounded-md" />
+        <div className="h-64 w-full wgc-skeleton rounded-lg" />
+      </div>
+    )
   }
-
-  const modalOpen = showAdd || editing !== null || hostSetup !== null
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold text-white">Servers</h1>
-        <button
-          onClick={openAdd}
-          className="bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-4 rounded-md"
-        >
-          Add Server
-        </button>
-      </div>
+      <PageHeader
+        title="Servers"
+        description="A server is one WireGuard interface on the VPN host. Keys are generated automatically on creation."
+        actions={<PrimaryButton onClick={openAdd}><IconPlus size={16} stroke={1.6} aria-hidden="true" />Add Server</PrimaryButton>}
+      />
 
       {error && <p className="text-red-400 text-sm mb-3">{error}</p>}
 
-      {modalOpen && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-6 max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto">
-            <h2 className="text-xl font-bold text-white mb-1">{editing ? 'Edit Server' : 'Add Server'}</h2>
-            <p className="text-sm text-neutral-400 mb-4">
-              A server is one WireGuard interface on the VPN host (like wg0). Keys are generated
-              automatically on creation.
-            </p>
-            <form
-              onSubmit={(e) => {
-                e.preventDefault()
-                saveMutation.mutate()
-              }}
-              className="space-y-4"
+      {/* Add / edit modal */}
+      <Modal
+        open={showAdd || editing !== null}
+        onClose={() => {
+          setShowAdd(false)
+          setEditing(null)
+        }}
+        title={editing ? 'Edit Server' : 'Add Server'}
+        description="A server is one WireGuard interface on the VPN host (like wg0). Keys are generated automatically on creation."
+        className="max-w-lg"
+      >
+        <form
+          onSubmit={(e) => {
+            e.preventDefault()
+            saveMutation.mutate()
+          }}
+          className="space-y-4"
+        >
+          <div>
+            <label htmlFor="sName" className={labelCls}>
+              Name
+            </label>
+            <input
+              id="sName"
+              required
+              value={form.name}
+              onChange={set('name')}
+              placeholder="e.g. Production VPN"
+              className={inputCls}
+            />
+          </div>
+          <div>
+            <label htmlFor="sEndp" className={labelCls}>
+              Public endpoint (host:port) — what peers connect to
+            </label>
+            <input
+              id="sEndp"
+              required
+              value={form.public_endpoint}
+              onChange={set('public_endpoint')}
+              placeholder="e.g. 15.232.201.12:51820"
+              className={inputCls}
+            />
+          </div>
+          <div>
+            <label htmlFor="sMode" className={labelCls}>
+              Managed by
+            </label>
+            <select
+              id="sMode"
+              value={form.managed_mode}
+              onChange={(e) => setForm((f) => ({ ...f, managed_mode: e.target.value }))}
+              className={inputCls}
             >
-              <div>
-                <label htmlFor="sName" className="block text-sm font-medium text-neutral-400 mb-2">
-                  Name
-                </label>
-                <input
-                  id="sName"
-                  required
-                  value={form.name}
-                  onChange={set('name')}
-                  placeholder="e.g. Production VPN"
-                  className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
-                />
-              </div>
-              <div>
-                <label htmlFor="sEndp" className="block text-sm font-medium text-neutral-400 mb-2">
-                  Public endpoint (host:port) — what peers connect to
-                </label>
-                <input
-                  id="sEndp"
-                  required
-                  value={form.public_endpoint}
-                  onChange={set('public_endpoint')}
-                  placeholder="e.g. 15.232.201.12:51820"
-                  className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
-                />
-              </div>
-              <div>
-                <label htmlFor="sMode" className="block text-sm font-medium text-neutral-400 mb-2">
-                  Managed by
+              <option value="local">
+                This console (automatic — interface is created and synced on this host)
+              </option>
+              <option value="remote">Node (agent applies it automatically)</option>
+              <option value="manual">Manual (Host Setup)</option>
+            </select>
+            {form.managed_mode === 'remote' && (
+              <div className="mt-3">
+                <label htmlFor="sNode" className={labelCls}>
+                  Node
                 </label>
                 <select
-                  id="sMode"
-                  value={form.managed_mode}
-                  onChange={(e) => setForm((f) => ({ ...f, managed_mode: e.target.value }))}
-                  className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
+                  id="sNode"
+                  required
+                  value={form.node_id}
+                  onChange={(e) => setForm((f) => ({ ...f, node_id: e.target.value }))}
+                  className={inputCls}
                 >
-                  <option value="local">
-                    This console (automatic — interface is created and synced on this host)
+                  <option value="" disabled>
+                    {!nodes || nodes.length === 0 ? 'No nodes — create one under Nodes first' : 'Select a node…'}
                   </option>
-                  <option value="remote">Node (agent applies it automatically)</option>
-                  <option value="manual">Manual (Host Setup)</option>
+                  {(nodes || []).map((n) => (
+                    <option key={n.id} value={n.id}>
+                      {n.name}
+                    </option>
+                  ))}
                 </select>
-                {form.managed_mode === 'remote' && (
-                  <div className="mt-3">
-                    <label htmlFor="sNode" className={labelCls}>
-                      Node
-                    </label>
-                    <select
-                      id="sNode"
-                      required
-                      value={form.node_id}
-                      onChange={(e) => setForm((f) => ({ ...f, node_id: e.target.value }))}
-                      className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
-                    >
-                      <option value="" disabled>
-                        {!nodes || nodes.length === 0 ? 'No nodes — create one under Nodes first' : 'Select a node…'}
-                      </option>
-                      {(nodes || []).map((n) => (
-                        <option key={n.id} value={n.id}>
-                          {n.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                )}
-                {form.managed_mode === 'manual' && (
-                  <p className="text-sm text-yellow-300 mt-2">
-                    Kernel sync is skipped for this server. After creating it, use the Host Setup
-                    button to get the node config.
-                  </p>
-                )}
               </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label htmlFor="sIface" className="block text-sm font-medium text-neutral-400 mb-2">
-                    Interface name
-                  </label>
-                  <input
-                    id="sIface"
-                    value={form.interface_name}
-                    onChange={set('interface_name')}
-                    className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
-                  />
-                </div>
-                <div>
-                  <label htmlFor="sPort" className="block text-sm font-medium text-neutral-400 mb-2">
-                    Listen port
-                  </label>
-                  <input
-                    id="sPort"
-                    value={form.listen_port}
-                    onChange={set('listen_port')}
-                    className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
-                  />
-                </div>
-              </div>
-              <div>
-                <label htmlFor="sCidr" className="block text-sm font-medium text-neutral-400 mb-2">
-                  Network (peer IPs are allocated from this)
-                </label>
-                <input
-                  id="sCidr"
-                  value={form.network_cidr}
-                  onChange={set('network_cidr')}
-                  className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
-                />
-              </div>
-              <div>
-                <label htmlFor="sDns" className="block text-sm font-medium text-neutral-400 mb-2">
-                  DNS servers (comma-separated)
-                </label>
-                <input
-                  id="sDns"
-                  value={form.dns_servers}
-                  onChange={set('dns_servers')}
-                  className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
-                />
-                <p className="text-xs text-neutral-500 mt-2">
-                  Leave empty to use the tunnel gateway (e.g. 10.8.0.1) — required for domain
-                  filtering: AdGuard Home listens there and every peer DNS lookup passes the
-                  filter. If you enter a public DNS (e.g. 1.1.1.1, 8.8.8.8), peers bypass AdGuard
-                  and domain blocking won't apply to this server's peers.
-                </p>
-              </div>
-              <div className="flex space-x-3">
-                <button
-                  type="submit"
-                  disabled={saveMutation.isPending}
-                  className="bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-4 rounded-md disabled:opacity-50"
-                >
-                  {saveMutation.isPending ? 'Saving…' : editing ? 'Save Changes' : 'Create Server'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowAdd(false)
-                    setEditing(null)
-                  }}
-                  className="bg-neutral-700 hover:bg-neutral-600 text-white font-medium py-2 px-4 rounded-md"
-                >
-                  Cancel
-                </button>
-              </div>
-            </form>
+            )}
+            {form.managed_mode === 'manual' && (
+              <p className="text-sm text-amber-300 mt-2">
+                Kernel sync is skipped for this server. After creating it, use the Host Setup
+                button to get the node config.
+              </p>
+            )}
           </div>
-        </div>
-      )}
-
-      {hostSetup && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
-            <h2 className="text-xl font-bold text-white mb-1">Host Setup — {hostSetup.name}</h2>
-            <p className="text-sm text-neutral-400 mb-4">
-              On the VPN server: save this as <code className="text-teal-400">wg0.conf</code>, then{' '}
-              <code className="text-teal-400">sudo wg-quick up /tmp/wg0.conf</code> and run the NAT
-              command from the comments. This re-creates the interface — do it once, and re-open
-              this panel after adding peers to keep the peer list current.
-            </p>
-            <pre className="bg-neutral-950 border border-neutral-800 rounded-md p-4 text-xs text-neutral-300 overflow-x-auto whitespace-pre-wrap">
-              {hostSetup.text}
-            </pre>
-            <div className="flex space-x-3 mt-4">
-              <button
-                onClick={copyHostConfig}
-                className="bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-4 rounded-md"
-              >
-                {hostCopied ? 'Copied ✓' : 'Copy Config'}
-              </button>
-              <button
-                onClick={() => setHostSetup(null)}
-                className="bg-neutral-700 hover:bg-neutral-600 text-white font-medium py-2 px-4 rounded-md"
-              >
-                Close
-              </button>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label htmlFor="sIface" className={labelCls}>
+                Interface name
+              </label>
+              <input
+                id="sIface"
+                value={form.interface_name}
+                onChange={set('interface_name')}
+                className={inputCls}
+              />
+            </div>
+            <div>
+              <label htmlFor="sPort" className={labelCls}>
+                Listen port
+              </label>
+              <input
+                id="sPort"
+                value={form.listen_port}
+                onChange={set('listen_port')}
+                className={inputCls}
+              />
             </div>
           </div>
-        </div>
-      )}
+          <div>
+            <label htmlFor="sCidr" className={labelCls}>
+              Network (peer IPs are allocated from this)
+            </label>
+            <input
+              id="sCidr"
+              value={form.network_cidr}
+              onChange={set('network_cidr')}
+              className={inputCls}
+            />
+          </div>
+          <div>
+            <label htmlFor="sDns" className={labelCls}>
+              DNS servers (comma-separated)
+            </label>
+            <input
+              id="sDns"
+              value={form.dns_servers}
+              onChange={set('dns_servers')}
+              className={inputCls}
+            />
+            <p className="text-xs text-zinc-500 mt-2">
+              Leave empty to use the tunnel gateway (e.g. 10.8.0.1) — required for domain
+              filtering: AdGuard Home listens there and every peer DNS lookup passes the
+              filter. If you enter a public DNS (e.g. 1.1.1.1, 8.8.8.8), peers bypass AdGuard
+              and domain blocking won't apply to this server's peers.
+            </p>
+          </div>
+          <div className="flex justify-end gap-3 pt-2">
+            <GhostButton
+              type="button"
+              onClick={() => {
+                setShowAdd(false)
+                setEditing(null)
+              }}
+            >
+              Cancel
+            </GhostButton>
+            <PrimaryButton type="submit" disabled={saveMutation.isPending}>
+              {saveMutation.isPending ? 'Saving…' : editing ? 'Save Changes' : 'Create Server'}
+            </PrimaryButton>
+          </div>
+        </form>
+      </Modal>
 
-      <div className="bg-neutral-900 border border-neutral-800 rounded-lg overflow-hidden">
-        <table className="min-w-full divide-y divide-neutral-800">
-          <thead className="bg-neutral-800">
-            <tr>
-              <th className="px-6 py-3 text-left text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                Name
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                Endpoint
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                Interface
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                Network
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                Public Key
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                Status
-              </th>
-              <th className="px-6 py-3 text-right text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                Actions
-              </th>
-            </tr>
-          </thead>
-          <tbody className="bg-neutral-900 divide-y divide-neutral-800">
-            {servers?.map((server) => (
-              <tr key={server.id}>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-white">{server.name}</td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-neutral-400 font-mono">
-                  {server.public_endpoint}
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-neutral-400 font-mono">
-                  {server.interface_name}
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-neutral-400 font-mono">
-                  {server.network_cidr}
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-neutral-400 font-mono">
-                  {server.server_public_key.substring(0, 16)}...
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap">
-                  <span
-                    className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
-                      server.status === 'active'
-                        ? 'bg-green-100 text-green-800'
-                        : 'bg-red-100 text-red-800'
-                    }`}
-                  >
-                    {server.status}
-                  </span>
-                  {server.managed_mode === 'manual' && (
-                    <span className="ml-2 px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800">
-                      manual
-                    </span>
-                  )}
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-right text-sm">
-                  <div className="flex justify-end gap-2">
-                    <button onClick={() => openEdit(server)} className="text-teal-400 hover:text-teal-300">
-                      Edit
-                    </button>
-                    <button
-                      onClick={() => openHostSetup(server)}
-                      className="text-blue-400 hover:text-blue-300"
-                    >
-                      Host Setup
-                    </button>
-                    <button
-                      onClick={() => {
-                        if (confirm(`Delete server "${server.name}" and all of its peers?`))
-                          removeMutation.mutate(server)
-                      }}
-                      className="text-red-400 hover:text-red-300"
-                    >
-                      Delete
-                    </button>
-                  </div>
-                </td>
+      {/* Host setup modal */}
+      <Modal
+        open={hostSetup !== null}
+        onClose={() => setHostSetup(null)}
+        title={hostSetup ? `Host Setup — ${hostSetup.name}` : undefined}
+        description="On the VPN server: save this as wg0.conf, then run the NAT command from the comments. This re-creates the interface — do it once, and re-open this panel after adding peers to keep the peer list current."
+        className="max-w-2xl"
+        footer={
+          <>
+            <GhostButton onClick={() => setHostSetup(null)}>Close</GhostButton>
+            <PrimaryButton onClick={copyHostConfig}>
+              <IconCopy size={16} stroke={1.6} aria-hidden="true" />
+              {hostCopied ? 'Copied' : 'Copy Config'}
+            </PrimaryButton>
+          </>
+        }
+      >
+        <pre className="bg-zinc-950 border border-zinc-800 rounded-md p-4 text-xs text-zinc-300 overflow-x-auto whitespace-pre-wrap">
+          {hostSetup?.text}
+        </pre>
+      </Modal>
+
+      <div className={tableWrapCls}>
+        <div className="overflow-x-auto">
+          <table className={tableCls}>
+            <thead>
+              <tr className="text-left text-[11px] uppercase tracking-wider text-zinc-500 bg-zinc-800/40">
+                <th className={thCls}>Name</th>
+                <th className={thCls}>Endpoint</th>
+                <th className={thCls}>Interface</th>
+                <th className={thCls}>Network</th>
+                <th className={thCls}>Public Key</th>
+                <th className={thCls}>Status</th>
+                <th className={thCls + ' text-right'}>Actions</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody className="divide-y divide-zinc-800/60">
+              {servers?.map((server) => (
+                <tr key={server.id} className="hover:bg-zinc-800/30 transition-colors">
+                  <td className="px-5 py-3.5 whitespace-nowrap text-sm text-zinc-200">{server.name}</td>
+                  <td className={tdCls + ' font-mono'}>{server.public_endpoint}</td>
+                  <td className={tdCls + ' font-mono'}>{server.interface_name}</td>
+                  <td className={tdCls + ' font-mono'}>{server.network_cidr}</td>
+                  <td className={tdCls + ' font-mono'}>{server.server_public_key.substring(0, 16)}...</td>
+                  <td className="px-5 py-3.5 whitespace-nowrap">
+                    <div className="flex items-center gap-1.5">
+                      <Badge tone={server.status === 'active' ? 'good' : 'bad'}>{server.status}</Badge>
+                      {server.managed_mode === 'manual' && <Badge tone="info">manual</Badge>}
+                    </div>
+                  </td>
+                  <td className="px-5 py-3.5 whitespace-nowrap text-right text-sm">
+                    <div className="flex justify-end gap-1">
+                      <ActionLink onClick={() => openEdit(server)}>Edit</ActionLink>
+                      <ActionLink
+                        tone="default"
+                        onClick={() => openHostSetup(server)}
+                      >
+                        <IconTerminal2 size={14} stroke={1.6} aria-hidden="true" />
+                        Host Setup
+                      </ActionLink>
+                      <ActionLink
+                        tone="danger"
+                        onClick={() => {
+                          if (confirm(`Delete server "${server.name}" and all of its peers?`))
+                            removeMutation.mutate(server)
+                        }}
+                      >
+                        Delete
+                      </ActionLink>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   )

@@ -44,6 +44,14 @@ func GetStatsOverview(store *Store) http.HandlerFunc {
 			WHERE last_handshake_at > now() - interval '3 minutes'
 		`).Scan(&stats.ConnectedPeers)
 
+		// Total bytes transferred over the last 24h (live samples only — the
+		// daily rollup covers older days; the two never overlap).
+		store.pool.QueryRow(ctx, `
+			SELECT COALESCE(SUM(rx_bytes), 0), COALESCE(SUM(tx_bytes), 0)
+			FROM peer_traffic_samples
+			WHERE sampled_at >= now() - interval '24 hours'
+		`).Scan(&stats.TotalRXBytes, &stats.TotalTXBytes)
+
 		writeJSON(w, http.StatusOK, stats)
 	}
 }

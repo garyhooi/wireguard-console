@@ -25,6 +25,45 @@ A self-hosted, production-grade web console for issuing, monitoring, and revokin
 - **Automated tests** — backend unit + real E2E against Postgres 18,
   frontend component tests, CI workflow (`scripts/test.sh`)
 
+## Screens
+
+A small deployment, seeded with a few VPN users, peers, servers and a day
+of traffic so the charts and reports have real data to show.
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/demo/dashboard.png" alt="Dashboard" width="100%" />
+      <br /><em>Dashboard — live KPIs and recent peers</em>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/demo/statistics.png" alt="Statistics" width="100%" />
+      <br /><em>Statistics — traffic chart, top peers and usage report</em>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/demo/peers.png" alt="Peers" width="100%" />
+      <br /><em>Peers — active/suspended devices, config &amp; QR actions</em>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/demo/users.png" alt="VPN Users" width="100%" />
+      <br /><em>VPN Users — status tabs, search and invite</em>
+    </td>
+  </tr>
+</table>
+
+**Try it yourself** — follow [Quick Start](#quick-start), then use the demo
+seed (dev only) to load believable data in one command:
+
+```bash
+PGPASSWORD=<your-password> psql -h localhost -U wgconsole -d wgconsole \
+  -f scripts/demo-seed.sql
+```
+
+The seed is idempotent and safe to re-run against a local database. It does
+not touch the bootstrap `super_admin`.
+
 ## Tech Stack
 
 - **Frontend**: React 19, TypeScript 7, Vite 8, TanStack Router/Query, Tailwind CSS 4, Recharts 3

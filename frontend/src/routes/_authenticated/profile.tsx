@@ -1,12 +1,13 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
+import { IconShieldLock } from '@tabler/icons-react'
 import {
+  Badge,
   GhostButton,
   PageHeader,
   Panel,
   PrimaryButton,
-  StatusBadge,
   inputCls,
   labelCls,
 } from '../../lib/ui'
@@ -107,11 +108,15 @@ function ProfilePage() {
             </div>
             <div className="flex items-center justify-between">
               <span className="text-sm text-zinc-500">Role</span>
-              <StatusBadge status={me?.role || 'admin'} />
+              <Badge tone={me?.role === 'super_admin' ? 'accent' : me?.role === 'admin' ? 'good' : 'neutral'}>
+                {me?.role || 'admin'}
+              </Badge>
             </div>
             <div className="flex items-center justify-between">
               <span className="text-sm text-zinc-500">2FA</span>
-              <StatusBadge status={me?.totp_enabled ? 'ok' : 'warning'} />
+              <Badge tone={me?.totp_enabled ? 'good' : 'warn'}>
+                {me?.totp_enabled ? 'enabled' : 'off'}
+              </Badge>
             </div>
             <p className="text-xs text-zinc-600 pt-2">
               {me?.totp_enabled
@@ -119,12 +124,15 @@ function ProfilePage() {
                 : 'Two-factor authentication is not enabled — enroll it now.'}
             </p>
             {!me?.totp_enabled && (
-              <Link
-                to="/2fa-setup"
-                className="inline-flex bg-teal-600 hover:bg-teal-500 text-white text-sm font-medium py-2 px-4 rounded-md"
-              >
-                Enroll 2FA
-              </Link>
+              <div className="pt-1">
+                <Link
+                  to="/2fa-setup"
+                  className="inline-flex items-center gap-2 bg-teal-700 hover:bg-teal-600 text-white text-sm font-medium py-2 px-4 rounded-md transition-colors"
+                >
+                  <IconShieldLock size={16} stroke={1.6} aria-hidden="true" />
+                  Enroll 2FA
+                </Link>
+              </div>
             )}
           </div>
         </Panel>

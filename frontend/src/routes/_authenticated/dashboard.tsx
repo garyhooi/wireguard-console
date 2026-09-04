@@ -1,5 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
+import { IconArrowRight, IconCirclePlus } from '@tabler/icons-react'
 import { EmptyState, PageHeader, Panel, Skeleton, Stat, StatusBadge } from '../../lib/ui'
 
 interface Stats {
@@ -101,7 +102,18 @@ export function DashboardPage() {
 
       {/* Recent peers */}
       <div className="mt-8">
-        <Panel title="Recent peers" right={<Link to="/peers" className="text-xs text-teal-400 hover:text-teal-300">View all →</Link>}>
+        <Panel
+          title="Recent peers"
+          right={
+            <Link
+              to="/peers"
+              className="inline-flex items-center gap-1 text-xs text-teal-400 hover:text-teal-300 transition-colors"
+            >
+              View all
+              <IconArrowRight size={14} stroke={1.6} aria-hidden="true" />
+            </Link>
+          }
+        >
           {activePeers.length === 0 ? (
             <EmptyState
               title="No peers yet"
@@ -109,8 +121,9 @@ export function DashboardPage() {
               action={
                 <Link
                   to="/peers"
-                  className="inline-flex items-center bg-teal-600 hover:bg-teal-500 text-white text-sm font-medium py-2 px-4 rounded-md"
+                  className="inline-flex items-center gap-2 bg-teal-700 hover:bg-teal-600 text-white text-sm font-medium py-2 px-4 rounded-md transition-colors"
                 >
+                  <IconCirclePlus size={16} stroke={1.6} aria-hidden="true" />
                   Add peer
                 </Link>
               }

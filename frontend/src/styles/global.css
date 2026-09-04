@@ -23,10 +23,17 @@ body,
 
 body {
   margin: 0;
+  overflow-x: hidden;
 }
 
 ::selection {
   background: rgba(13, 148, 136, 0.35); /* teal accent */
+}
+
+/* Durable, visible focus for keyboard users only (never on pointer click) */
+:focus-visible {
+  outline: 2px solid theme(--color-teal-500);
+  outline-offset: 2px;
 }
 
 /* Skeleton shimmer */
@@ -47,4 +54,24 @@ body {
   .wgc-skeleton {
     animation: none;
   }
+}
+
+/* Slim, dark scrollbars for data tables and code blocks */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #3f3f46 transparent;
+}
+::-webkit-scrollbar {
+  height: 10px;
+  width: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: #3f3f46;
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #52525b;
+  background-clip: content-box;
 }

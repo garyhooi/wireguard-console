@@ -1,5 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { IconArchive } from '@tabler/icons-react'
 import {
   EmptyState,
   GhostButton,
@@ -7,6 +8,10 @@ import {
   Panel,
   PrimaryButton,
   Skeleton,
+  tableCls,
+  tableWrapCls,
+  tdCls,
+  thCls,
 } from '../../lib/ui'
 
 interface BackupList {
@@ -87,6 +92,7 @@ function BackupsPage() {
         description="One-click database backups live on the console server (Docker volume, /var/backups/wgconsole). Creating one runs pg_dump; restoring replaces the current database with a saved copy."
         actions={
           <PrimaryButton onClick={() => createMutation.mutate()} disabled={createMutation.isPending}>
+            <IconArchive size={16} stroke={1.6} aria-hidden="true" />
             {createMutation.isPending ? 'Creating…' : 'Create backup now'}
           </PrimaryButton>
         }
@@ -116,35 +122,38 @@ function BackupsPage() {
           <EmptyState
             title="No backups yet"
             hint="Create your first backup with the button above. Backups are stored inside the api container's persistent volume."
+            action={
+              <PrimaryButton onClick={() => createMutation.mutate()} disabled={createMutation.isPending}>
+                <IconArchive size={16} stroke={1.6} aria-hidden="true" />
+                Create backup now
+              </PrimaryButton>
+            }
           />
         ) : (
-          <table className="min-w-full divide-y divide-zinc-800/80">
-            <thead>
-              <tr className="text-left text-[11px] uppercase tracking-wider text-zinc-600">
-                <th className="px-5 py-2.5 font-medium">Created</th>
-                <th className="px-5 py-2.5 font-medium">Filename</th>
-                <th className="px-5 py-2.5 font-medium text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-zinc-800/60">
-              {[...backups].reverse().map((name) => (
-                <tr key={name} className="hover:bg-zinc-800/40 transition-colors">
-                  <td className="px-5 py-3 text-sm text-zinc-400 whitespace-nowrap font-mono tabular-nums">
-                    {backupLabel(name)}
-                  </td>
-                  <td className="px-5 py-3 text-sm text-zinc-200 font-mono">{name}</td>
-                  <td className="px-5 py-3 text-right text-sm">
-                    <GhostButton
-                      disabled={restoreMutation.isPending}
-                      onClick={() => doRestore(name)}
-                    >
-                      {restoreMutation.isPending ? 'Restoring…' : 'Restore'}
-                    </GhostButton>
-                  </td>
+          <div className="overflow-x-auto">
+            <table className={tableCls}>
+              <thead>
+                <tr className="text-left text-[11px] uppercase tracking-wider text-zinc-500">
+                  <th className={thCls}>Created</th>
+                  <th className={thCls}>Filename</th>
+                  <th className={thCls + ' text-right'}>Actions</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-zinc-800/60">
+                {[...backups].reverse().map((name) => (
+                  <tr key={name} className="hover:bg-zinc-800/30 transition-colors">
+                    <td className={tdCls + ' font-mono tabular-nums'}>{backupLabel(name)}</td>
+                    <td className={tdCls + ' font-mono text-zinc-200'}>{name}</td>
+                    <td className="px-5 py-3.5 text-right">
+                      <GhostButton disabled={restoreMutation.isPending} onClick={() => doRestore(name)}>
+                        {restoreMutation.isPending ? 'Restoring…' : 'Restore'}
+                      </GhostButton>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </Panel>
 

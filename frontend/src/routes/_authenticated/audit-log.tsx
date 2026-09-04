@@ -1,7 +1,16 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
-import { GhostButton, PageHeader, Panel } from '../../lib/ui'
+import {
+  DangerButton,
+  GhostButton,
+  PageHeader,
+  Panel,
+  tableCls,
+  tableWrapCls,
+  tdCls,
+  thCls,
+} from '../../lib/ui'
 
 interface AuditLog {
   id: number
@@ -87,7 +96,12 @@ function AuditLogPage() {
   }
 
   if (isLoading) {
-    return <div className="text-neutral-400">Loading...</div>
+    return (
+      <div className="space-y-6">
+        <div className="h-8 w-56 wgc-skeleton rounded-md" />
+        <div className="h-64 w-full wgc-skeleton rounded-lg" />
+      </div>
+    )
   }
 
   return (
@@ -108,7 +122,7 @@ function AuditLogPage() {
               <select
                 value={purgeDays}
                 onChange={(e) => setPurgeDays(Number(e.target.value))}
-                className="bg-zinc-800/60 border border-zinc-700 rounded-md px-3 py-2 text-sm text-zinc-100"
+                className="bg-zinc-800/60 border border-zinc-700 rounded-md px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-teal-500"
               >
                 {PURGE_OPTIONS.map((o) => (
                   <option key={o.days} value={o.days}>
@@ -116,63 +130,50 @@ function AuditLogPage() {
                   </option>
                 ))}
               </select>
-              <GhostButton
-                disabled={purgeMutation.isPending}
-                onClick={() => doPurge(purgeDays)}
-              >
+              <GhostButton disabled={purgeMutation.isPending} onClick={() => doPurge(purgeDays)}>
                 {purgeMutation.isPending ? 'Deleting…' : 'Delete old logs'}
               </GhostButton>
               <span className="text-xs text-zinc-600">or</span>
-              <button
-                onClick={() => doPurge()}
+              <DangerButton
                 disabled={purgeMutation.isPending}
-                className="text-xs text-red-400 hover:text-red-300 transition-colors disabled:opacity-50"
+                onClick={() => doPurge()}
+                className="border-0 py-1 px-2 text-xs"
               >
                 Clear entire audit log
-              </button>
+              </DangerButton>
             </div>
             {actionMsg && <p className="text-teal-400 text-sm mt-3">{actionMsg}</p>}
           </div>
         </Panel>
       )}
 
-      <div className="bg-neutral-900 border border-neutral-800 rounded-lg overflow-hidden">
-        <table className="min-w-full divide-y divide-neutral-800">
-          <thead className="bg-neutral-800">
-            <tr>
-              <th className="px-6 py-3 text-left text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                Timestamp
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                Action
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                Target
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                IP Address
-              </th>
-            </tr>
-          </thead>
-          <tbody className="bg-neutral-900 divide-y divide-neutral-800">
-            {logs?.map((log) => (
-              <tr key={log.id}>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-neutral-400">
-                  {new Date(log.created_at).toLocaleString()}
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-white">
-                  {log.action}
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-neutral-400">
-                  {log.target_type ? `${log.target_type}: ${log.target_id}` : '-'}
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-neutral-400 font-mono">
-                  {log.ip_address || '-'}
-                </td>
+      <div className={tableWrapCls}>
+        <div className="overflow-x-auto">
+          <table className={tableCls}>
+            <thead>
+              <tr className="text-left text-[11px] uppercase tracking-wider text-zinc-500 bg-zinc-800/40">
+                <th className={thCls}>Timestamp</th>
+                <th className={thCls}>Action</th>
+                <th className={thCls}>Target</th>
+                <th className={thCls}>IP Address</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody className="divide-y divide-zinc-800/60">
+              {logs?.map((log) => (
+                <tr key={log.id} className="hover:bg-zinc-800/30 transition-colors">
+                  <td className={tdCls + ' font-mono tabular-nums'}>
+                    {new Date(log.created_at).toLocaleString()}
+                  </td>
+                  <td className="px-5 py-3.5 whitespace-nowrap text-sm text-zinc-200">{log.action}</td>
+                  <td className={tdCls}>
+                    {log.target_type ? `${log.target_type}: ${log.target_id}` : '—'}
+                  </td>
+                  <td className={tdCls + ' font-mono'}>{log.ip_address || '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   )
