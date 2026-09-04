@@ -479,6 +479,69 @@ func TestEndToEnd(t *testing.T) {
 	})
 	expectStatus(t, reviveResp, 201, "POST /api/users (reuse removed email)")
 
+	// ---- Usage aggregation by user and by peer ----
+	// The E2E MacBook Pro peer (user@example.com) was removed earlier; the
+	// revived user has no peer, so reuse the claimer's peer for samples.
+	peerList2 := rawGet(t, baseURL+"/api/peers", token)
+	var peerRows2 []map[string]interface{}
+	json.Unmarshal([]byte(peerList2), &peerRows2)
+	claimPeerID := ""
+	for _, pr := range peerRows2 {
+		if email, _ := pr["user_email"].(string); email == "claimer@example.com" {
+			claimPeerID, _ = pr["id"].(string)
+		}
+	}
+	if claimPeerID == "" {
+		t.Fatal("no claimer peer found for usage test")
+	}
+	if err := seedTraffic(dbURL, claimPeerID, 1_000_000, 500_000); err != nil {
+		t.Fatalf("seed traffic: %v", err)
+	}
+	{
+		poolX, _ := pgxpool.New(context.Background(), dbURL)
+		defer poolX.Close()
+		var cnt int
+		var peerCnt int
+		poolX.QueryRow(context.Background(), `SELECT count(*) FROM peer_traffic_samples`).Scan(&cnt)
+		poolX.QueryRow(context.Background(), `SELECT count(*) FROM peers WHERE id = $1`, claimPeerID).Scan(&peerCnt)
+		t.Logf("samples=%d claimPeerRows=%d", cnt, peerCnt)
+	}
+
+	usgResp, usageBody := api(t, "GET", "/api/stats/usage?scope=user", token, nil)
+	expectStatus(t, usgResp, 200, "GET /api/stats/usage?scope=user")
+	_ = usageBody // api() decodes into map; use rawGet for the body we need
+	rawUsage := rawGet(t, baseURL+"/api/stats/usage?scope=user", token)
+	var usageOut map[string]interface{}
+	json.Unmarshal([]byte(rawUsage), &usageOut)
+	rowsArr, _ := usageOut["rows"].([]interface{})
+	found := false
+	for _, it := range rowsArr {
+		row := it.(map[string]interface{})
+		if e, _ := row["email"].(string); e == "claimer@example.com" {
+			if rx, _ := row["rx_bytes"].(float64); rx < 1_000_000 {
+				t.Fatalf("user rx = %v, want >= 1000000", rx)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("claimer not present in user usage rows; response: %s", rawUsage)
+	}
+
+	rawPeer := rawGet(t, baseURL+"/api/stats/usage?scope=peer", token)
+	var usagePeer map[string]interface{}
+	json.Unmarshal([]byte(rawPeer), &usagePeer)
+	found = false
+	for _, it := range usagePeer["rows"].([]interface{}) {
+		row := it.(map[string]interface{})
+		if id, _ := row["id"].(string); id == claimPeerID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("claimer peer missing from peer usage rows")
+	}
+
 	// Cleanup: delete local server (cascade peers) must succeed
 	resp, _ = api(t, "DELETE", "/api/servers/"+serverID, token, nil)
 	expectStatus(t, resp, 200, "DELETE /api/servers/{id}")
@@ -529,4 +592,24 @@ func wipeDB(dbURL string) {
 		fmt.Println("wipeDB:", err)
 		os.Exit(1)
 	}
+}
+
+// seedTraffic inserts two live samples for a peer on the current date so
+// aggregation has data.
+func seedTraffic(dbURL, peerID string, rx, tx int64) error {
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	for _, pair := range [][2]int64{{rx, tx}, {rx / 2, tx / 2}} {
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO peer_traffic_samples (peer_id, rx_bytes, tx_bytes, sampled_at)
+			VALUES ($1, $2, $3, now())
+		`, peerID, pair[0], pair[1]); err != nil {
+			return err
+		}
+	}
+	return nil
 }

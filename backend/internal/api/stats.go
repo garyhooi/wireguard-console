@@ -172,6 +172,118 @@ func GetTrafficStats(store *Store) http.HandlerFunc {
 	}
 }
 
+// GetTrafficUsage returns aggregated rx/tx for a date range, grouped by
+// peer or by VPN user. Reads both live samples and the older daily rollup
+// (they never overlap: the rollup deletes samples older than 30 days).
+//
+//	GET /api/stats/usage?scope=peer|user&from=YYYY-MM-DD&to=YYYY-MM-DD
+func GetTrafficUsage(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.Background()
+
+		scope := r.URL.Query().Get("scope")
+		if scope != "user" {
+			scope = "peer"
+		}
+		parseDay := func(v string, fallback time.Time) time.Time {
+			if t, err := time.Parse("2006-01-02", v); err == nil {
+				return t
+			}
+			return fallback
+		}
+		to := time.Now()
+		from := parseDay(r.URL.Query().Get("from"), to.AddDate(0, 0, -6))
+		to = parseDay(r.URL.Query().Get("to"), to)
+
+		var rows []map[string]interface{}
+		var err error
+		if scope == "user" {
+			rows, err = queryUsage(store, ctx, true, from, to)
+		} else {
+			rows, err = queryUsage(store, ctx, false, from, to)
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to query usage")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"scope": scope,
+			"from":  from.Format("2006-01-02"),
+			"to":    to.Format("2006-01-02"),
+			"rows":  rows,
+		})
+	}
+}
+
+func queryUsage(store *Store, ctx context.Context, byUser bool, from, to time.Time) ([]map[string]interface{}, error) {
+	cte := `
+		WITH t AS (
+			SELECT peer_id, rx_bytes, tx_bytes
+			FROM peer_traffic_samples WHERE sampled_at::date BETWEEN $1 AND $2
+			UNION ALL
+			SELECT peer_id, rx_bytes, tx_bytes
+			FROM peer_traffic_daily WHERE date BETWEEN $1 AND $2
+		)`
+	if byUser {
+		rows, err := store.pool.Query(ctx, cte+`
+			SELECT u.id::text, u.email, COALESCE(u.full_name, ''),
+			       COALESCE(SUM(t.rx_bytes), 0), COALESCE(SUM(t.tx_bytes), 0),
+			       COUNT(DISTINCT t.peer_id)
+			FROM t
+			JOIN peers p ON p.id = t.peer_id
+			JOIN users u ON u.id = p.user_id
+			GROUP BY u.id, u.email, u.full_name
+			ORDER BY (COALESCE(SUM(t.rx_bytes),0) + COALESCE(SUM(t.tx_bytes),0)) DESC
+		`, from, to)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		out := []map[string]interface{}{}
+		for rows.Next() {
+			var id, email, full string
+			var rx, tx, peers int64
+			if err := rows.Scan(&id, &email, &full, &rx, &tx, &peers); err != nil {
+				return nil, err
+			}
+			out = append(out, map[string]interface{}{
+				"id": id, "name": full, "email": email, "full_name": full,
+				"rx_bytes": rx, "tx_bytes": tx, "peers": peers,
+			})
+		}
+		return out, nil
+	}
+
+	rows, err := store.pool.Query(ctx, cte+`
+		SELECT p.id::text, p.name, host(p.allowed_ip),
+		       COALESCE(u.email, ''), COALESCE(u.full_name, ''),
+		       COALESCE(SUM(t.rx_bytes), 0), COALESCE(SUM(t.tx_bytes), 0)
+		FROM t
+		JOIN peers p ON p.id = t.peer_id
+		LEFT JOIN users u ON u.id = p.user_id
+		GROUP BY p.id, p.name, p.allowed_ip, u.email, u.full_name
+		ORDER BY (COALESCE(SUM(t.rx_bytes),0) + COALESCE(SUM(t.tx_bytes),0)) DESC
+	`, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []map[string]interface{}{}
+	for rows.Next() {
+		var id, name, ip, email, full string
+		var rx, tx int64
+		if err := rows.Scan(&id, &name, &ip, &email, &full, &rx, &tx); err != nil {
+			return nil, err
+		}
+		out = append(out, map[string]interface{}{
+			"id": id, "name": name, "email": email, "full_name": full, "allowed_ip": ip,
+			"rx_bytes": rx, "tx_bytes": tx,
+		})
+	}
+	return out, nil
+}
+
 func ListAuditLogs(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := context.Background()

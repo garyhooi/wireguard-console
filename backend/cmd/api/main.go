@@ -142,6 +142,7 @@ func main() {
 
 				r.Get("/stats/overview", api.GetStatsOverview(store))
 				r.Get("/stats/traffic", api.GetTrafficStats(store))
+				r.Get("/stats/usage", api.GetTrafficUsage(store))
 				r.Get("/peers/{id}/traffic", api.GetPeerTraffic(store))
 				r.Get("/users/{id}/traffic", api.GetUserTraffic(store))
 

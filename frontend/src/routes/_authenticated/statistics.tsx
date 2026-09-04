@@ -1,4 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   Area,
@@ -37,6 +38,24 @@ interface Peer {
 export const Route = createFileRoute('/_authenticated/statistics')({
   component: StatisticsPage,
 })
+
+interface UsageRow {
+  id: string
+  name: string
+  email: string
+  full_name: string
+  allowed_ip?: string
+  rx_bytes: number
+  tx_bytes: number
+  peers?: number
+}
+
+interface UsageResponse {
+  scope: string
+  from: string
+  to: string
+  rows: UsageRow[]
+}
 
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
@@ -83,6 +102,43 @@ function StatisticsPage() {
     },
     refetchInterval: 30000,
   })
+
+  const [usageScope, setUsageScope] = useState<'user' | 'peer'>('user')
+  const today = new Date()
+  const sevenAgo = new Date(today)
+  sevenAgo.setDate(sevenAgo.getDate() - 6)
+  const fmtD = (d: Date) => d.toISOString().slice(0, 10)
+  const [fromDate, setFromDate] = useState(fmtD(sevenAgo))
+  const [toDate, setToDate] = useState(fmtD(today))
+
+  const usageQuery = useQuery<UsageResponse>({
+    queryKey: ['stats-usage', usageScope, fromDate, toDate],
+    queryFn: async () => {
+      const q = new URLSearchParams({ scope: usageScope, from: fromDate, to: toDate })
+      const res = await fetch(`/api/stats/usage?${q}`, { headers: auth })
+      if (!res.ok) throw new Error('Failed to fetch usage')
+      return res.json()
+    },
+  })
+
+  const downloadUsage = () => {
+    const rows = usageQuery.data?.rows || []
+    const head = usageScope === 'user'
+      ? 'User,Email,Download (B),Upload (B),Peers'
+      : 'Peer,Allowed IP,User,Download (B),Upload (B)'
+    const lines = rows.map((row) =>
+      usageScope === 'user'
+        ? [row.full_name || row.email, row.email, row.rx_bytes, row.tx_bytes, row.peers ?? 0].join(',')
+        : [row.name, row.allowed_ip || '', row.email, row.rx_bytes, row.tx_bytes].join(','),
+    )
+    const blob = new Blob([[head, ...lines].join('\n')], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `usage-${usageScope}-${fromDate}_${toDate}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
 
   const { data: peers } = useQuery<Peer[]>({
     queryKey: ['peers'],
@@ -228,6 +284,131 @@ function StatisticsPage() {
               </tbody>
             </table>
           </div>
+        </Panel>
+      </div>
+
+      {/* Usage report: per peer / per VPN user within a date range */}
+      <div className="mt-8">
+        <div className="flex flex-wrap items-end justify-between gap-4 mb-4">
+          <div>
+            <h2 className="text-base font-semibold text-zinc-100">Usage report</h2>
+            <p className="text-sm text-zinc-500 mt-0.5">
+              Total traffic per {usageScope === 'user' ? 'VPN user' : 'peer'} in the selected range
+              (live samples + daily rollup).
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex rounded-lg border border-zinc-700 overflow-hidden">
+              {(['user', 'peer'] as const).map((sc) => (
+                <button
+                  key={sc}
+                  onClick={() => setUsageScope(sc)}
+                  className={`px-3 py-1.5 text-xs font-medium ${
+                    usageScope === sc ? 'bg-teal-600 text-white' : 'bg-zinc-900 text-zinc-400 hover:text-white'
+                  }`}
+                >
+                  {sc === 'user' ? 'By VPN user' : 'By peer'}
+                </button>
+              ))}
+            </div>
+            <label className="text-xs text-zinc-500">
+              From{' '}
+              <input
+                type="date"
+                value={fromDate}
+                max={toDate}
+                onChange={(e) => setFromDate(e.target.value)}
+                className="bg-zinc-800/60 border border-zinc-700 rounded-md px-2 py-1.5 text-sm text-zinc-100"
+              />
+            </label>
+            <label className="text-xs text-zinc-500">
+              To{' '}
+              <input
+                type="date"
+                value={toDate}
+                min={fromDate}
+                onChange={(e) => setToDate(e.target.value)}
+                className="bg-zinc-800/60 border border-zinc-700 rounded-md px-2 py-1.5 text-sm text-zinc-100"
+              />
+            </label>
+            <button
+              onClick={downloadUsage}
+              disabled={!(usageQuery.data?.rows?.length)}
+              className="inline-flex items-center gap-2 bg-transparent border border-zinc-700 hover:border-zinc-500 text-zinc-300 text-sm font-medium py-1.5 px-3 rounded-md disabled:opacity-40"
+            >
+              Export CSV
+            </button>
+          </div>
+        </div>
+
+        <Panel>
+          {usageQuery.isLoading ? (
+            <div className="p-5">
+              <Skeleton className="h-48 w-full" />
+            </div>
+          ) : (usageQuery.data?.rows?.length ?? 0) === 0 ? (
+            <EmptyState
+              title="No traffic in this range"
+              hint="Pick a wider range, or wait for peers to pass traffic — counters are sampled every 30s."
+            />
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-zinc-800/80">
+                <thead>
+                  <tr className="text-left text-[11px] uppercase tracking-wider text-zinc-600">
+                    {usageScope === 'user' ? (
+                      <>
+                        <th className="px-5 py-2.5 font-medium">VPN user</th>
+                        <th className="px-5 py-2.5 font-medium">Peers</th>
+                      </>
+                    ) : (
+                      <>
+                        <th className="px-5 py-2.5 font-medium">Peer</th>
+                        <th className="px-5 py-2.5 font-medium">Tunnel IP</th>
+                      </>
+                    )}
+                    <th className="px-5 py-2.5 font-medium text-right">Download</th>
+                    <th className="px-5 py-2.5 font-medium text-right">Upload</th>
+                    <th className="px-5 py-2.5 font-medium text-right">Total</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-800/60">
+                  {usageQuery.data?.rows.map((row) => {
+                    const total = row.rx_bytes + row.tx_bytes
+                    return (
+                      <tr key={row.id} className="hover:bg-zinc-800/40">
+                        {usageScope === 'user' ? (
+                          <>
+                            <td className="px-5 py-3 text-sm text-zinc-200">
+                              {row.full_name || row.email}
+                              {row.email && row.full_name && (
+                                <span className="block text-xs text-zinc-500">{row.email}</span>
+                              )}
+                            </td>
+                            <td className="px-5 py-3 text-sm text-zinc-500 font-mono tabular-nums">{row.peers}</td>
+                          </>
+                        ) : (
+                          <>
+                            <td className="px-5 py-3 text-sm text-zinc-200">{row.name}</td>
+                            <td className="px-5 py-3 text-sm text-zinc-500 font-mono">{row.allowed_ip}</td>
+                          </>
+                        )}
+                        <td className="px-5 py-3 text-sm text-zinc-400 font-mono tabular-nums text-right">
+                          {formatBytes(row.rx_bytes)}
+                        </td>
+                        <td className="px-5 py-3 text-sm text-zinc-400 font-mono tabular-nums text-right">
+                          {formatBytes(row.tx_bytes)}
+                        </td>
+                        <td className="px-5 py-3 text-sm text-zinc-200 font-mono tabular-nums text-right">
+                          {formatBytes(total)}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </Panel>
       </div>
     </div>
