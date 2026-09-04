@@ -102,6 +102,8 @@ func ClaimUser(store *Store) http.HandlerFunc {
 			return
 		}
 
+		syncServerLogged(ctx, store.pool, server.ID)
+
 		// Generate WireGuard config
 		config := generatePeerConfig(peerKey, server, allowedIP)
 

@@ -12,7 +12,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /out/wg-helper ./cmd/wg-helper
 
 FROM debian:12-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends wireguard-tools iproute2 ca-certificates \
+    && apt-get install -y --no-install-recommends wireguard-tools iproute2 iptables ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/wg-helper /wg-helper
 ENTRYPOINT ["/wg-helper"]

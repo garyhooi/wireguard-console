@@ -192,10 +192,13 @@ func CreatePeer(store *Store) http.HandlerFunc {
 
 		logAudit(ctx, store, adminID, "peer.create", "peer", "", nil)
 
+		warning := syncServerLogged(ctx, store.pool, req.ServerID)
+
 		writeJSON(w, http.StatusCreated, map[string]string{
-			"status":     "created",
-			"public_key": req.PublicKey,
-			"allowed_ip": req.AllowedIP,
+			"status":        "created",
+			"public_key":    req.PublicKey,
+			"allowed_ip":    req.AllowedIP,
+			"apply_warning": warning,
 		})
 	}
 }
@@ -230,10 +233,21 @@ func UpdatePeer(store *Store) http.HandlerFunc {
 
 		logAudit(ctx, store, adminID, "peer.update", "peer", peerID.String(), nil)
 
-		writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+		warning := resyncPeerKernel(ctx, store, peerID)
+
+		writeJSON(w, http.StatusOK, map[string]string{"status": "updated", "apply_warning": warning})
 	}
 }
 
+// resyncPeerKernel pushes the peer's server state to wg-helper after a
+// peer-level mutation (rename/remove/suspend/resume).
+func resyncPeerKernel(ctx context.Context, store *Store, peerID uuid.UUID) string {
+	var serverID uuid.UUID
+	if err := store.pool.QueryRow(ctx, `SELECT server_id FROM peers WHERE id = $1`, peerID).Scan(&serverID); err != nil {
+		return ""
+	}
+	return syncServerLogged(ctx, store.pool, serverID)
+}
 func SuspendPeer(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		peerID, err := parseUUID(r.PathValue("id"))
@@ -256,6 +270,8 @@ func SuspendPeer(store *Store) http.HandlerFunc {
 		}
 
 		logAudit(ctx, store, adminID, "peer.suspend", "peer", peerID.String(), nil)
+
+		resyncPeerKernel(ctx, store, peerID)
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "suspended"})
 	}
@@ -283,6 +299,8 @@ func ResumePeer(store *Store) http.HandlerFunc {
 
 		logAudit(ctx, store, adminID, "peer.resume", "peer", peerID.String(), nil)
 
+		resyncPeerKernel(ctx, store, peerID)
+
 		writeJSON(w, http.StatusOK, map[string]string{"status": "resumed"})
 	}
 }
@@ -309,6 +327,8 @@ func DeletePeer(store *Store) http.HandlerFunc {
 		}
 
 		logAudit(ctx, store, adminID, "peer.remove", "peer", peerID.String(), nil)
+
+		resyncPeerKernel(ctx, store, peerID)
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/wireguard-console/backend/internal/auth"
 	"github.com/wireguard-console/backend/internal/db"
+	"github.com/wireguard-console/backend/internal/wgclient"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
@@ -148,14 +150,16 @@ func CreateServer(store *Store) http.HandlerFunc {
 			req.ServerPrivateKeyEnc = encPriv
 		}
 
-		_, err := store.pool.Exec(ctx, `
+		var newID uuid.UUID
+		err := store.pool.QueryRow(ctx, `
 			INSERT INTO servers (name, public_endpoint, listen_port, interface_name, server_public_key,
 			                     server_private_key_encrypted, network_cidr, dns_servers, default_allowed_ips,
 			                     mtu, persistent_keepalive, status)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'active')
+			RETURNING id
 		`, req.Name, req.PublicEndpoint, req.ListenPort, req.InterfaceName, req.ServerPublicKey,
 			req.ServerPrivateKeyEnc, req.NetworkCIDR, req.DNSServers, req.DefaultAllowedIPs,
-			req.MTU, req.PersistentKeepalive)
+			req.MTU, req.PersistentKeepalive).Scan(&newID)
 
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to create server")
@@ -164,7 +168,13 @@ func CreateServer(store *Store) http.HandlerFunc {
 
 		logAudit(ctx, store, adminID, "server.create", "server", "", nil)
 
-		writeJSON(w, http.StatusCreated, map[string]string{"status": "created"})
+		// Automatically provision the interface on the host (wg-helper).
+		warning := syncServerLogged(ctx, store.pool, newID)
+
+		writeJSON(w, http.StatusCreated, map[string]string{
+			"status":        "created",
+			"apply_warning": warning,
+		})
 	}
 }
 
@@ -224,6 +234,12 @@ func DeleteServer(store *Store) http.HandlerFunc {
 		ctx := context.Background()
 		adminID := getAdminID(r)
 
+		var ifaceName string
+		if err := store.pool.QueryRow(ctx, `SELECT interface_name FROM servers WHERE id = $1`, serverID).Scan(&ifaceName); err != nil {
+			writeError(w, http.StatusNotFound, "Server not found")
+			return
+		}
+
 		// Remove the server and everything attached to it (peers).
 		tx, err := store.pool.Begin(ctx)
 		if err != nil {
@@ -243,6 +259,11 @@ func DeleteServer(store *Store) http.HandlerFunc {
 		if err := tx.Commit(ctx); err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to delete server")
 			return
+		}
+
+		// Tear the interface down on the host (best effort).
+		if err := wgclient.Remove(ifaceName); err != nil {
+			log.Printf("wg remove %s: %v", ifaceName, err)
 		}
 
 		logAudit(ctx, store, adminID, "server.delete", "server", serverID.String(), nil)
