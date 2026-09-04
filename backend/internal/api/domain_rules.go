@@ -77,6 +77,45 @@ func syncDomainRulesToAdGuard(store *Store, rules []db.DomainRule) error {
 	return nil
 }
 
+// SyncDomainRulesToAdGuard reloads every rule from the database and pushes
+// the full set into AdGuard Home. Domain rules persist in PostgreSQL, but a
+// fresh AdGuard provisioning (e.g. after a server reset / redeploy) writes a
+// clean config with empty user_rules — so this is called at startup to
+// repopulate AdGuard without requiring a rule create/delete to re-trigger a
+// sync. Returns the number of rules pushed. Best-effort at the call site:
+// a failure here means the rules stay in the DB and will re-sync later.
+func SyncDomainRulesToAdGuard(store *Store) (int, error) {
+	ctx := context.Background()
+
+	rows, err := store.pool.Query(ctx, `
+		SELECT id, scope, user_id, domain, created_by, created_at
+		FROM domain_block_rules
+		ORDER BY created_at DESC
+	`)
+	if err != nil {
+		return 0, fmt.Errorf("query domain rules: %w", err)
+	}
+	defer rows.Close()
+
+	var rules []db.DomainRule
+	for rows.Next() {
+		var rule db.DomainRule
+		if err := rows.Scan(&rule.ID, &rule.Scope, &rule.UserID, &rule.Domain,
+			&rule.CreatedBy, &rule.CreatedAt); err != nil {
+			return 0, fmt.Errorf("scan domain rule: %w", err)
+		}
+		rules = append(rules, rule)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate domain rules: %w", err)
+	}
+
+	if err := syncDomainRulesToAdGuard(store, rules); err != nil {
+		return 0, err
+	}
+	return len(rules), nil
+}
+
 // blockingIP returns the address the console serves the branded block page
 // on (the tunnel gateway), or "" when no local server exists.
 func blockingIP(store *Store) string {

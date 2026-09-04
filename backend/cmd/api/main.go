@@ -69,6 +69,27 @@ func main() {
 	go worker.NewRollupWorker(conn.Pool()).Start(ctx)
 	go worker.NewMailWorker(conn.Pool()).Start(ctx)
 
+	// Repush persisted domain-block rules into AdGuard Home. A server reset /
+	// redeploy provisions AdGuard with a clean config (empty user_rules), so
+	// rules survive in PostgreSQL but would be silently lost from AdGuard
+	// until the next rule create/delete re-triggers a sync. Best-effort: a
+	// misconfigured/unreachable AdGuard logs here but never blocks startup.
+	// Retry briefly because the API container has no depends_on on AdGuard, so
+	// AGH may still be starting up when this runs.
+	for attempt := 1; ; attempt++ {
+		n, err := api.SyncDomainRulesToAdGuard(store)
+		if err == nil {
+			log.Printf("Synced %d domain rule(s) to AdGuard on startup", n)
+			break
+		}
+		if attempt >= 3 {
+			log.Printf("Failed to sync domain rules to AdGuard on startup (rules remain in DB but will re-sync later): %v", err)
+			break
+		}
+		log.Printf("AdGuard not ready for domain-rule sync (attempt %d/3): %v", attempt, err)
+		time.Sleep(5 * time.Second)
+	}
+
 	// Liveness probe (used by the container healthcheck — succeeds whatever
 	// the auth state is).
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
