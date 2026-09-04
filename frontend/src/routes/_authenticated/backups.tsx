@@ -2,6 +2,7 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { IconArchive } from '@tabler/icons-react'
 import {
+  ActionLink,
   EmptyState,
   GhostButton,
   PageHeader,
@@ -72,6 +73,22 @@ function BackupsPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['backups'] }),
   })
 
+  const deleteMutation = useMutation({
+    mutationFn: async (filename: string) => {
+      const res = await fetch('/api/backup/delete', {
+        method: 'POST',
+        headers: { ...auth, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.error || 'Failed to delete backup')
+      }
+      return res.json()
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['backups'] }),
+  })
+
   const backups = data?.backups ?? []
   const newest = backups[backups.length - 1] ?? ''
 
@@ -98,9 +115,9 @@ function BackupsPage() {
         }
       />
 
-      {(createMutation.isError || restoreMutation.isError) && (
+      {(createMutation.isError || restoreMutation.isError || deleteMutation.isError) && (
         <p className="text-red-400 text-sm mb-3">
-          {createMutation.error?.message || restoreMutation.error?.message}
+          {createMutation.error?.message || restoreMutation.error?.message || deleteMutation.error?.message}
         </p>
       )}
       {createMutation.isSuccess && (
@@ -145,9 +162,24 @@ function BackupsPage() {
                     <td className={tdCls + ' font-mono tabular-nums'}>{backupLabel(name)}</td>
                     <td className={tdCls + ' font-mono text-zinc-200'}>{name}</td>
                     <td className="px-5 py-3.5 text-right">
-                      <GhostButton disabled={restoreMutation.isPending} onClick={() => doRestore(name)}>
-                        {restoreMutation.isPending ? 'Restoring…' : 'Restore'}
-                      </GhostButton>
+                      <div className="flex justify-end gap-1">
+                        <GhostButton disabled={restoreMutation.isPending} onClick={() => doRestore(name)}>
+                          {restoreMutation.isPending ? 'Restoring…' : 'Restore'}
+                        </GhostButton>
+                        <ActionLink
+                          tone="danger"
+                          onClick={() => {
+                            if (
+                              confirm(
+                                `Delete backup "${name}"?\n\nThis permanently removes the file from the console server. This cannot be undone.`,
+                              )
+                            )
+                              deleteMutation.mutate(name)
+                          }}
+                        >
+                          {deleteMutation.isPending ? 'Deleting…' : 'Delete'}
+                        </ActionLink>
+                      </div>
                     </td>
                   </tr>
                 ))}

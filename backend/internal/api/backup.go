@@ -76,6 +76,39 @@ func RestoreBackup(store *Store) http.HandlerFunc {
 	}
 }
 
+func DeleteBackup(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		adminID := getAdminID(r)
+		ctx := context.Background()
+
+		dataDir := os.Getenv("BACKUP_DIR")
+		if dataDir == "" {
+			dataDir = "/var/backups/wgconsole"
+		}
+
+		var req struct {
+			Filename string `json:"filename"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Filename == "" {
+			writeError(w, http.StatusBadRequest, "filename is required")
+			return
+		}
+
+		svc := backup.NewBackupService(dataDir)
+		if err := svc.DeleteBackup(req.Filename); err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to delete backup")
+			return
+		}
+
+		logAudit(ctx, store, adminID, "backup.delete", "backup", req.Filename, nil)
+
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":   "deleted",
+			"filename": req.Filename,
+		})
+	}
+}
+
 func ListBackups(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		dataDir := os.Getenv("BACKUP_DIR")

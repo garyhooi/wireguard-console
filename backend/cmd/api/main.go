@@ -166,6 +166,7 @@ func main() {
 				r.Post("/backup/create", api.CreateBackup(store))
 				r.Post("/backup/restore", api.RestoreBackup(store))
 				r.Get("/backup/list", api.ListBackups(store))
+				r.Post("/backup/delete", api.DeleteBackup(store))
 			})
 		})
 	})

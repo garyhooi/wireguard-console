@@ -114,6 +114,27 @@ func (s *BackupService) RestoreBackup(backupPath string) error {
 	return nil
 }
 
+// DeleteBackup removes a single backup file by name. The name is treated as a
+// base path so callers can never traverse outside the backup directory.
+func (s *BackupService) DeleteBackup(filename string) error {
+	backupPath := filepath.Join(s.dataDir, filepath.Base(filename))
+
+	// Only ever delete files that live in the backup directory.
+	if filepath.Dir(backupPath) != filepath.Clean(s.dataDir) {
+		return fmt.Errorf("invalid backup path")
+	}
+
+	if _, err := os.Stat(backupPath); err != nil {
+		return fmt.Errorf("backup not found: %w", err)
+	}
+
+	if err := os.Remove(backupPath); err != nil {
+		return fmt.Errorf("failed to delete backup: %w", err)
+	}
+
+	return nil
+}
+
 func (s *BackupService) ListBackups() ([]string, error) {
 	entries, err := os.ReadDir(s.dataDir)
 	if err != nil {
