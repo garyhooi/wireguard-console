@@ -440,6 +440,48 @@ func TestEndToEnd(t *testing.T) {
 	})
 	expectStatus(t, statusResp, 200, "PATCH /api/admins/{id} (enable)")
 
+	// ---- Admins: edit email (super_admin edits another admin, then self) ----
+	emailResp, _ := api(t, "PATCH", "/api/admins/"+op2ID, token, map[string]interface{}{
+		"email": "op2-renamed@console.test",
+	})
+	expectStatus(t, emailResp, 200, "PATCH /api/admins/{id} (email)")
+	adminList4 := rawGet(t, baseURL+"/api/admins", token)
+	var adminRows4 []map[string]interface{}
+	json.Unmarshal([]byte(adminList4), &adminRows4)
+	renamed := false
+	for _, a := range adminRows4 {
+		if e, _ := a["email"].(string); e == "op2-renamed@console.test" {
+			renamed = true
+		}
+		if e, _ := a["email"].(string); e == "op2@console.test" {
+			t.Fatal("old email still present after rename")
+		}
+	}
+	if !renamed {
+		t.Fatal("renamed admin not found in list")
+	}
+	// Duplicate email must be rejected.
+	dupResp, _ := api(t, "PATCH", "/api/admins/"+op2ID, token, map[string]interface{}{
+		"email": "e2e@console.test",
+	})
+	expectStatus(t, dupResp, 409, "PATCH /api/admins/{id} (duplicate email)")
+	// Editing the self email is allowed (current session is id-based).
+	meID, _ := meOut["id"].(string)
+	selfEmailResp, _ := api(t, "PATCH", "/api/admins/"+meID, token, map[string]interface{}{
+		"email": "e2e-renamed@console.test",
+	})
+	expectStatus(t, selfEmailResp, 200, "PATCH /api/admins/{id} (self email)")
+	// Demoting the last active super_admin is rejected.
+	demoteResp, _ := api(t, "PATCH", "/api/admins/"+meID, token, map[string]interface{}{
+		"role": "admin",
+	})
+	expectStatus(t, demoteResp, 400, "PATCH /api/admins/{id} (self demote blocked)")
+	// Restore the seeded email so the rest of the suite keeps passing.
+	restoreResp, _ := api(t, "PATCH", "/api/admins/"+meID, token, map[string]interface{}{
+		"email": "e2e@console.test",
+	})
+	expectStatus(t, restoreResp, 200, "PATCH /api/admins/{id} (self email restore)")
+
 	// ---- Peers carry their owner ----
 	peerJSON := rawGet(t, baseURL+"/api/peers", token)
 	var peerRows []map[string]interface{}

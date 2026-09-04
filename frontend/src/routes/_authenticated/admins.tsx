@@ -22,6 +22,12 @@ interface Admin {
   created_at: string
 }
 
+interface Me {
+  id: string
+  email: string
+  role: string
+}
+
 export const Route = createFileRoute('/_authenticated/admins')({
   component: AdminsPage,
 })
@@ -42,6 +48,18 @@ function AdminsPage() {
   const [statusFilter, setStatusFilter] = useState('all')
   const [search, setSearch] = useState('')
   const [notice, setNotice] = useState('')
+  // Inline email editing state: one editor open at a time.
+  const [editingId, setEditingId] = useState('')
+  const [draftEmail, setDraftEmail] = useState('')
+
+  const { data: me } = useQuery<Me>({
+    queryKey: ['me'],
+    queryFn: async () => {
+      const res = await fetch('/api/admins/me', { headers: auth })
+      if (!res.ok) throw new Error('Failed to load profile')
+      return res.json()
+    },
+  })
 
   const { data: admins, isLoading } = useQuery<Admin[]>({
     queryKey: ['admins'],
@@ -99,6 +117,33 @@ function AdminsPage() {
     onSuccess: (data: { password: string }, a: Admin) => {
       setNotice(`Temporary password for ${a.email}: ${data.password}  (emailed if SMTP is configured)`)
       setError('')
+    },
+    onError: (e: Error) => setError(e.message),
+  })
+
+  const emailMutation = useMutation({
+    mutationFn: async (a: { id: string; email: string }) => {
+      const res = await fetch(`/api/admins/${a.id}`, {
+        method: 'PATCH',
+        headers: { ...auth, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: a.email }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.error || 'Failed to update email')
+      }
+    },
+    onSuccess: (_d, a: { id: string; email: string }) => {
+      const isSelf = me?.id === a.id
+      setEditingId('')
+      setNotice(
+        isSelf
+          ? 'Your email was updated. Use the new address to sign in from now on.'
+          : 'Email updated.',
+      )
+      setError('')
+      queryClient.invalidateQueries({ queryKey: ['admins'] })
+      queryClient.invalidateQueries({ queryKey: ['me'] })
     },
     onError: (e: Error) => setError(e.message),
   })
@@ -243,11 +288,72 @@ function AdminsPage() {
               <tbody className="divide-y divide-zinc-800/60">
                 {filtered.map((a) => (
                   <tr key={a.id} className="hover:bg-zinc-800/40 transition-colors">
-                    <td className="px-5 py-3 text-sm text-zinc-200">{a.email}</td>
+                    <td className="px-5 py-3 text-sm">
+                      {editingId === a.id ? (
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="email"
+                            autoFocus
+                            required
+                            className="w-56 bg-zinc-800/60 border border-zinc-700 rounded-md px-2 py-1 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-teal-500"
+                            value={draftEmail}
+                            onChange={(e) => setDraftEmail(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && draftEmail.trim()) {
+                                emailMutation.mutate({ id: a.id, email: draftEmail.trim() })
+                              } else if (e.key === 'Escape') {
+                                setEditingId('')
+                                setDraftEmail('')
+                              }
+                            }}
+                          />
+                          <button
+                            onClick={() => emailMutation.mutate({ id: a.id, email: draftEmail.trim() })}
+                            disabled={!draftEmail.trim() || emailMutation.isPending}
+                            className="text-teal-400 hover:text-teal-300 disabled:opacity-40"
+                            aria-label="Save email"
+                          >
+                            Save
+                          </button>
+                          <button
+                            onClick={() => {
+                              setEditingId('')
+                              setDraftEmail('')
+                            }}
+                            className="text-zinc-500 hover:text-zinc-300"
+                            aria-label="Cancel edit"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="flex items-center gap-2 text-zinc-200">
+                          {a.email}
+                          {me?.id === a.id && (
+                            <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-teal-500/10 text-teal-400 border border-teal-500/20">
+                              You
+                            </span>
+                          )}
+                          {a.status === 'active' && (
+                            <button
+                              onClick={() => {
+                                setEditingId(a.id)
+                                setDraftEmail(a.email)
+                              }}
+                              className="text-zinc-600 hover:text-teal-400 transition-colors"
+                              aria-label={`Edit email for ${a.email}`}
+                            >
+                              Edit
+                            </button>
+                          )}
+                        </span>
+                      )}
+                    </td>
                     <td className="px-5 py-3">
                       <select
-                        className="bg-zinc-800/60 border border-zinc-700 rounded-md px-2 py-1 text-xs text-zinc-200"
+                        className="bg-zinc-800/60 border border-zinc-700 rounded-md px-2 py-1 text-xs text-zinc-200 disabled:opacity-50 disabled:cursor-not-allowed"
                         value={a.role}
+                        disabled={me?.id === a.id}
                         onChange={(e) => a.status === 'active' && roleMutation.mutate({ id: a.id, role: e.target.value })}
                       >
                         <option value="admin">Admin</option>
@@ -276,14 +382,16 @@ function AdminsPage() {
                             >
                               Reset password
                             </button>
-                            <button
-                              onClick={() => {
-                                if (confirm(`Disable admin "${a.email}"?`)) statusMutation.mutate(a)
-                              }}
-                              className="text-red-400 hover:text-red-300"
-                            >
-                              Disable
-                            </button>
+                            {me?.id !== a.id && (
+                              <button
+                                onClick={() => {
+                                  if (confirm(`Disable admin "${a.email}"?`)) statusMutation.mutate(a)
+                                }}
+                                className="text-red-400 hover:text-red-300"
+                              >
+                                Disable
+                              </button>
+                            )}
                           </>
                         ) : (
                           <button

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/wireguard-console/backend/internal/auth"
 	"github.com/wireguard-console/backend/internal/db"
 	"github.com/wireguard-console/backend/internal/email"
@@ -607,6 +608,7 @@ func UpdateAdmin(store *Store) http.HandlerFunc {
 		}
 
 		var req struct {
+			Email  string `json:"email"`
 			Role   string `json:"role"`
 			Status string `json:"status"`
 		}
@@ -614,36 +616,128 @@ func UpdateAdmin(store *Store) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
-		if req.Status != "" && req.Status != "active" && req.Status != "disabled" {
-			writeError(w, http.StatusBadRequest, "status must be 'active' or 'disabled'")
-			return
-		}
+
+		ctx := context.Background()
+		actorID := getAdminID(r)
+		isSelf := adminID == actorID
 
 		// The current admin may not disable themselves (would lock everyone out).
-		if req.Status == "disabled" && adminID == getAdminID(r) {
+		if req.Status == "disabled" && isSelf {
 			writeError(w, http.StatusBadRequest, "You cannot disable your own account")
 			return
 		}
 
-		ctx := context.Background()
-		actorID := getAdminID(r)
+		// Load the row being edited so defaults and role invariants below can
+		// be evaluated against its current state (email and role changes are
+		// optional, partial updates).
+		var cur struct {
+			email  string
+			role   string
+			status string
+		}
+		if err := store.pool.QueryRow(ctx, `
+			SELECT email, role, status FROM admins WHERE id = $1
+		`, adminID).Scan(&cur.email, &cur.role, &cur.status); err != nil {
+			writeError(w, http.StatusNotFound, "Admin not found")
+			return
+		}
 
-		if req.Role == "" {
-			req.Role = "admin"
+		// Role updates are validated up-front so the "last super_admin" guard
+		// below can reason about the target role reliably.
+		if req.Role != "" && req.Role != "super_admin" && req.Role != "admin" && req.Role != "auditor" {
+			writeError(w, http.StatusBadRequest, "role must be super_admin, admin or auditor")
+			return
 		}
-		if req.Status == "" {
-			req.Status = "active"
+
+		// Resolve effective values: absent fields keep the current value.
+		newRole := req.Role
+		if newRole == "" {
+			newRole = cur.role
 		}
+		newStatus := req.Status
+		if newStatus == "" {
+			newStatus = cur.status
+		}
+		if newStatus != "active" && newStatus != "disabled" {
+			writeError(w, http.StatusBadRequest, "status must be 'active' or 'disabled'")
+			return
+		}
+
+		// A super_admin cannot demote themselves — that would leave the
+		// account able to edit but no longer able to restore its own role,
+		// and an accidental self-demotion while they are the only super_admin
+		// would lock everyone out of admin management entirely.
+		if isSelf && cur.role == "super_admin" && newRole != "super_admin" {
+			writeError(w, http.StatusBadRequest, "You cannot change your own role")
+			return
+		}
+
+		// If this is the last active super_admin, it may not be demoted or
+		// disabled (that would permanently lock admin management).
+		if cur.role == "super_admin" && (newRole != "super_admin" || newStatus == "disabled") {
+			var others int
+			if err := store.pool.QueryRow(ctx, `
+				SELECT COUNT(*) FROM admins
+				WHERE role = 'super_admin' AND status = 'active' AND id <> $1
+			`, adminID).Scan(&others); err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to check super_admin count")
+				return
+			}
+			if others == 0 {
+				writeError(w, http.StatusBadRequest, "Cannot demote or disable the last active super_admin")
+				return
+			}
+		}
+
+		// Email change: reject blanks, duplicates, and identity changes on a
+		// disabled target (a disabled admin must not be reachable by a new
+		// email, and reviving them is a separate action).
+		newEmail := req.Email
+		if req.Email != "" && req.Email != cur.email {
+			if newStatus == "disabled" {
+				writeError(w, http.StatusBadRequest, "Cannot change the email of a disabled admin")
+				return
+			}
+			var taken uuid.UUID
+			err := store.pool.QueryRow(ctx, `
+				SELECT id FROM admins WHERE email = $1 AND id <> $2
+			`, req.Email, adminID).Scan(&taken)
+			if err == nil {
+				writeError(w, http.StatusConflict, "An admin with this email already exists")
+				return
+			} else if err != pgx.ErrNoRows {
+				writeError(w, http.StatusInternalServerError, "Failed to check email availability")
+				return
+			}
+		} else {
+			// Absent/empty email means "leave unchanged" — never blank it.
+			newEmail = cur.email
+		}
+
 		_, err = store.pool.Exec(ctx, `
-			UPDATE admins SET role = $1, status = $2, updated_at = now() WHERE id = $3
-		`, req.Role, req.Status, adminID)
+			UPDATE admins SET email = $1, role = $2, status = $3, updated_at = now()
+			WHERE id = $4
+		`, newEmail, newRole, newStatus, adminID)
 
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to update admin")
 			return
 		}
 
-		logAudit(ctx, store, actorID, "admin.update", "admin", adminID.String(), nil)
+		// Record what actually changed for the audit trail.
+		meta := map[string]string{}
+		if req.Email != "" && req.Email != cur.email {
+			meta["email"] = req.Email
+		}
+		if newRole != cur.role {
+			meta["role"] = newRole
+		}
+		if newStatus != cur.status {
+			meta["status"] = newStatus
+		}
+		if len(meta) > 0 {
+			logAudit(ctx, store, actorID, "admin.update", "admin", adminID.String(), meta)
+		}
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 	}

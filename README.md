@@ -65,8 +65,9 @@ The installer will:
 6. Build and start all services, **provision AdGuard Home** (write its config:
    matching admin password, DNS bound to the tunnel gateway, blocked domains
    resolving to the branded block page)
-7. **Auto-create the first `super_admin`** on a fresh database — the one-time
-   password is printed to the api container logs
+7. **Auto-create the first `super_admin`** on a fresh database and **print its
+   credentials in the install output** (email + one-time password right in
+   the summary — no separate `docker logs` needed)
 8. Re-run the script any time to update (existing admins/data are kept)
 
 ### Deploying without a domain (public IP only)
@@ -134,15 +135,37 @@ requests and can be customized by editing `frontend/public/blocked.html`.
 
 ## First admin account (auto-created)
 
-On a **fresh** install the API bootstraps the first `super_admin` automatically — no manual SQL. Find its one-time credentials:
+On a **fresh** install the installer auto-creates the first `super_admin` and
+prints its credentials at the end of the install output:
+
+```text
+ First super_admin account (auto-created on first boot):
+   Email:    admin@company.com
+   Password: Wg3756ad9880d4141!
+
+ Log in at the console URL above, then change this password in Profile
+ and enroll 2FA immediately. This is the only time these credentials
+ are shown.
+```
+
+The account is bootstrapped by the API on its first boot (only when no admin
+exists yet — no manual SQL). Log in at `https://YOUR_DOMAIN`, change the
+password in **Profile**, and enroll 2FA immediately (mandatory; keep the
+backup codes). If you missed the summary output, the same credentials are in
+the generated `.env` (`ADMIN_EMAIL` / `ADMIN_PASSWORD`) on the server.
+
+Following the **manual setup** steps instead (no installer)? The API then uses
+whatever `ADMIN_EMAIL`/`ADMIN_PASSWORD` your `.env` has; if the password is
+empty it generates a random one and prints it to the api container logs —
+fetch it with:
 
 ```bash
 docker logs wireguard-console-api-1 | grep -A1 'Email:\|Password:'
 ```
 
-Log in at `https://YOUR_DOMAIN`, change the password in **Profile**, and enroll 2FA immediately (mandatory; keep the backup codes).
-
-Prefer fixed credentials? Set them before the first boot (they are used only when no admin exists yet):
+Prefer fixed credentials? Set them before running the installer (they are used
+only when no admin exists yet, and are written into `.env` so upgrades keep
+them):
 
 ```bash
 ADMIN_EMAIL=ops@company.com ADMIN_PASSWORD='Str0ngPassw0rd!' bash install.sh
@@ -157,8 +180,6 @@ The one-command installer is idempotent — just run it again to pull the latest
 ```bash
 curl -fsSL https://raw.githubusercontent.com/garyhooi/wireguard-console/main/install.sh | sudo bash
 ```
-
-**Database major upgrades** (e.g. PostgreSQL 16 → 18): existing `pg-data` volumes are NOT automatically migrated by Docker. Before upgrading, create a backup (`POST /api/backup/create`), then remove the volume (`docker compose down && docker volume rm wireguard-console_pg-data`) and let the fresh database rebuild — restore afterwards. Never point a fresh major version at old data files.
 
 ## Project Structure
 
@@ -256,31 +277,37 @@ file requires a GitHub token with the `workflow` scope.)
 
 ## Backup & Restore
 
-Backups are created inside the `api` container (which includes `pg_dump`) and stored on a persistent Docker volume at `/var/backups/wgconsole`. Super-admin only.
+Backups are created inside the `api` container (which includes `pg_dump`) and stored on a persistent Docker volume at `/var/backups/wgconsole`.
+
+**From the console UI:** open **System → Backups** to list saved backups, create a new one with one click, or restore any listed backup (the UI asks for confirmation first — restoring replaces the current database). Admins with the `admin` or `super_admin` role can use it.
+
+The same operations are available over the API (useful for scripting / off-server backup copies). Authenticate with your admin session token (the one the UI stores in `localStorage` after login — see *First admin account*):
 
 ```bash
 # Create backup
 curl -X POST https://your-domain/api/backup/create \
-  -H "Authorization: YOUR_TOKEN"
+  -H "Authorization: <admin-session-token>"
 
 # List backups
 curl https://your-domain/api/backup/list \
-  -H "Authorization: YOUR_TOKEN"
+  -H "Authorization: <admin-session-token>"
 
 # Restore a backup
 curl -X POST https://your-domain/api/backup/restore \
-  -H "Authorization: YOUR_TOKEN" \
+  -H "Authorization: <admin-session-token>" \
   -H "Content-Type: application/json" \
   -d '{"filename": "wgconsole_backup_20260903_120000.sql.gz"}'
 
-# Or restore manually
+# Or restore manually (shell on the server)
 gunzip -c wgconsole_backup_*.sql.gz | \
   docker exec -i wireguard-console-postgres-1 psql -U wgconsole -d wgconsole
 ```
 
+Backups only live on the console's Docker volume — copy them off the server regularly for disaster recovery.
+
 ## License
 
-Choose your license: MIT, Apache-2.0, or AGPL-3.0 (see `plan/WIREGUARD CONSOLE BUILD GUIDE.md` for guidance).
+[MIT](LICENSE) — © 2026 Gary Hooi. See the `LICENSE` file for the full text.
 
 ## Documentation
 

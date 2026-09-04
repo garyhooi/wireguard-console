@@ -9,12 +9,14 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as IndexRouteImport } from './routes/index'
 import { Route as R2faSetupRouteImport } from './routes/2fa-setup'
 import { Route as R2faVerifyRouteImport } from './routes/2fa-verify'
 import { Route as AuthenticatedRouteImport } from './routes/_authenticated'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as AuthenticatedAdminsRouteImport } from './routes/_authenticated/admins'
 import { Route as AuthenticatedAuditLogRouteImport } from './routes/_authenticated/audit-log'
+import { Route as AuthenticatedBackupsRouteImport } from './routes/_authenticated/backups'
 import { Route as AuthenticatedConfigRouteImport } from './routes/_authenticated/config'
 import { Route as AuthenticatedDashboardRouteImport } from './routes/_authenticated/dashboard'
 import { Route as AuthenticatedDomainRulesRouteImport } from './routes/_authenticated/domain-rules'
@@ -26,6 +28,11 @@ import { Route as AuthenticatedStatisticsRouteImport } from './routes/_authentic
 import { Route as AuthenticatedUsersRouteImport } from './routes/_authenticated/users'
 import { Route as ClaimTokenRouteImport } from './routes/claim.$token'
 
+const IndexRoute = IndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const R2faSetupRoute = R2faSetupRouteImport.update({
   id: '/2fa-setup',
   path: '/2fa-setup',
@@ -53,6 +60,11 @@ const AuthenticatedAdminsRoute = AuthenticatedAdminsRouteImport.update({
 const AuthenticatedAuditLogRoute = AuthenticatedAuditLogRouteImport.update({
   id: '/audit-log',
   path: '/audit-log',
+  getParentRoute: () => AuthenticatedRoute,
+} as any)
+const AuthenticatedBackupsRoute = AuthenticatedBackupsRouteImport.update({
+  id: '/backups',
+  path: '/backups',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
 const AuthenticatedConfigRoute = AuthenticatedConfigRouteImport.update({
@@ -108,12 +120,13 @@ const ClaimTokenRoute = ClaimTokenRouteImport.update({
 } as any)
 
 export interface FileRoutesByFullPath {
+  '/': typeof IndexRoute
   '/2fa-setup': typeof R2faSetupRoute
   '/2fa-verify': typeof R2faVerifyRoute
-  '/': typeof AuthenticatedRouteWithChildren
   '/login': typeof LoginRoute
   '/admins': typeof AuthenticatedAdminsRoute
   '/audit-log': typeof AuthenticatedAuditLogRoute
+  '/backups': typeof AuthenticatedBackupsRoute
   '/config': typeof AuthenticatedConfigRoute
   '/dashboard': typeof AuthenticatedDashboardRoute
   '/domain-rules': typeof AuthenticatedDomainRulesRoute
@@ -126,12 +139,13 @@ export interface FileRoutesByFullPath {
   '/claim/$token': typeof ClaimTokenRoute
 }
 export interface FileRoutesByTo {
+  '/': typeof IndexRoute
   '/2fa-setup': typeof R2faSetupRoute
   '/2fa-verify': typeof R2faVerifyRoute
-  '/': typeof AuthenticatedRouteWithChildren
   '/login': typeof LoginRoute
   '/admins': typeof AuthenticatedAdminsRoute
   '/audit-log': typeof AuthenticatedAuditLogRoute
+  '/backups': typeof AuthenticatedBackupsRoute
   '/config': typeof AuthenticatedConfigRoute
   '/dashboard': typeof AuthenticatedDashboardRoute
   '/domain-rules': typeof AuthenticatedDomainRulesRoute
@@ -145,12 +159,14 @@ export interface FileRoutesByTo {
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
+  '/': typeof IndexRoute
   '/2fa-setup': typeof R2faSetupRoute
   '/2fa-verify': typeof R2faVerifyRoute
   '/_authenticated': typeof AuthenticatedRouteWithChildren
   '/login': typeof LoginRoute
   '/_authenticated/admins': typeof AuthenticatedAdminsRoute
   '/_authenticated/audit-log': typeof AuthenticatedAuditLogRoute
+  '/_authenticated/backups': typeof AuthenticatedBackupsRoute
   '/_authenticated/config': typeof AuthenticatedConfigRoute
   '/_authenticated/dashboard': typeof AuthenticatedDashboardRoute
   '/_authenticated/domain-rules': typeof AuthenticatedDomainRulesRoute
@@ -165,12 +181,13 @@ export interface FileRoutesById {
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
+    | '/'
     | '/2fa-setup'
     | '/2fa-verify'
-    | '/'
     | '/login'
     | '/admins'
     | '/audit-log'
+    | '/backups'
     | '/config'
     | '/dashboard'
     | '/domain-rules'
@@ -183,12 +200,13 @@ export interface FileRouteTypes {
     | '/claim/$token'
   fileRoutesByTo: FileRoutesByTo
   to:
+    | '/'
     | '/2fa-setup'
     | '/2fa-verify'
-    | '/'
     | '/login'
     | '/admins'
     | '/audit-log'
+    | '/backups'
     | '/config'
     | '/dashboard'
     | '/domain-rules'
@@ -201,12 +219,14 @@ export interface FileRouteTypes {
     | '/claim/$token'
   id:
     | '__root__'
+    | '/'
     | '/2fa-setup'
     | '/2fa-verify'
     | '/_authenticated'
     | '/login'
     | '/_authenticated/admins'
     | '/_authenticated/audit-log'
+    | '/_authenticated/backups'
     | '/_authenticated/config'
     | '/_authenticated/dashboard'
     | '/_authenticated/domain-rules'
@@ -220,6 +240,7 @@ export interface FileRouteTypes {
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
+  IndexRoute: typeof IndexRoute
   R2faSetupRoute: typeof R2faSetupRoute
   R2faVerifyRoute: typeof R2faVerifyRoute
   AuthenticatedRoute: typeof AuthenticatedRouteWithChildren
@@ -229,6 +250,13 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/2fa-setup': {
       id: '/2fa-setup'
       path: '/2fa-setup'
@@ -269,6 +297,13 @@ declare module '@tanstack/react-router' {
       path: '/audit-log'
       fullPath: '/audit-log'
       preLoaderRoute: typeof AuthenticatedAuditLogRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/backups': {
+      id: '/_authenticated/backups'
+      path: '/backups'
+      fullPath: '/backups'
+      preLoaderRoute: typeof AuthenticatedBackupsRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
     '/_authenticated/config': {
@@ -347,6 +382,7 @@ declare module '@tanstack/react-router' {
 interface AuthenticatedRouteChildren {
   AuthenticatedAdminsRoute: typeof AuthenticatedAdminsRoute
   AuthenticatedAuditLogRoute: typeof AuthenticatedAuditLogRoute
+  AuthenticatedBackupsRoute: typeof AuthenticatedBackupsRoute
   AuthenticatedConfigRoute: typeof AuthenticatedConfigRoute
   AuthenticatedDashboardRoute: typeof AuthenticatedDashboardRoute
   AuthenticatedDomainRulesRoute: typeof AuthenticatedDomainRulesRoute
@@ -361,6 +397,7 @@ interface AuthenticatedRouteChildren {
 const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedAdminsRoute: AuthenticatedAdminsRoute,
   AuthenticatedAuditLogRoute: AuthenticatedAuditLogRoute,
+  AuthenticatedBackupsRoute: AuthenticatedBackupsRoute,
   AuthenticatedConfigRoute: AuthenticatedConfigRoute,
   AuthenticatedDashboardRoute: AuthenticatedDashboardRoute,
   AuthenticatedDomainRulesRoute: AuthenticatedDomainRulesRoute,
@@ -377,6 +414,7 @@ const AuthenticatedRouteWithChildren = AuthenticatedRoute._addFileChildren(
 )
 
 const rootRouteChildren: RootRouteChildren = {
+  IndexRoute: IndexRoute,
   R2faSetupRoute: R2faSetupRoute,
   R2faVerifyRoute: R2faVerifyRoute,
   AuthenticatedRoute: AuthenticatedRouteWithChildren,

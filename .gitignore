@@ -38,3 +38,7 @@ docker-compose.override.yml
 # built binaries
 backend/aghenc
 backend/aghenc.exe
+
+# Local build caches (sandbox constraint)
+.gocache/
+.gomodcache/

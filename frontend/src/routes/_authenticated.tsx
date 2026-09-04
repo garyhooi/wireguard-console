@@ -51,6 +51,7 @@ const NAV: NavGroup[] = [
   {
     group: 'System',
     items: [
+      { label: 'Backups', to: '/backups' },
       { label: 'Configuration', to: '/config' },
       { label: 'Profile', to: '/profile' },
     ],
