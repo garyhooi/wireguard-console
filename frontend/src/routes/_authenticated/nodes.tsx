@@ -139,7 +139,7 @@ function NodesPage() {
                   />
                 </div>
                 <div className="flex gap-3">
-                  <PrimaryButton disabled={createMutation.isPending}>
+                  <PrimaryButton type="submit" disabled={createMutation.isPending}>
                     {createMutation.isPending ? 'Creating…' : 'Create Node'}
                   </PrimaryButton>
                   <GhostButton onClick={() => setShowAdd(false)}>Cancel</GhostButton>

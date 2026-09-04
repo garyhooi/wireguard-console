@@ -11,6 +11,8 @@ interface SMTPConfig {
   password_set: boolean
 }
 
+const authH = { Authorization: localStorage.getItem('token')! }
+
 export const Route = createFileRoute('/_authenticated/config')({
   component: ConfigPage,
 })
@@ -107,6 +109,48 @@ function ConfigPage() {
 
   const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setForm((f) => ({ ...f, [k]: e.target.value }))
+
+  // ---- Email templates ----
+  interface Template {
+    key: string
+    subject: string
+    body: string
+  }
+  const [templates, setTemplates] = useState<Template[]>([])
+  const [templateMsg, setTemplateMsg] = useState('')
+  const [templateErr, setTemplateErr] = useState('')
+  const [loadingTemplates, setLoadingTemplates] = useState(true)
+
+  const loadTemplates = async () => {
+    try {
+      const res = await fetch('/api/config/email-templates', { headers: authH })
+      if (!res.ok) throw new Error('Failed to load templates')
+      setTemplates(await res.json())
+    } catch (e) {
+      setTemplateErr((e as Error).message)
+    } finally {
+      setLoadingTemplates(false)
+    }
+  }
+
+  useEffect(() => {
+    loadTemplates()
+  }, [])
+
+  const saveTemplate = async (t: Template) => {
+    try {
+      const res = await fetch(`/api/config/email-templates/${t.key}`, {
+        method: 'PATCH',
+        headers: { ...authH, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subject: t.subject, body: t.body }),
+      })
+      if (!res.ok) throw new Error('Failed to save template')
+      setTemplateMsg(`Template "${t.key}" saved.`)
+      setTemplateErr('')
+    } catch (e) {
+      setTemplateErr((e as Error).message)
+    }
+  }
 
   return (
     <div>
@@ -216,6 +260,51 @@ function ConfigPage() {
                 </div>
               )}
             </div>
+          </div>
+        )}
+      </div>
+
+      <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-6 max-w-xl mt-8">
+        <h2 className="text-lg font-semibold text-white mb-1">Email templates</h2>
+        <p className="text-sm text-neutral-400 mb-4">
+          Customize the emails the console sends. Placeholders: user_invite uses{' '}
+          <code className="text-teal-400">{"{{full_name}}"}</code> and{' '}
+          <code className="text-teal-400">{"{{invite_link}}"}</code>; peer_config also uses{' '}
+          <code className="text-teal-400">{"{{peer_name}}"}</code> and{' '}
+          <code className="text-teal-400">{"{{config}}"}</code>.
+        </p>
+        {templateErr && <p className="text-red-400 text-sm mb-3">{templateErr}</p>}
+        {templateMsg && <p className="text-teal-400 text-sm mb-3">{templateMsg}</p>}
+        {loadingTemplates ? (
+          <p className="text-neutral-400 text-sm">Loading…</p>
+        ) : (
+          <div className="space-y-6">
+            {templates.map((t) => (
+              <div key={t.key} className="border border-neutral-800 rounded-md p-4">
+                <p className="text-xs uppercase tracking-wider text-neutral-500 mb-2">{t.key}</p>
+                <input
+                  className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white mb-2 focus:outline-none focus:ring-2 focus:ring-teal-500"
+                  value={t.subject}
+                  onChange={(e) =>
+                    setTemplates((all) => all.map((x) => (x.key === t.key ? { ...x, subject: e.target.value } : x)))
+                  }
+                />
+                <textarea
+                  rows={6}
+                  className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white font-mono text-xs focus:outline-none focus:ring-2 focus:ring-teal-500"
+                  value={t.body}
+                  onChange={(e) =>
+                    setTemplates((all) => all.map((x) => (x.key === t.key ? { ...x, body: e.target.value } : x)))
+                  }
+                />
+                <button
+                  onClick={() => saveTemplate(t)}
+                  className="mt-2 bg-neutral-700 hover:bg-neutral-600 text-white text-sm font-medium py-2 px-3 rounded-md"
+                >
+                  Save template
+                </button>
+              </div>
+            ))}
           </div>
         )}
       </div>

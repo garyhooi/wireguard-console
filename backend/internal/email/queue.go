@@ -101,6 +101,24 @@ func (q *Queue) EnqueueAdminInvite(ctx context.Context, to, fullName, setupLink 
 	return nil
 }
 
+// EnqueueRenderedEmail queues a fully rendered email (subject/body already
+// templated by the API layer).
+func (q *Queue) EnqueueRenderedEmail(ctx context.Context, to, subject, body string) error {
+	job := EmailJob{To: to, Subject: subject, Body: body}
+	payload, err := json.Marshal(job)
+	if err != nil {
+		return fmt.Errorf("failed to marshal job: %w", err)
+	}
+	_, err = q.pool.Exec(ctx, `
+		INSERT INTO jobs (kind, payload)
+		VALUES ('send_email', $1)
+	`, payload)
+	if err != nil {
+		return fmt.Errorf("failed to enqueue job: %w", err)
+	}
+	return nil
+}
+
 func (q *Queue) EnqueueTestEmail(ctx context.Context, to string) error {
 	job := EmailJob{
 		To:      to,

@@ -43,6 +43,9 @@ func TestMain(m *testing.M) {
 	}
 	repoRoot := filepath.Clean(filepath.Join(pkgDir, ".."))
 
+	// Start from a clean schema so runs are deterministic and repeatable.
+	wipeDB(dbURL)
+
 	tmp, err := os.MkdirTemp("", "wgc-e2e-")
 	if err != nil {
 		fmt.Println("mkdtemp:", err)
@@ -156,6 +159,19 @@ func api(t *testing.T, method, path, token string, body interface{}) (*http.Resp
 	return resp, out
 }
 
+func login(t *testing.T, email, password string) string {
+	t.Helper()
+	resp, out := api(t, "POST", "/api/auth/login", "", map[string]string{
+		"email": email, "password": password,
+	})
+	expectStatus(t, resp, 200, "/api/auth/login")
+	token, _ := out["token"].(string)
+	if token == "" {
+		t.Fatal("login returned no token")
+	}
+	return token
+}
+
 func expectStatus(t *testing.T, resp *http.Response, want int, path string) {
 	t.Helper()
 	if resp.StatusCode != want {
@@ -168,17 +184,10 @@ func TestEndToEnd(t *testing.T) {
 	seedAdmin(t, dbURL)
 
 	// Login
-	resp, out := api(t, "POST", "/api/auth/login", "", map[string]string{
-		"email": "e2e@console.test", "password": "e2e-Passw0rd!",
-	})
-	expectStatus(t, resp, 200, "/api/auth/login")
-	token, _ := out["token"].(string)
-	if token == "" {
-		t.Fatal("login returned no token")
-	}
+	token := login(t, "e2e@console.test", "e2e-Passw0rd!")
 
 	// Server create -> auto keygen -> list scan (cidr regression)
-	resp, _ = api(t, "POST", "/api/servers", token, map[string]interface{}{
+	resp, _ := api(t, "POST", "/api/servers", token, map[string]interface{}{
 		"name": "E2E", "public_endpoint": "203.0.113.5:51820",
 	})
 	expectStatus(t, resp, 201, "POST /api/servers")
@@ -200,22 +209,22 @@ func TestEndToEnd(t *testing.T) {
 	}
 
 	// User invite -> link
-	resp, out = api(t, "POST", "/api/users", token, map[string]string{
+	resp, invOut := api(t, "POST", "/api/users", token, map[string]string{
 		"email": "user@example.com", "full_name": "E2E User",
 	})
 	expectStatus(t, resp, 201, "POST /api/users")
-	inviteLink, _ := out["invite_link"].(string)
+	inviteLink, _ := invOut["invite_link"].(string)
 	if !strings.HasPrefix(inviteLink, "https://console.test/claim/") {
 		t.Fatalf("bad invite link: %q", inviteLink)
 	}
 
 	// Peer create -> auto key + auto IP
 	userID := firstID(t, "/api/users", token)
-	resp, out = api(t, "POST", "/api/peers", token, map[string]interface{}{
+	resp, peerOut := api(t, "POST", "/api/peers", token, map[string]interface{}{
 		"name": "E2E MacBook", "server_id": serverID, "user_id": userID,
 	})
 	expectStatus(t, resp, 201, "POST /api/peers")
-	allowedIP, _ := out["allowed_ip"].(string)
+	allowedIP, _ := peerOut["allowed_ip"].(string)
 	if allowedIP != "10.8.0.2" {
 		t.Fatalf("auto IP = %q, want 10.8.0.2", allowedIP)
 	}
@@ -313,6 +322,60 @@ func TestEndToEnd(t *testing.T) {
 	expectStatus(t, resp, 200, "GET /api/nodes")
 	_ = nodesOut
 
+	// ---- Email templates ----
+	resp, _ = api(t, "GET", "/api/config/email-templates", token, nil)
+	expectStatus(t, resp, 200, "GET /api/config/email-templates")
+	resp, _ = api(t, "PATCH", "/api/config/email-templates/user_invite", token, map[string]string{
+		"subject": "Invite to {{full_name}}", "body": "Hello {{full_name}}: {{invite_link}}",
+	})
+	expectStatus(t, resp, 200, "PATCH /api/config/email-templates/user_invite")
+
+	// ---- Profile: profile + password change ----
+	resp, meOut := api(t, "GET", "/api/admins/me", token, nil)
+	expectStatus(t, resp, 200, "GET /api/admins/me")
+	if email, _ := meOut["email"].(string); email != "e2e@console.test" {
+		t.Fatalf("me.email = %q", email)
+	}
+	resp, _ = api(t, "POST", "/api/admins/me/password", token, map[string]string{
+		"current_password": "wrong", "new_password": "e2e-NewPassw0rd!",
+	})
+	expectStatus(t, resp, 401, "POST /api/admins/me/password (wrong current)")
+	resp, _ = api(t, "POST", "/api/admins/me/password", token, map[string]string{
+		"current_password": "e2e-Passw0rd!", "new_password": "e2e-NewPassw0rd!",
+	})
+	expectStatus(t, resp, 200, "POST /api/admins/me/password")
+	resp, _ = api(t, "POST", "/api/auth/login", "", map[string]string{
+		"email": "e2e@console.test", "password": "e2e-Passw0rd!",
+	})
+	expectStatus(t, resp, 401, "old password rejected after change")
+	token = login(t, "e2e@console.test", "e2e-NewPassw0rd!")
+
+	// ---- Claim: invite link end-to-end ----
+	// (fresh invite so the token is one-time and unused)
+	invResp, claimInvOut := api(t, "POST", "/api/users", token, map[string]string{
+		"email": "claimer@example.com", "full_name": "Claimer",
+	})
+	expectStatus(t, invResp, 201, "POST /api/users (claim invite)")
+	claimLink, _ := claimInvOut["invite_link"].(string)
+	claimToken := strings.TrimPrefix(claimLink, "https://console.test/claim/")
+	if claimToken == "" || claimToken == claimLink {
+		t.Fatalf("bad claim token from %q", claimLink)
+	}
+
+	claimResp, claimOut := api(t, "POST", "/api/claim", "", map[string]string{
+		"token": claimToken, "full_name": "Claimer", "public_key": "",
+	})
+	expectStatus(t, claimResp, 200, "POST /api/claim")
+	cfg, _ := claimOut["config"].(string)
+	if !strings.Contains(cfg, "PrivateKey = ") || strings.Contains(cfg, "[CLIENT_PRIVATE_KEY]") {
+		t.Fatalf("claim config invalid:\n%s", cfg)
+	}
+	// invite is one-time
+	reuseResp, _ := api(t, "POST", "/api/claim", "", map[string]string{
+		"token": claimToken, "full_name": "Again", "public_key": "",
+	})
+	expectStatus(t, reuseResp, 404, "POST /api/claim (reuse)")
+
 	// Cleanup: delete local server (cascade peers) must succeed
 	resp, _ = api(t, "DELETE", "/api/servers/"+serverID, token, nil)
 	expectStatus(t, resp, 200, "DELETE /api/servers/{id}")
@@ -348,4 +411,19 @@ func rawGet(t *testing.T, url, token string) string {
 	buf := new(bytes.Buffer)
 	buf.ReadFrom(resp.Body)
 	return buf.String()
+}
+
+// wipeDB drops and recreates the public schema.
+func wipeDB(dbURL string) {
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		fmt.Println("wipeDB connect:", err)
+		os.Exit(1)
+	}
+	defer pool.Close()
+	if _, err := pool.Exec(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`); err != nil {
+		fmt.Println("wipeDB:", err)
+		os.Exit(1)
+	}
 }

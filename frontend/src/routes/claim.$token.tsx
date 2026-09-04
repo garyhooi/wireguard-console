@@ -1,5 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useState } from 'react'
+import QRCode from 'qrcode'
 import { useMutation } from '@tanstack/react-query'
 
 interface ClaimResponse {
@@ -8,14 +9,16 @@ interface ClaimResponse {
   qr_code_url: string
 }
 
-export const Route = createFileRoute('/claim')({
+export const Route = createFileRoute('/claim/$token')({
   component: ClaimPage,
 })
 
 function ClaimPage() {
+  const { token } = Route.useParams()
   const [step, setStep] = useState<'form' | 'success'>('form')
   const [fullName, setFullName] = useState('')
-  const [token, setToken] = useState('')
+  const [error, setError] = useState('')
+  const [qrUrl, setQrUrl] = useState('')
   const [response, setResponse] = useState<ClaimResponse | null>(null)
 
   const claimMutation = useMutation({
@@ -34,28 +37,26 @@ function ClaimPage() {
     },
   })
 
-  const handleGenerateKey = () => {
-    // Generate WireGuard keypair in browser
-    const keygen = window.crypto.subtle
-    keygen.generateKey(
-      { name: 'ECDH', namedCurve: 'P-256' },
-      true,
-      ['deriveBits']
-    ).then((keyPair: CryptoKeyPair) => {
-      keygen.exportKey('raw', keyPair.publicKey).then((publicKeyRaw: ArrayBuffer) => {
-        // Convert raw public key to base64 (WireGuard format)
-        const publicKeyBase64 = btoa(String.fromCharCode(...new Uint8Array(publicKeyRaw)))
-          .replace(/\+/g, '-')
-          .replace(/\//g, '_')
-          .replace(/=+$/, '')
+  const handleClaim = () => {
+    // Keys are generated server-side; the config (with the private key)
+    // comes back in the response.
+    claimMutation.mutate({ token, full_name: fullName, public_key: '' })
+  }
 
-        claimMutation.mutate({
-          token,
-          full_name: fullName,
-          public_key: publicKeyBase64,
-        })
-      })
-    })
+  const showQr = async () => {
+    if (!response) return
+    setQrUrl(await QRCode.toDataURL(response.config, { width: 240, margin: 1 }))
+  }
+
+  const downloadConfig = () => {
+    if (!response) return
+    const blob = new Blob([response.config], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'wireguard.conf'
+    a.click()
+    URL.revokeObjectURL(url)
   }
 
   return (
@@ -80,28 +81,19 @@ function ClaimPage() {
             </div>
 
             <div>
-              <label htmlFor="token" className="block text-sm font-medium text-neutral-400 mb-2">
-                Invite Token
+              <label className="block text-sm font-medium text-neutral-400 mb-2">
+                Invite token (from your email link)
               </label>
-              <input
-                id="token"
-                type="text"
-                className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white font-mono focus:outline-none focus:ring-2 focus:ring-teal-500"
-                placeholder="Enter token from email"
-                value={token}
-                onChange={(e) => setToken(e.target.value)}
-              />
+              <p className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white font-mono text-sm break-all">
+                {token.slice(0, 24)}…
+              </p>
             </div>
 
-            {claimMutation.error && (
-              <div className="text-red-500 text-sm">
-                {claimMutation.error.message}
-              </div>
-            )}
+            {claimMutation.error && <div className="text-red-500 text-sm">{claimMutation.error.message}</div>}
 
             <button
-              onClick={handleGenerateKey}
-              disabled={claimMutation.isPending || !fullName || !token}
+              onClick={handleClaim}
+              disabled={claimMutation.isPending || !fullName}
               className="w-full bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-4 rounded-md disabled:opacity-50"
             >
               {claimMutation.isPending ? 'Creating...' : 'Claim Account'}
@@ -121,25 +113,30 @@ function ClaimPage() {
             <div>
               <h3 className="text-sm font-medium text-neutral-400 mb-2">Download Configuration</h3>
               <div className="bg-neutral-800 rounded-md p-4">
-                <pre className="text-xs text-neutral-300 font-mono overflow-auto max-h-48">
-                  {response.config}
-                </pre>
+                <pre className="text-xs text-neutral-300 font-mono overflow-auto max-h-48">{response.config}</pre>
               </div>
-              <button
-                onClick={() => {
-                  const blob = new Blob([response.config], { type: 'text/plain' })
-                  const url = URL.createObjectURL(blob)
-                  const a = document.createElement('a')
-                  a.href = url
-                  a.download = 'wireguard.conf'
-                  a.click()
-                  URL.revokeObjectURL(url)
-                }}
-                className="mt-2 w-full bg-neutral-700 hover:bg-neutral-600 text-white font-medium py-2 px-4 rounded-md"
-              >
-                Download .conf File
-              </button>
+              <div className="flex gap-3 mt-3">
+                <button
+                  onClick={downloadConfig}
+                  className="flex-1 bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-4 rounded-md"
+                >
+                  Download .conf
+                </button>
+                <button
+                  onClick={showQr}
+                  className="flex-1 bg-neutral-700 hover:bg-neutral-600 text-white font-medium py-2 px-4 rounded-md"
+                >
+                  Show QR
+                </button>
+              </div>
+              {qrUrl && (
+                <div className="text-center mt-4">
+                  <img src={qrUrl} alt="WireGuard config QR" className="mx-auto rounded-md" />
+                  <p className="text-neutral-400 text-xs mt-2">Scan in the WireGuard app</p>
+                </div>
+              )}
             </div>
+          
 
             <div>
               <h3 className="text-sm font-medium text-neutral-400 mb-2">Scan QR Code</h3>

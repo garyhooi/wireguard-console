@@ -12,7 +12,6 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as R2faSetupRouteImport } from './routes/2fa-setup'
 import { Route as R2faVerifyRouteImport } from './routes/2fa-verify'
 import { Route as AuthenticatedRouteImport } from './routes/_authenticated'
-import { Route as ClaimRouteImport } from './routes/claim'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as AuthenticatedAuditLogRouteImport } from './routes/_authenticated/audit-log'
 import { Route as AuthenticatedConfigRouteImport } from './routes/_authenticated/config'
@@ -20,9 +19,11 @@ import { Route as AuthenticatedDashboardRouteImport } from './routes/_authentica
 import { Route as AuthenticatedDomainRulesRouteImport } from './routes/_authenticated/domain-rules'
 import { Route as AuthenticatedNodesRouteImport } from './routes/_authenticated/nodes'
 import { Route as AuthenticatedPeersRouteImport } from './routes/_authenticated/peers'
+import { Route as AuthenticatedProfileRouteImport } from './routes/_authenticated/profile'
 import { Route as AuthenticatedServersRouteImport } from './routes/_authenticated/servers'
 import { Route as AuthenticatedStatisticsRouteImport } from './routes/_authenticated/statistics'
 import { Route as AuthenticatedUsersRouteImport } from './routes/_authenticated/users'
+import { Route as ClaimTokenRouteImport } from './routes/claim.$token'
 
 const R2faSetupRoute = R2faSetupRouteImport.update({
   id: '/2fa-setup',
@@ -36,11 +37,6 @@ const R2faVerifyRoute = R2faVerifyRouteImport.update({
 } as any)
 const AuthenticatedRoute = AuthenticatedRouteImport.update({
   id: '/_authenticated',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ClaimRoute = ClaimRouteImport.update({
-  id: '/claim',
-  path: '/claim',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LoginRoute = LoginRouteImport.update({
@@ -79,6 +75,11 @@ const AuthenticatedPeersRoute = AuthenticatedPeersRouteImport.update({
   path: '/peers',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
+const AuthenticatedProfileRoute = AuthenticatedProfileRouteImport.update({
+  id: '/profile',
+  path: '/profile',
+  getParentRoute: () => AuthenticatedRoute,
+} as any)
 const AuthenticatedServersRoute = AuthenticatedServersRouteImport.update({
   id: '/servers',
   path: '/servers',
@@ -94,12 +95,16 @@ const AuthenticatedUsersRoute = AuthenticatedUsersRouteImport.update({
   path: '/users',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
+const ClaimTokenRoute = ClaimTokenRouteImport.update({
+  id: '/claim/$token',
+  path: '/claim/$token',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/2fa-setup': typeof R2faSetupRoute
   '/2fa-verify': typeof R2faVerifyRoute
   '/': typeof AuthenticatedRouteWithChildren
-  '/claim': typeof ClaimRoute
   '/login': typeof LoginRoute
   '/audit-log': typeof AuthenticatedAuditLogRoute
   '/config': typeof AuthenticatedConfigRoute
@@ -107,15 +112,16 @@ export interface FileRoutesByFullPath {
   '/domain-rules': typeof AuthenticatedDomainRulesRoute
   '/nodes': typeof AuthenticatedNodesRoute
   '/peers': typeof AuthenticatedPeersRoute
+  '/profile': typeof AuthenticatedProfileRoute
   '/servers': typeof AuthenticatedServersRoute
   '/statistics': typeof AuthenticatedStatisticsRoute
   '/users': typeof AuthenticatedUsersRoute
+  '/claim/$token': typeof ClaimTokenRoute
 }
 export interface FileRoutesByTo {
   '/2fa-setup': typeof R2faSetupRoute
   '/2fa-verify': typeof R2faVerifyRoute
   '/': typeof AuthenticatedRouteWithChildren
-  '/claim': typeof ClaimRoute
   '/login': typeof LoginRoute
   '/audit-log': typeof AuthenticatedAuditLogRoute
   '/config': typeof AuthenticatedConfigRoute
@@ -123,16 +129,17 @@ export interface FileRoutesByTo {
   '/domain-rules': typeof AuthenticatedDomainRulesRoute
   '/nodes': typeof AuthenticatedNodesRoute
   '/peers': typeof AuthenticatedPeersRoute
+  '/profile': typeof AuthenticatedProfileRoute
   '/servers': typeof AuthenticatedServersRoute
   '/statistics': typeof AuthenticatedStatisticsRoute
   '/users': typeof AuthenticatedUsersRoute
+  '/claim/$token': typeof ClaimTokenRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/2fa-setup': typeof R2faSetupRoute
   '/2fa-verify': typeof R2faVerifyRoute
   '/_authenticated': typeof AuthenticatedRouteWithChildren
-  '/claim': typeof ClaimRoute
   '/login': typeof LoginRoute
   '/_authenticated/audit-log': typeof AuthenticatedAuditLogRoute
   '/_authenticated/config': typeof AuthenticatedConfigRoute
@@ -140,9 +147,11 @@ export interface FileRoutesById {
   '/_authenticated/domain-rules': typeof AuthenticatedDomainRulesRoute
   '/_authenticated/nodes': typeof AuthenticatedNodesRoute
   '/_authenticated/peers': typeof AuthenticatedPeersRoute
+  '/_authenticated/profile': typeof AuthenticatedProfileRoute
   '/_authenticated/servers': typeof AuthenticatedServersRoute
   '/_authenticated/statistics': typeof AuthenticatedStatisticsRoute
   '/_authenticated/users': typeof AuthenticatedUsersRoute
+  '/claim/$token': typeof ClaimTokenRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -150,7 +159,6 @@ export interface FileRouteTypes {
     | '/2fa-setup'
     | '/2fa-verify'
     | '/'
-    | '/claim'
     | '/login'
     | '/audit-log'
     | '/config'
@@ -158,15 +166,16 @@ export interface FileRouteTypes {
     | '/domain-rules'
     | '/nodes'
     | '/peers'
+    | '/profile'
     | '/servers'
     | '/statistics'
     | '/users'
+    | '/claim/$token'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/2fa-setup'
     | '/2fa-verify'
     | '/'
-    | '/claim'
     | '/login'
     | '/audit-log'
     | '/config'
@@ -174,15 +183,16 @@ export interface FileRouteTypes {
     | '/domain-rules'
     | '/nodes'
     | '/peers'
+    | '/profile'
     | '/servers'
     | '/statistics'
     | '/users'
+    | '/claim/$token'
   id:
     | '__root__'
     | '/2fa-setup'
     | '/2fa-verify'
     | '/_authenticated'
-    | '/claim'
     | '/login'
     | '/_authenticated/audit-log'
     | '/_authenticated/config'
@@ -190,17 +200,19 @@ export interface FileRouteTypes {
     | '/_authenticated/domain-rules'
     | '/_authenticated/nodes'
     | '/_authenticated/peers'
+    | '/_authenticated/profile'
     | '/_authenticated/servers'
     | '/_authenticated/statistics'
     | '/_authenticated/users'
+    | '/claim/$token'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   R2faSetupRoute: typeof R2faSetupRoute
   R2faVerifyRoute: typeof R2faVerifyRoute
   AuthenticatedRoute: typeof AuthenticatedRouteWithChildren
-  ClaimRoute: typeof ClaimRoute
   LoginRoute: typeof LoginRoute
+  ClaimTokenRoute: typeof ClaimTokenRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -224,13 +236,6 @@ declare module '@tanstack/react-router' {
       path: ''
       fullPath: '/'
       preLoaderRoute: typeof AuthenticatedRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/claim': {
-      id: '/claim'
-      path: '/claim'
-      fullPath: '/claim'
-      preLoaderRoute: typeof ClaimRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/login': {
@@ -282,6 +287,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedPeersRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
+    '/_authenticated/profile': {
+      id: '/_authenticated/profile'
+      path: '/profile'
+      fullPath: '/profile'
+      preLoaderRoute: typeof AuthenticatedProfileRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
     '/_authenticated/servers': {
       id: '/_authenticated/servers'
       path: '/servers'
@@ -303,6 +315,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedUsersRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
+    '/claim/$token': {
+      id: '/claim/$token'
+      path: '/claim/$token'
+      fullPath: '/claim/$token'
+      preLoaderRoute: typeof ClaimTokenRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -313,6 +332,7 @@ interface AuthenticatedRouteChildren {
   AuthenticatedDomainRulesRoute: typeof AuthenticatedDomainRulesRoute
   AuthenticatedNodesRoute: typeof AuthenticatedNodesRoute
   AuthenticatedPeersRoute: typeof AuthenticatedPeersRoute
+  AuthenticatedProfileRoute: typeof AuthenticatedProfileRoute
   AuthenticatedServersRoute: typeof AuthenticatedServersRoute
   AuthenticatedStatisticsRoute: typeof AuthenticatedStatisticsRoute
   AuthenticatedUsersRoute: typeof AuthenticatedUsersRoute
@@ -325,6 +345,7 @@ const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedDomainRulesRoute: AuthenticatedDomainRulesRoute,
   AuthenticatedNodesRoute: AuthenticatedNodesRoute,
   AuthenticatedPeersRoute: AuthenticatedPeersRoute,
+  AuthenticatedProfileRoute: AuthenticatedProfileRoute,
   AuthenticatedServersRoute: AuthenticatedServersRoute,
   AuthenticatedStatisticsRoute: AuthenticatedStatisticsRoute,
   AuthenticatedUsersRoute: AuthenticatedUsersRoute,
@@ -338,8 +359,8 @@ const rootRouteChildren: RootRouteChildren = {
   R2faSetupRoute: R2faSetupRoute,
   R2faVerifyRoute: R2faVerifyRoute,
   AuthenticatedRoute: AuthenticatedRouteWithChildren,
-  ClaimRoute: ClaimRoute,
   LoginRoute: LoginRoute,
+  ClaimTokenRoute: ClaimTokenRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

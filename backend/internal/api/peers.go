@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/wireguard-console/backend/internal/auth"
 	"github.com/wireguard-console/backend/internal/db"
+	"github.com/wireguard-console/backend/internal/email"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
@@ -133,6 +135,7 @@ func CreatePeer(store *Store) http.HandlerFunc {
 			AllowedIP     string    `json:"allowed_ip"`
 			PrivateKeyEnc string    `json:"private_key_enc"`
 		}
+		var generatedPrivKey string
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
 			return
@@ -170,6 +173,7 @@ func CreatePeer(store *Store) http.HandlerFunc {
 				return
 			}
 			req.PrivateKeyEnc = encPriv
+			generatedPrivKey = k.String()
 		}
 		if req.AllowedIP == "" {
 			ip, err := nextAvailableIP(ctx, store.pool, req.ServerID.String())
@@ -193,6 +197,12 @@ func CreatePeer(store *Store) http.HandlerFunc {
 		logAudit(ctx, store, adminID, "peer.create", "peer", "", nil)
 
 		warning := syncServerLogged(ctx, store.pool, req.ServerID)
+
+		// Email the ready config to the peer's user when we hold the private
+		// key (i.e. we generated it) and SMTP is configured.
+		if generatedPrivKey != "" {
+			sendPeerConfigEmail(ctx, store, req.ServerID, req.UserID, req.Name, req.PublicKey, req.AllowedIP, generatedPrivKey)
+		}
 
 		writeJSON(w, http.StatusCreated, map[string]string{
 			"status":        "created",
@@ -419,4 +429,50 @@ AllowedIPs = ` + server.DefaultAllowedIPs + `
 PersistentKeepalive = ` + strconv.Itoa(server.PersistentKeepalive) + `
 `
 	return config
+}
+
+// sendPeerConfigEmail renders the peer_config template and queues it to the
+// user's address. Silent when SMTP is not configured.
+func sendPeerConfigEmail(ctx context.Context, store *Store, serverID, userID uuid.UUID, peerName, peerPub, peerIP, privKey string) {
+	cfg := email.LoadConfig(ctx, store.pool)
+	if cfg.Host == "" {
+		return
+	}
+
+	var userEmail, fullName string
+	if err := store.pool.QueryRow(ctx,
+		`SELECT email, COALESCE(full_name, '') FROM users WHERE id = $1`, userID).Scan(&userEmail, &fullName); err != nil {
+		return
+	}
+	var srv struct {
+		Endpoint            string
+		PubKey              string
+		DNSServers          []string
+		DefaultAllowedIPs   string
+		PersistentKeepalive int
+	}
+	if err := store.pool.QueryRow(ctx, `
+		SELECT public_endpoint, server_public_key, dns_servers, default_allowed_ips, persistent_keepalive
+		FROM servers WHERE id = $1
+	`, serverID).Scan(&srv.Endpoint, &srv.PubKey, &srv.DNSServers, &srv.DefaultAllowedIPs, &srv.PersistentKeepalive); err != nil {
+		return
+	}
+
+	peer := &db.Peer{Name: peerName, PublicKey: peerPub, AllowedIP: peerIP}
+	server := &db.Server{
+		PublicEndpoint: srv.Endpoint, ServerPublicKey: srv.PubKey, DNSServers: srv.DNSServers,
+		DefaultAllowedIPs: srv.DefaultAllowedIPs, PersistentKeepalive: srv.PersistentKeepalive,
+	}
+	config := generateWireGuardConfig(peer, server, privKey)
+
+	subject, body := loadEmailTemplate(ctx, store.pool, "peer_config",
+		"Your WireGuard configuration is ready", "Hello {{full_name}}, your peer {{peer_name}} is ready: {{config}}")
+	vars := map[string]string{"full_name": fullName, "peer_name": peerName, "config": config}
+	subject = renderTemplate(subject, vars)
+	body = renderTemplate(body, vars)
+
+	queue := email.NewQueue(store.pool, nil)
+	if err := queue.EnqueueRenderedEmail(ctx, userEmail, subject, body); err != nil {
+		log.Printf("Failed to enqueue peer config email: %v", err)
+	}
 }

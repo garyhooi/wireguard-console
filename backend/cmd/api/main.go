@@ -125,6 +125,11 @@ func main() {
 				r.Get("/servers/{id}/host-config", api.GetServerHostConfig(store))
 
 				// Node management (admin session auth)
+				r.Get("/admins/me", api.GetMe(store))
+				r.Post("/admins/me/password", api.ChangePassword(store))
+				r.Post("/auth/2fa/disable", api.Disable2FA(store))
+				r.Get("/config/email-templates", api.ListEmailTemplates(store))
+				r.Patch("/config/email-templates/{key}", api.UpdateEmailTemplate(store))
 				r.Get("/nodes", api.ListNodes(store))
 				r.Post("/nodes", api.CreateNode(store))
 				r.Delete("/nodes/{id}", api.DeleteNode(store))

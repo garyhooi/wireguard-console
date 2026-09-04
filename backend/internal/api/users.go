@@ -125,8 +125,12 @@ func CreateUser(store *Store) http.HandlerFunc {
 		domain := os.Getenv("CONSOLE_DOMAIN")
 		domain = strings.TrimPrefix(strings.TrimPrefix(domain, "https://"), "http://")
 		inviteLink := "https://" + domain + "/claim/" + token
+		subject, body := loadEmailTemplate(ctx, store.pool, "user_invite",
+			"You've been invited to join WireGuard Console", "Hello {{full_name}}, click {{invite_link}} to claim your account.")
+		subject = renderTemplate(subject, map[string]string{"full_name": req.FullName})
+		body = renderTemplate(body, map[string]string{"full_name": req.FullName, "invite_link": inviteLink})
 		queue := email.NewQueue(store.pool, nil)
-		if err := queue.EnqueueUserInvite(ctx, req.Email, req.FullName, inviteLink); err != nil {
+		if err := queue.EnqueueRenderedEmail(ctx, req.Email, subject, body); err != nil {
 			log.Printf("Failed to enqueue invite email: %v", err)
 		}
 
