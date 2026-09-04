@@ -13,6 +13,8 @@ interface Peer {
   status: string
   last_handshake_at: string | null
   created_at: string
+  user_email: string
+  user_full_name: string
 }
 
 interface Server {
@@ -38,7 +40,7 @@ function PeersPage() {
   const [editing, setEditing] = useState<Peer | null>(null)
   const [error, setError] = useState('')
   const [qr, setQr] = useState<{ name: string; dataUrl: string } | null>(null)
-  const [form, setForm] = useState({ name: '', server_id: '', user_id: '' })
+  const [form, setForm] = useState({ name: '', server_id: '', user_id: '', send_email: false })
 
   const { data: peers, isLoading } = useQuery<Peer[]>({
     queryKey: ['peers'],
@@ -81,7 +83,7 @@ function PeersPage() {
     onSuccess: (data) => {
       setShowAdd(false)
       setError('')
-      setForm({ name: '', server_id: '', user_id: '' })
+      setForm({ name: '', server_id: '', user_id: '', send_email: false })
       queryClient.invalidateQueries({ queryKey: ['peers'] })
       if (data?.allowed_ip) setError(`Created — peer IP ${data.allowed_ip}`)
     },
@@ -164,7 +166,7 @@ function PeersPage() {
         <button
           onClick={() => {
             setEditing(null)
-            setForm({ name: '', server_id: '', user_id: '' })
+            setForm({ name: '', server_id: '', user_id: '', send_email: false })
             setShowAdd(true)
           }}
           className="bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-4 rounded-md"
@@ -256,6 +258,17 @@ function PeersPage() {
                   </div>
                 </>
               )}
+              {!editing && (
+                <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 rounded border-zinc-700 bg-zinc-800 accent-teal-500"
+                    checked={form.send_email}
+                    onChange={(e) => setForm((f) => ({ ...f, send_email: e.target.checked }))}
+                  />
+                  Email the config to this user (sent when SMTP is configured)
+                </label>
+              )}
               <div className="flex space-x-3">
                 <button
                   type="submit"
@@ -308,6 +321,9 @@ function PeersPage() {
                 Name
               </th>
               <th className="px-6 py-3 text-left text-xs font-medium text-neutral-400 uppercase tracking-wider">
+                User
+              </th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-neutral-400 uppercase tracking-wider">
                 Public Key
               </th>
               <th className="px-6 py-3 text-left text-xs font-medium text-neutral-400 uppercase tracking-wider">
@@ -328,6 +344,9 @@ function PeersPage() {
             {activePeers.map((peer) => (
               <tr key={peer.id}>
                 <td className="px-6 py-4 whitespace-nowrap text-sm text-white">{peer.name}</td>
+                <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-400">
+                  {peer.user_full_name || peer.user_email || '—'}
+                </td>
                 <td className="px-6 py-4 whitespace-nowrap text-sm text-neutral-400 font-mono">
                   {peer.public_key.substring(0, 16)}...
                 </td>
@@ -357,7 +376,7 @@ function PeersPage() {
                     <button
                       onClick={() => {
                         setEditing(peer)
-                        setForm({ name: peer.name, server_id: peer.server_id, user_id: peer.user_id })
+                        setForm({ name: peer.name, server_id: peer.server_id, user_id: peer.user_id, send_email: false })
                         setShowAdd(false)
                       }}
                       className="text-teal-400 hover:text-teal-300"

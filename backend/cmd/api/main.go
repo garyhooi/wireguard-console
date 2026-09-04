@@ -95,6 +95,7 @@ func main() {
 				r.Get("/admins/{id}", api.GetAdmin(store))
 				r.Patch("/admins/{id}", api.UpdateAdmin(store))
 				r.Delete("/admins/{id}", api.DeleteAdmin(store))
+				r.Post("/admins/{id}/reset-password", api.ResetAdminPassword(store))
 			})
 
 			// User and peer management - admin and super_admin
@@ -105,6 +106,7 @@ func main() {
 				r.Get("/users/{id}", api.GetUser(store))
 				r.Patch("/users/{id}", api.UpdateUser(store))
 				r.Post("/users/{id}/suspend", api.SuspendUser(store))
+				r.Delete("/users/{id}", api.DeleteUser(store))
 				r.Post("/users/{id}/resume", api.ResumeUser(store))
 
 				r.Get("/peers", api.ListPeers(store))

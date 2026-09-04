@@ -376,6 +376,67 @@ func TestEndToEnd(t *testing.T) {
 	})
 	expectStatus(t, reuseResp, 404, "POST /api/claim (reuse)")
 
+	// ---- Admins: list scan regression + invite + reset password ----
+	adminList := rawGet(t, baseURL+"/api/admins", token)
+	var adminRows []map[string]interface{}
+	json.Unmarshal([]byte(adminList), &adminRows)
+	if len(adminRows) == 0 {
+		t.Fatal("GET /api/admins: expected at least the seeded admin")
+	}
+	invResp2, _ := api(t, "POST", "/api/admins", token, map[string]string{
+		"email": "op2@console.test", "role": "admin",
+	})
+	expectStatus(t, invResp2, 201, "POST /api/admins")
+	adminList2 := rawGet(t, baseURL+"/api/admins", token)
+	json.Unmarshal([]byte(adminList2), &adminRows)
+	if len(adminRows) != 2 {
+		t.Fatalf("GET /api/admins: expected 2, got %d", len(adminRows))
+	}
+	var op2ID string
+	for _, a := range adminRows {
+		if e, _ := a["email"].(string); e == "op2@console.test" {
+			op2ID, _ = a["id"].(string)
+		}
+	}
+	if op2ID == "" {
+		t.Fatal("invited admin not in list")
+	}
+	resp, resetOut := api(t, "POST", "/api/admins/"+op2ID+"/reset-password", token, nil)
+	expectStatus(t, resp, 200, "POST /api/admins/{id}/reset-password")
+	if pw, _ := resetOut["password"].(string); len(pw) < 8 {
+		t.Fatal("reset password not returned")
+	}
+
+	// ---- Peers carry their owner ----
+	peerJSON := rawGet(t, baseURL+"/api/peers", token)
+	var peerRows []map[string]interface{}
+	json.Unmarshal([]byte(peerJSON), &peerRows)
+	if len(peerRows) == 0 {
+		t.Fatal("no peers listed")
+	}
+	foundOwner := false
+	for _, pr := range peerRows {
+		if email, _ := pr["user_email"].(string); email == "user@example.com" {
+			foundOwner = true
+		}
+		if name, _ := pr["name"].(string); name == "E2E MacBook Pro" {
+			if email, _ := pr["user_email"].(string); email != "user@example.com" {
+				t.Fatalf("peer 'E2E MacBook Pro' owner email = %q, want user@example.com", email)
+			}
+		}
+	}
+	if !foundOwner {
+		t.Fatal("no peer is attributed to user@example.com")
+	}
+
+	// ---- VPN user lifecycle: suspend -> resume -> remove ----
+	lifeResp, _ := api(t, "POST", "/api/users/"+userID+"/suspend", token, nil)
+	expectStatus(t, lifeResp, 200, "POST /api/users/{id}/suspend")
+	lifeResp, _ = api(t, "POST", "/api/users/"+userID+"/resume", token, nil)
+	expectStatus(t, lifeResp, 200, "POST /api/users/{id}/resume")
+	lifeResp, _ = api(t, "DELETE", "/api/users/"+userID, token, nil)
+	expectStatus(t, lifeResp, 200, "DELETE /api/users/{id}")
+
 	// Cleanup: delete local server (cascade peers) must succeed
 	resp, _ = api(t, "DELETE", "/api/servers/"+serverID, token, nil)
 	expectStatus(t, resp, 200, "DELETE /api/servers/{id}")

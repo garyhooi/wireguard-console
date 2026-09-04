@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/wireguard-console/backend/internal/auth"
@@ -436,15 +437,6 @@ func ListAdmins(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := context.Background()
 
-		var admins []struct {
-			ID          uuid.UUID `json:"id"`
-			Email       string    `json:"email"`
-			Role        string    `json:"role"`
-			TOTPEnabled bool      `json:"totp_enabled"`
-			Status      string    `json:"status"`
-			CreatedAt   string    `json:"created_at"`
-		}
-
 		rows, err := store.pool.Query(ctx, `
 			SELECT id, email, role, totp_enabled, status, created_at
 			FROM admins
@@ -456,20 +448,25 @@ func ListAdmins(store *Store) http.HandlerFunc {
 		}
 		defer rows.Close()
 
+		admins := []map[string]interface{}{}
 		for rows.Next() {
-			var a struct {
-				ID          uuid.UUID `json:"id"`
-				Email       string    `json:"email"`
-				Role        string    `json:"role"`
-				TOTPEnabled bool      `json:"totp_enabled"`
-				Status      string    `json:"status"`
-				CreatedAt   string    `json:"created_at"`
-			}
-			if err := rows.Scan(&a.ID, &a.Email, &a.Role, &a.TOTPEnabled, &a.Status, &a.CreatedAt); err != nil {
+			var (
+				id          uuid.UUID
+				email       string
+				role        string
+				totpEnabled bool
+				status      string
+				createdAt   time.Time
+			)
+			if err := rows.Scan(&id, &email, &role, &totpEnabled, &status, &createdAt); err != nil {
 				writeError(w, http.StatusInternalServerError, "Failed to scan admin")
 				return
 			}
-			admins = append(admins, a)
+			admins = append(admins, map[string]interface{}{
+				"id": id.String(), "email": email, "role": role,
+				"totp_enabled": totpEnabled, "status": status,
+				"created_at": createdAt.UTC().Format(time.RFC3339),
+			})
 		}
 
 		writeJSON(w, http.StatusOK, admins)
@@ -565,27 +562,32 @@ func GetAdmin(store *Store) http.HandlerFunc {
 
 		ctx := context.Background()
 
-		var a struct {
-			ID          uuid.UUID `json:"id"`
-			Email       string    `json:"email"`
-			Role        string    `json:"role"`
-			TOTPEnabled bool      `json:"totp_enabled"`
-			Status      string    `json:"status"`
-			CreatedAt   string    `json:"created_at"`
-		}
-
+		var (
+			a struct {
+				ID          uuid.UUID `json:"id"`
+				Email       string    `json:"email"`
+				Role        string    `json:"role"`
+				TOTPEnabled bool      `json:"totp_enabled"`
+				Status      string    `json:"status"`
+			}
+			createdAt time.Time
+		)
 		err = store.pool.QueryRow(ctx, `
 			SELECT id, email, role, totp_enabled, status, created_at
 			FROM admins
 			WHERE id = $1
-		`, adminID).Scan(&a.ID, &a.Email, &a.Role, &a.TOTPEnabled, &a.Status, &a.CreatedAt)
+		`, adminID).Scan(&a.ID, &a.Email, &a.Role, &a.TOTPEnabled, &a.Status, &createdAt)
 
 		if err != nil {
 			writeError(w, http.StatusNotFound, "Admin not found")
 			return
 		}
 
-		writeJSON(w, http.StatusOK, a)
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"id": a.ID.String(), "email": a.Email, "role": a.Role,
+			"totp_enabled": a.TOTPEnabled, "status": a.Status,
+			"created_at": createdAt.UTC().Format(time.RFC3339),
+		})
 	}
 }
 
@@ -620,6 +622,43 @@ func UpdateAdmin(store *Store) http.HandlerFunc {
 		logAudit(ctx, store, actorID, "admin.update", "admin", adminID.String(), nil)
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+	}
+}
+
+// ResetAdminPassword issues a new temporary password for an admin
+// (emailed when SMTP is configured; always returned once for manual share).
+func ResetAdminPassword(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		adminID, err := parseUUID(r.PathValue("id"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "Invalid admin ID")
+			return
+		}
+		ctx := context.Background()
+		actorID := getAdminID(r)
+
+		newPassword := randomPassword(16)
+		if _, err := store.pool.Exec(ctx, `
+			UPDATE admins SET password_hash = $1, updated_at = now() WHERE id = $2
+		`, hashPassword(newPassword), adminID); err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to reset password")
+			return
+		}
+
+		var adminEmail string
+		store.pool.QueryRow(ctx, `SELECT email FROM admins WHERE id = $1`, adminID).Scan(&adminEmail)
+
+		subject, body := loadEmailTemplate(ctx, store.pool, "admin_invite",
+			"WireGuard Console: temporary password",
+			"Login at {{console_url}} with {{email}} and password {{password}}.")
+		vars := map[string]string{"console_url": "https://" + domainFromEnv(), "email": adminEmail, "password": newPassword}
+		queue := email.NewQueue(store.pool, nil)
+		if adminEmail != "" {
+			_ = queue.EnqueueRenderedEmail(ctx, adminEmail, renderTemplate(subject, vars), renderTemplate(body, vars))
+		}
+
+		logAudit(ctx, store, actorID, "admin.reset_password", "admin", adminID.String(), nil)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "reset", "password": newPassword})
 	}
 }
 

@@ -2,6 +2,8 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 
+const authH = { Authorization: localStorage.getItem('token')! }
+
 interface User {
   id: string
   email: string
@@ -65,6 +67,28 @@ function UsersPage() {
       // refreshes underneath.
       refetch()
     },
+  })
+
+  const suspendMutation = useMutation({
+    mutationFn: async (u: User) => {
+      const res = await fetch(`/api/users/${u.id}/suspend`, { method: 'POST', headers: authH })
+      if (!res.ok) throw new Error('Failed to suspend user')
+    },
+    onSuccess: () => refetch(),
+  })
+  const resumeMutation = useMutation({
+    mutationFn: async (u: User) => {
+      const res = await fetch(`/api/users/${u.id}/resume`, { method: 'POST', headers: authH })
+      if (!res.ok) throw new Error('Failed to resume user')
+    },
+    onSuccess: () => refetch(),
+  })
+  const removeMutation = useMutation({
+    mutationFn: async (u: User) => {
+      const res = await fetch(`/api/users/${u.id}`, { method: 'DELETE', headers: authH })
+      if (!res.ok) throw new Error('Failed to remove user')
+    },
+    onSuccess: () => refetch(),
   })
 
   const handleInvite = (e: React.FormEvent) => {
@@ -216,6 +240,9 @@ function UsersPage() {
                 <th className="px-6 py-3 text-left text-xs font-medium text-neutral-400 uppercase tracking-wider">
                   Invited At
                 </th>
+                <th className="px-6 py-3 text-right text-xs font-medium text-neutral-400 uppercase tracking-wider">
+                  Actions
+                </th>
               </tr>
             </thead>
             <tbody className="bg-neutral-900 divide-y divide-neutral-800">
@@ -244,6 +271,30 @@ function UsersPage() {
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-neutral-400">
                     {user.invited_at ? new Date(user.invited_at).toLocaleString() : '-'}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-right text-sm">
+                    <div className="flex justify-end gap-2">
+                      {user.status === 'active' && (
+                        <button onClick={() => suspendMutation.mutate(user)} className="text-amber-400 hover:text-amber-300">
+                          Suspend
+                        </button>
+                      )}
+                      {user.status === 'suspended' && (
+                        <button onClick={() => resumeMutation.mutate(user)} className="text-teal-400 hover:text-teal-300">
+                          Resume
+                        </button>
+                      )}
+                      {user.status !== 'removed' && (
+                        <button
+                          onClick={() => {
+                            if (confirm(`Remove "${user.email}"? Their peers will be removed too.`)) removeMutation.mutate(user)
+                          }}
+                          className="text-red-400 hover:text-red-300"
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}

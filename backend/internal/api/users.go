@@ -180,6 +180,36 @@ func UpdateUser(store *Store) http.HandlerFunc {
 	}
 }
 
+// DeleteUser revokes any pending invite and marks the user and their
+// peers removed (soft delete).
+func DeleteUser(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, err := parseUUID(r.PathValue("id"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "Invalid user ID")
+			return
+		}
+		ctx := context.Background()
+		adminID := getAdminID(r)
+
+		if _, err := store.pool.Exec(ctx, `DELETE FROM invites WHERE user_id = $1`, userID); err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to revoke invitation")
+			return
+		}
+		if _, err := store.pool.Exec(ctx, `UPDATE users SET status = 'removed', updated_at = now() WHERE id = $1`, userID); err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to remove user")
+			return
+		}
+		if _, err := store.pool.Exec(ctx, `UPDATE peers SET status = 'removed', removed_at = now() WHERE user_id = $1 AND status != 'removed'`, userID); err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to remove user peers")
+			return
+		}
+
+		logAudit(ctx, store, adminID, "user.delete", "user", userID.String(), nil)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
+	}
+}
+
 func SuspendUser(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID, err := parseUUID(r.PathValue("id"))

@@ -68,11 +68,12 @@ func ListPeers(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := context.Background()
 
-		peers := []db.Peer{}
 		rows, err := store.pool.Query(ctx, `
-			SELECT p.id, p.user_id, p.server_id, p.name, p.public_key, host(p.allowed_ip), 
-			       p.status, p.last_handshake_at, p.created_at, p.suspended_at, p.removed_at
+			SELECT p.id, p.user_id, p.server_id, p.name, p.public_key, host(p.allowed_ip),
+			       p.status, p.last_handshake_at, p.created_at, p.suspended_at, p.removed_at,
+			       COALESCE(u.email, ''), COALESCE(u.full_name, '')
 			FROM peers p
+			LEFT JOIN users u ON u.id = p.user_id
 			ORDER BY p.created_at DESC
 		`)
 		if err != nil {
@@ -81,14 +82,21 @@ func ListPeers(store *Store) http.HandlerFunc {
 		}
 		defer rows.Close()
 
+		type peerRow struct {
+			db.Peer
+			UserEmail    string `json:"user_email"`
+			UserFullName string `json:"user_full_name"`
+		}
+		peers := []peerRow{}
 		for rows.Next() {
-			var p db.Peer
-			if err := rows.Scan(&p.ID, &p.UserID, &p.ServerID, &p.Name, &p.PublicKey,
-				&p.AllowedIP, &p.Status, &p.LastHandshakeAt, &p.CreatedAt, &p.SuspendedAt, &p.RemovedAt); err != nil {
+			var pr peerRow
+			if err := rows.Scan(&pr.ID, &pr.UserID, &pr.ServerID, &pr.Name, &pr.PublicKey,
+				&pr.AllowedIP, &pr.Status, &pr.LastHandshakeAt, &pr.CreatedAt, &pr.SuspendedAt, &pr.RemovedAt,
+				&pr.UserEmail, &pr.UserFullName); err != nil {
 				writeError(w, http.StatusInternalServerError, "Failed to scan peer")
 				return
 			}
-			peers = append(peers, p)
+			peers = append(peers, pr)
 		}
 
 		writeJSON(w, http.StatusOK, peers)
@@ -134,6 +142,7 @@ func CreatePeer(store *Store) http.HandlerFunc {
 			PublicKey     string    `json:"public_key"`
 			AllowedIP     string    `json:"allowed_ip"`
 			PrivateKeyEnc string    `json:"private_key_enc"`
+			SendEmail     bool      `json:"send_email"`
 		}
 		var generatedPrivKey string
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -198,9 +207,9 @@ func CreatePeer(store *Store) http.HandlerFunc {
 
 		warning := syncServerLogged(ctx, store.pool, req.ServerID)
 
-		// Email the ready config to the peer's user when we hold the private
-		// key (i.e. we generated it) and SMTP is configured.
-		if generatedPrivKey != "" {
+		// Optionally email the ready config to the peer's user (needs the
+		// generated private key + configured SMTP).
+		if req.SendEmail && generatedPrivKey != "" {
 			sendPeerConfigEmail(ctx, store, req.ServerID, req.UserID, req.Name, req.PublicKey, req.AllowedIP, generatedPrivKey)
 		}
 

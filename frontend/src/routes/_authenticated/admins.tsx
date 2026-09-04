@@ -88,6 +88,19 @@ function AdminsPage() {
     onError: (e: Error) => setError(e.message),
   })
 
+  const resetPwMutation = useMutation({
+    mutationFn: async (a: Admin) => {
+      const res = await fetch(`/api/admins/${a.id}/reset-password`, { method: 'POST', headers: auth })
+      if (!res.ok) throw new Error('Failed to reset password')
+      return res.json()
+    },
+    onSuccess: (data: { password: string }, a: Admin) => {
+      setNotice(`Temporary password for ${a.email}: ${data.password}  (emailed if SMTP is configured)`)
+      setError('')
+    },
+    onError: (e: Error) => setError(e.message),
+  })
+
   const disableMutation = useMutation({
     mutationFn: async (a: Admin) => {
       const res = await fetch(`/api/admins/${a.id}`, { method: 'DELETE', headers: auth })
@@ -206,15 +219,25 @@ function AdminsPage() {
                     </td>
                     <td className="px-5 py-3 text-right text-sm">
                       {a.status === 'active' ? (
-                        <button
-                          onClick={() => {
-                            if (confirm(`Disable admin "${a.email}"? (soft delete, role kept)`))
-                              disableMutation.mutate(a)
-                          }}
-                          className="text-red-400 hover:text-red-300"
-                        >
-                          Disable
-                        </button>
+                        <div className="flex justify-end gap-3">
+                          <button
+                            onClick={() => {
+                              if (confirm(`Reset password for "${a.email}"?`)) resetPwMutation.mutate(a)
+                            }}
+                            className="text-teal-400 hover:text-teal-300"
+                          >
+                            Reset password
+                          </button>
+                          <button
+                            onClick={() => {
+                              if (confirm(`Disable admin "${a.email}"? (soft delete, role kept)`))
+                                disableMutation.mutate(a)
+                            }}
+                            className="text-red-400 hover:text-red-300"
+                          >
+                            Disable
+                          </button>
+                        </div>
                       ) : (
                         <span className="text-zinc-600">disabled</span>
                       )}
