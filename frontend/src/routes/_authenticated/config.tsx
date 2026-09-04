@@ -278,7 +278,7 @@ function ConfigPage() {
           <code className="text-teal-400">{"{{full_name}}"}</code> and{' '}
           <code className="text-teal-400">{"{{invite_link}}"}</code>; peer_config also uses{' '}
           <code className="text-teal-400">{"{{peer_name}}"}</code> and{' '}
-          <code className="text-teal-400">{"{{config}}"}</code>.
+          <code className="text-teal-400">{"{{config_link}}"}</code>.
         </p>
         {templateErr && <p className="text-red-400 text-sm mb-3">{templateErr}</p>}
         {templateMsg && <p className="text-teal-400 text-sm mb-3">{templateMsg}</p>}

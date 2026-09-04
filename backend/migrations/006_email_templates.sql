@@ -1,6 +1,6 @@
 -- Editable email templates. Placeholders use {{variable}} syntax:
 --   user_invite: {{full_name}}, {{invite_link}}
---   peer_config: {{full_name}}, {{peer_name}}, {{config}}
+--   peer_config: {{full_name}}, {{peer_name}}, {{config_link}}
 CREATE TABLE IF NOT EXISTS email_templates (
     key     TEXT PRIMARY KEY,
     subject TEXT NOT NULL,
@@ -14,5 +14,5 @@ INSERT INTO email_templates (key, subject, body) VALUES
 ('admin_invite', 'You''ve been invited to manage WireGuard Console',
  '<html><body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;"><h2>Welcome to WireGuard Console</h2><p>You have been invited as a console administrator.</p><p>Login at <a href="{{console_url}}">{{console_url}}</a> with email <strong>{{email}}</strong> and the temporary password <strong>{{password}}</strong>.</p><p style="margin-top: 24px; color: #666; font-size: 14px;">Change your password after your first login (Profile &rarr; Change password), and enroll 2FA.</p></body></html>'),
 ('peer_config', 'Your WireGuard configuration is ready',
- '<html><body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;"><h2>Hello {{full_name}},</h2><p>Your WireGuard peer <strong>{{peer_name}}</strong> is ready. Import the configuration below into your WireGuard app (or scan it as a QR code):</p><pre style="background: #f4f4f5; padding: 16px; border-radius: 6px; overflow-x: auto; font-size: 12px;">{{config}}</pre><p style="margin-top: 24px; color: #666; font-size: 14px;">This configuration is sent only to you. Keep your private key safe.</p></body></html>')
+ '<html><body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;"><h2>Hello {{full_name}},</h2><p>Your WireGuard peer <strong>{{peer_name}}</strong> is ready. Open the link below to download the config file or scan its QR code with the WireGuard app:</p><p><a href="{{config_link}}" style="display: inline-block; padding: 12px 24px; background-color: #0d9488; color: white; text-decoration: none; border-radius: 6px; font-weight: bold;">Get Your Config</a></p><p style="margin-top: 24px; color: #666; font-size: 14px;">This link is private — do not forward it. It expires automatically.</p></body></html>')
 ON CONFLICT (key) DO NOTHING;

@@ -193,24 +193,43 @@ func CreatePeer(store *Store) http.HandlerFunc {
 			req.AllowedIP = ip
 		}
 
-		_, err := store.pool.Exec(ctx, `
+		var newID uuid.UUID
+		err := store.pool.QueryRow(ctx, `
 			INSERT INTO peers (user_id, server_id, name, public_key, allowed_ip, preshared_key_encrypted, private_key_encrypted, status)
 			VALUES ($1, $2, $3, $4, $5, '', $6, 'active')
-		`, req.UserID, req.ServerID, req.Name, req.PublicKey, req.AllowedIP, req.PrivateKeyEnc)
+			RETURNING id
+		`, req.UserID, req.ServerID, req.Name, req.PublicKey, req.AllowedIP, req.PrivateKeyEnc).Scan(&newID)
 
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to create peer")
 			return
 		}
 
-		logAudit(ctx, store, adminID, "peer.create", "peer", "", nil)
+		logAudit(ctx, store, adminID, "peer.create", "peer", newID.String(), nil)
 
 		warning := syncServerLogged(ctx, store.pool, req.ServerID)
 
-		// Optionally email the ready config to the peer's user (needs the
-		// generated private key + configured SMTP).
+		// Optionally email the user a secure link to their config (needs the
+		// generated private key + configured SMTP). The email contains a
+		// claim-style URL, never the config/private key itself — the link
+		// opens a page where the user downloads the .conf or scans a QR.
+		configLink := ""
 		if req.SendEmail && generatedPrivKey != "" {
-			sendPeerConfigEmail(ctx, store, req.ServerID, req.UserID, req.Name, req.PublicKey, req.AllowedIP, generatedPrivKey)
+			token, err := generateToken()
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to generate access token")
+				return
+			}
+			expiresAt := time.Now().Add(peerAccessLinkTTL)
+			if _, err := store.pool.Exec(ctx, `
+				INSERT INTO peer_access_tokens (token_hash, peer_id, expires_at)
+				VALUES ($1, $2, $3)
+			`, hashToken(token), newID, expiresAt); err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to create access link")
+				return
+			}
+			configLink = configLinkURL(token)
+			sendPeerConfigLinkEmail(ctx, store, req.UserID, req.Name, configLink)
 		}
 
 		writeJSON(w, http.StatusCreated, map[string]string{
@@ -218,6 +237,7 @@ func CreatePeer(store *Store) http.HandlerFunc {
 			"public_key":    req.PublicKey,
 			"allowed_ip":    req.AllowedIP,
 			"apply_warning": warning,
+			"config_link":   configLink,
 		})
 	}
 }
@@ -440,9 +460,10 @@ PersistentKeepalive = ` + strconv.Itoa(server.PersistentKeepalive) + `
 	return config
 }
 
-// sendPeerConfigEmail renders the peer_config template and queues it to the
-// user's address. Silent when SMTP is not configured.
-func sendPeerConfigEmail(ctx context.Context, store *Store, serverID, userID uuid.UUID, peerName, peerPub, peerIP, privKey string) {
+// sendPeerConfigLinkEmail emails the user a secure link to their peer's
+// config page (download .conf / scan QR). The email never contains the
+// config or private key. Silent when SMTP is not configured.
+func sendPeerConfigLinkEmail(ctx context.Context, store *Store, userID uuid.UUID, peerName, configLink string) {
 	cfg := email.LoadConfig(ctx, store.pool)
 	if cfg.Host == "" {
 		return
@@ -453,30 +474,11 @@ func sendPeerConfigEmail(ctx context.Context, store *Store, serverID, userID uui
 		`SELECT email, COALESCE(full_name, '') FROM users WHERE id = $1`, userID).Scan(&userEmail, &fullName); err != nil {
 		return
 	}
-	var srv struct {
-		Endpoint            string
-		PubKey              string
-		DNSServers          []string
-		DefaultAllowedIPs   string
-		PersistentKeepalive int
-	}
-	if err := store.pool.QueryRow(ctx, `
-		SELECT public_endpoint, server_public_key, dns_servers, default_allowed_ips, persistent_keepalive
-		FROM servers WHERE id = $1
-	`, serverID).Scan(&srv.Endpoint, &srv.PubKey, &srv.DNSServers, &srv.DefaultAllowedIPs, &srv.PersistentKeepalive); err != nil {
-		return
-	}
-
-	peer := &db.Peer{Name: peerName, PublicKey: peerPub, AllowedIP: peerIP}
-	server := &db.Server{
-		PublicEndpoint: srv.Endpoint, ServerPublicKey: srv.PubKey, DNSServers: srv.DNSServers,
-		DefaultAllowedIPs: srv.DefaultAllowedIPs, PersistentKeepalive: srv.PersistentKeepalive,
-	}
-	config := generateWireGuardConfig(peer, server, privKey)
 
 	subject, body := loadEmailTemplate(ctx, store.pool, "peer_config",
-		"Your WireGuard configuration is ready", "Hello {{full_name}}, your peer {{peer_name}} is ready: {{config}}")
-	vars := map[string]string{"full_name": fullName, "peer_name": peerName, "config": config}
+		"Your WireGuard configuration is ready",
+		"Hello {{full_name}}, your peer {{peer_name}} is ready. Open {{config_link}} to download the config or scan the QR code.")
+	vars := map[string]string{"full_name": fullName, "peer_name": peerName, "config_link": configLink}
 	subject = renderTemplate(subject, vars)
 	body = renderTemplate(body, vars)
 

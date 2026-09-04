@@ -106,6 +106,7 @@ func main() {
 		r.Post("/auth/2fa/verify", api.Verify2FA(store))
 		r.Post("/auth/logout", api.Logout(store))
 		r.Post("/claim", api.ClaimUser(store))
+		r.Get("/peer-config/{token}", api.GetPeerConfigByToken(store))
 
 		// Protected routes group
 		r.Group(func(r chi.Router) {
@@ -146,6 +147,7 @@ func main() {
 				r.Post("/peers/{id}/resume", api.ResumePeer(store))
 				r.Delete("/peers/{id}", api.DeletePeer(store))
 				r.Get("/peers/{id}/config", api.GetPeerConfig(store))
+				r.Post("/peers/{id}/config-link", api.CreatePeerAccessLink(store))
 
 				r.Get("/servers", api.ListServers(store))
 				r.Post("/servers", api.CreateServer(store))

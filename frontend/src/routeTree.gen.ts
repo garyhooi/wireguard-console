@@ -27,6 +27,7 @@ import { Route as AuthenticatedServersRouteImport } from './routes/_authenticate
 import { Route as AuthenticatedStatisticsRouteImport } from './routes/_authenticated/statistics'
 import { Route as AuthenticatedUsersRouteImport } from './routes/_authenticated/users'
 import { Route as ClaimTokenRouteImport } from './routes/claim.$token'
+import { Route as PeerTokenRouteImport } from './routes/peer.$token'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -118,6 +119,11 @@ const ClaimTokenRoute = ClaimTokenRouteImport.update({
   path: '/claim/$token',
   getParentRoute: () => rootRouteImport,
 } as any)
+const PeerTokenRoute = PeerTokenRouteImport.update({
+  id: '/peer/$token',
+  path: '/peer/$token',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -137,6 +143,7 @@ export interface FileRoutesByFullPath {
   '/statistics': typeof AuthenticatedStatisticsRoute
   '/users': typeof AuthenticatedUsersRoute
   '/claim/$token': typeof ClaimTokenRoute
+  '/peer/$token': typeof PeerTokenRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -156,6 +163,7 @@ export interface FileRoutesByTo {
   '/statistics': typeof AuthenticatedStatisticsRoute
   '/users': typeof AuthenticatedUsersRoute
   '/claim/$token': typeof ClaimTokenRoute
+  '/peer/$token': typeof PeerTokenRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -177,6 +185,7 @@ export interface FileRoutesById {
   '/_authenticated/statistics': typeof AuthenticatedStatisticsRoute
   '/_authenticated/users': typeof AuthenticatedUsersRoute
   '/claim/$token': typeof ClaimTokenRoute
+  '/peer/$token': typeof PeerTokenRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -198,6 +207,7 @@ export interface FileRouteTypes {
     | '/statistics'
     | '/users'
     | '/claim/$token'
+    | '/peer/$token'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -217,6 +227,7 @@ export interface FileRouteTypes {
     | '/statistics'
     | '/users'
     | '/claim/$token'
+    | '/peer/$token'
   id:
     | '__root__'
     | '/'
@@ -237,6 +248,7 @@ export interface FileRouteTypes {
     | '/_authenticated/statistics'
     | '/_authenticated/users'
     | '/claim/$token'
+    | '/peer/$token'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -246,6 +258,7 @@ export interface RootRouteChildren {
   AuthenticatedRoute: typeof AuthenticatedRouteWithChildren
   LoginRoute: typeof LoginRoute
   ClaimTokenRoute: typeof ClaimTokenRoute
+  PeerTokenRoute: typeof PeerTokenRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -376,6 +389,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ClaimTokenRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/peer/$token': {
+      id: '/peer/$token'
+      path: '/peer/$token'
+      fullPath: '/peer/$token'
+      preLoaderRoute: typeof PeerTokenRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -420,6 +440,7 @@ const rootRouteChildren: RootRouteChildren = {
   AuthenticatedRoute: AuthenticatedRouteWithChildren,
   LoginRoute: LoginRoute,
   ClaimTokenRoute: ClaimTokenRoute,
+  PeerTokenRoute: PeerTokenRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

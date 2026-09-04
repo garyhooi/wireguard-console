@@ -2,7 +2,7 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import QRCode from 'qrcode'
-import { IconDownload, IconPlus, IconQrcode } from '@tabler/icons-react'
+import { IconCopy, IconDownload, IconPlus, IconQrcode } from '@tabler/icons-react'
 import {
   ActionLink,
   Badge,
@@ -59,6 +59,17 @@ function PeersPage() {
   const [error, setError] = useState('')
   const [qr, setQr] = useState<{ name: string; dataUrl: string } | null>(null)
   const [form, setForm] = useState({ name: '', server_id: '', user_id: '', send_email: false })
+  const [createdLink, setCreatedLink] = useState('')
+  const [copied, setCopied] = useState(false)
+
+  const { data: smtp } = useQuery<{ configured: boolean }>({
+    queryKey: ['smtp-config'],
+    queryFn: async () => {
+      const res = await fetch('/api/config/smtp', { headers: auth })
+      if (!res.ok) throw new Error('Failed to fetch SMTP config')
+      return res.json()
+    },
+  })
 
   const { data: peers, isLoading } = useQuery<Peer[]>({
     queryKey: ['peers'],
@@ -99,6 +110,16 @@ function PeersPage() {
       return res.json()
     },
     onSuccess: (data) => {
+      if (data?.config_link) {
+        // Email (if SMTP is on) contains the same link; show it in the modal
+        // so the admin can also copy/share it manually.
+        setCreatedLink(data.config_link)
+        setCopied(false)
+        setError('')
+        setForm({ name: '', server_id: '', user_id: '', send_email: false })
+        queryClient.invalidateQueries({ queryKey: ['peers'] })
+        return
+      }
       setShowAdd(false)
       setError('')
       setForm({ name: '', server_id: '', user_id: '', send_email: false })
@@ -107,6 +128,35 @@ function PeersPage() {
     },
     onError: (e: Error) => setError(e.message),
   })
+
+  const copyLink = async () => {
+    if (!createdLink) return
+    try {
+      await navigator.clipboard.writeText(createdLink)
+      setCopied(true)
+    } catch {
+      const el = document.createElement('textarea')
+      el.value = createdLink
+      document.body.appendChild(el)
+      el.select()
+      document.execCommand('copy')
+      document.body.removeChild(el)
+      setCopied(true)
+    }
+  }
+
+  const openAdd = () => {
+    setEditing(null)
+    setCreatedLink('')
+    setForm({ name: '', server_id: '', user_id: '', send_email: false })
+    setShowAdd(true)
+  }
+
+  const closeAdd = () => {
+    setShowAdd(false)
+    setEditing(null)
+    setCreatedLink('')
+  }
 
   const updateMutation = useMutation({
     mutationFn: async () => {
@@ -190,13 +240,7 @@ function PeersPage() {
         title="Peers"
         description="One peer is one device (laptop, phone…) for a user on a server. Keys and the tunnel IP are generated automatically."
         actions={
-          <PrimaryButton
-            onClick={() => {
-              setEditing(null)
-              setForm({ name: '', server_id: '', user_id: '', send_email: false })
-              setShowAdd(true)
-            }}
-          >
+          <PrimaryButton onClick={openAdd}>
             <IconPlus size={16} stroke={1.6} aria-hidden="true" />
             Add Peer
           </PrimaryButton>
@@ -207,11 +251,8 @@ function PeersPage() {
 
       {/* Add / edit modal */}
       <Modal
-        open={showAdd || editing !== null}
-        onClose={() => {
-          setShowAdd(false)
-          setEditing(null)
-        }}
+        open={showAdd || editing !== null || createdLink !== ''}
+        onClose={closeAdd}
         title={editing ? 'Edit Peer' : 'Add Peer'}
         description={
           editing
@@ -219,6 +260,42 @@ function PeersPage() {
             : 'A peer is one device for a user on a server. Keys and the tunnel IP are generated automatically.'
         }
       >
+        {createdLink ? (
+          <div>
+            {smtp?.configured ? (
+              <p className="text-sm text-zinc-300 mb-2">
+                Peer created — the config link was emailed to the user. Share it directly too if
+                you like:
+              </p>
+            ) : (
+              <p className="text-sm text-amber-300 mb-2">
+                Peer created — SMTP is not configured, so no email was sent. Share this config
+                link manually so the user can download the .conf or scan the QR:
+              </p>
+            )}
+            <div className="flex items-center gap-2">
+              <input
+                readOnly
+                value={createdLink}
+                onFocus={(e) => e.target.select()}
+                className={`${inputCls} font-mono text-sm`}
+              />
+              <GhostButton type="button" onClick={copyLink} className="shrink-0">
+                <IconCopy size={15} stroke={1.6} aria-hidden="true" />
+                {copied ? 'Copied' : 'Copy'}
+              </GhostButton>
+            </div>
+            <p className="text-xs text-zinc-500 mt-2">
+              The link expires automatically (72h) and only serves this peer's config.
+            </p>
+            <div className="mt-4 flex justify-end">
+              <PrimaryButton type="button" onClick={closeAdd}>
+                Done
+              </PrimaryButton>
+            </div>
+          </div>
+        ) : (
+        <div>
         {(noServers || noUsers) && !editing && (
           <div className="bg-amber-500/10 border border-amber-500/30 text-amber-300 text-sm rounded-md p-3 mb-4">
             {noServers && <p>Create a server first (Servers → Add Server).</p>}
@@ -299,17 +376,11 @@ function PeersPage() {
                 checked={form.send_email}
                 onChange={(e) => setForm((f) => ({ ...f, send_email: e.target.checked }))}
               />
-              Email the config to this user (sent when SMTP is configured)
+              Email the user a secure link to download / scan their config (sent when SMTP is configured)
             </label>
           )}
           <div className="flex justify-end gap-3 pt-2">
-            <GhostButton
-              type="button"
-              onClick={() => {
-                setShowAdd(false)
-                setEditing(null)
-              }}
-            >
+            <GhostButton type="button" onClick={closeAdd}>
               Cancel
             </GhostButton>
             <PrimaryButton
@@ -322,6 +393,8 @@ function PeersPage() {
             </PrimaryButton>
           </div>
         </form>
+        </div>
+        )}
       </Modal>
 
       {/* QR modal */}
@@ -349,13 +422,7 @@ function PeersPage() {
           title="No peers yet"
           hint="Create a server, invite a user, then add a peer — the tunnel config is generated automatically."
           action={
-            <PrimaryButton
-              onClick={() => {
-                setEditing(null)
-                setForm({ name: '', server_id: '', user_id: '', send_email: false })
-                setShowAdd(true)
-              }}
-            >
+            <PrimaryButton onClick={openAdd}>
               <IconPlus size={16} stroke={1.6} aria-hidden="true" />
               Add peer
             </PrimaryButton>
@@ -397,6 +464,7 @@ function PeersPage() {
                       <div className="flex justify-end gap-1">
                         <ActionLink
                           onClick={() => {
+                            setCreatedLink('')
                             setEditing(peer)
                             setForm({ name: peer.name, server_id: peer.server_id, user_id: peer.user_id, send_email: false })
                             setShowAdd(false)
