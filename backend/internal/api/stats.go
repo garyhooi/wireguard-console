@@ -115,6 +115,63 @@ func GetUserTraffic(store *Store) http.HandlerFunc {
 	}
 }
 
+// GetTrafficStats returns hourly traffic for the last 24 hours plus the
+// top peers by volume — real data from the kernel sampler.
+func GetTrafficStats(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.Background()
+
+		seriesRows, err := store.pool.Query(ctx, `
+			SELECT to_char(date_trunc('hour', sampled_at), 'HH24:00') AS hour,
+			       SUM(rx_bytes) AS rx, SUM(tx_bytes) AS tx
+			FROM peer_traffic_samples
+			WHERE sampled_at >= now() - interval '24 hours'
+			GROUP BY 1 ORDER BY 1
+		`)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to query traffic series")
+			return
+		}
+		series := []map[string]interface{}{}
+		for seriesRows.Next() {
+			var hour string
+			var rx, tx int64
+			if err := seriesRows.Scan(&hour, &rx, &tx); err != nil {
+				continue
+			}
+			series = append(series, map[string]interface{}{"time": hour, "rx": rx, "tx": tx})
+		}
+		seriesRows.Close()
+
+		topRows, err := store.pool.Query(ctx, `
+			SELECT COALESCE(p.name, 'unknown'), SUM(t.rx_bytes), SUM(t.tx_bytes)
+			FROM peer_traffic_samples t
+			JOIN peers p ON p.id = t.peer_id
+			WHERE t.sampled_at >= now() - interval '24 hours'
+			GROUP BY p.name ORDER BY (SUM(t.rx_bytes) + SUM(t.tx_bytes)) DESC LIMIT 10
+		`)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to query top peers")
+			return
+		}
+		top := []map[string]interface{}{}
+		for topRows.Next() {
+			var name string
+			var rx, tx int64
+			if err := topRows.Scan(&name, &rx, &tx); err != nil {
+				continue
+			}
+			top = append(top, map[string]interface{}{"name": name, "rx": rx, "tx": tx})
+		}
+		topRows.Close()
+
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"series": series,
+			"top":    top,
+		})
+	}
+}
+
 func ListAuditLogs(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := context.Background()

@@ -18,6 +18,7 @@ import { Route as AuthenticatedAuditLogRouteImport } from './routes/_authenticat
 import { Route as AuthenticatedConfigRouteImport } from './routes/_authenticated/config'
 import { Route as AuthenticatedDashboardRouteImport } from './routes/_authenticated/dashboard'
 import { Route as AuthenticatedDomainRulesRouteImport } from './routes/_authenticated/domain-rules'
+import { Route as AuthenticatedNodesRouteImport } from './routes/_authenticated/nodes'
 import { Route as AuthenticatedPeersRouteImport } from './routes/_authenticated/peers'
 import { Route as AuthenticatedServersRouteImport } from './routes/_authenticated/servers'
 import { Route as AuthenticatedStatisticsRouteImport } from './routes/_authenticated/statistics'
@@ -68,6 +69,11 @@ const AuthenticatedDomainRulesRoute =
     path: '/domain-rules',
     getParentRoute: () => AuthenticatedRoute,
   } as any)
+const AuthenticatedNodesRoute = AuthenticatedNodesRouteImport.update({
+  id: '/nodes',
+  path: '/nodes',
+  getParentRoute: () => AuthenticatedRoute,
+} as any)
 const AuthenticatedPeersRoute = AuthenticatedPeersRouteImport.update({
   id: '/peers',
   path: '/peers',
@@ -99,6 +105,7 @@ export interface FileRoutesByFullPath {
   '/config': typeof AuthenticatedConfigRoute
   '/dashboard': typeof AuthenticatedDashboardRoute
   '/domain-rules': typeof AuthenticatedDomainRulesRoute
+  '/nodes': typeof AuthenticatedNodesRoute
   '/peers': typeof AuthenticatedPeersRoute
   '/servers': typeof AuthenticatedServersRoute
   '/statistics': typeof AuthenticatedStatisticsRoute
@@ -114,6 +121,7 @@ export interface FileRoutesByTo {
   '/config': typeof AuthenticatedConfigRoute
   '/dashboard': typeof AuthenticatedDashboardRoute
   '/domain-rules': typeof AuthenticatedDomainRulesRoute
+  '/nodes': typeof AuthenticatedNodesRoute
   '/peers': typeof AuthenticatedPeersRoute
   '/servers': typeof AuthenticatedServersRoute
   '/statistics': typeof AuthenticatedStatisticsRoute
@@ -130,6 +138,7 @@ export interface FileRoutesById {
   '/_authenticated/config': typeof AuthenticatedConfigRoute
   '/_authenticated/dashboard': typeof AuthenticatedDashboardRoute
   '/_authenticated/domain-rules': typeof AuthenticatedDomainRulesRoute
+  '/_authenticated/nodes': typeof AuthenticatedNodesRoute
   '/_authenticated/peers': typeof AuthenticatedPeersRoute
   '/_authenticated/servers': typeof AuthenticatedServersRoute
   '/_authenticated/statistics': typeof AuthenticatedStatisticsRoute
@@ -147,6 +156,7 @@ export interface FileRouteTypes {
     | '/config'
     | '/dashboard'
     | '/domain-rules'
+    | '/nodes'
     | '/peers'
     | '/servers'
     | '/statistics'
@@ -162,6 +172,7 @@ export interface FileRouteTypes {
     | '/config'
     | '/dashboard'
     | '/domain-rules'
+    | '/nodes'
     | '/peers'
     | '/servers'
     | '/statistics'
@@ -177,6 +188,7 @@ export interface FileRouteTypes {
     | '/_authenticated/config'
     | '/_authenticated/dashboard'
     | '/_authenticated/domain-rules'
+    | '/_authenticated/nodes'
     | '/_authenticated/peers'
     | '/_authenticated/servers'
     | '/_authenticated/statistics'
@@ -256,6 +268,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedDomainRulesRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
+    '/_authenticated/nodes': {
+      id: '/_authenticated/nodes'
+      path: '/nodes'
+      fullPath: '/nodes'
+      preLoaderRoute: typeof AuthenticatedNodesRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
     '/_authenticated/peers': {
       id: '/_authenticated/peers'
       path: '/peers'
@@ -292,6 +311,7 @@ interface AuthenticatedRouteChildren {
   AuthenticatedConfigRoute: typeof AuthenticatedConfigRoute
   AuthenticatedDashboardRoute: typeof AuthenticatedDashboardRoute
   AuthenticatedDomainRulesRoute: typeof AuthenticatedDomainRulesRoute
+  AuthenticatedNodesRoute: typeof AuthenticatedNodesRoute
   AuthenticatedPeersRoute: typeof AuthenticatedPeersRoute
   AuthenticatedServersRoute: typeof AuthenticatedServersRoute
   AuthenticatedStatisticsRoute: typeof AuthenticatedStatisticsRoute
@@ -303,6 +323,7 @@ const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedConfigRoute: AuthenticatedConfigRoute,
   AuthenticatedDashboardRoute: AuthenticatedDashboardRoute,
   AuthenticatedDomainRulesRoute: AuthenticatedDomainRulesRoute,
+  AuthenticatedNodesRoute: AuthenticatedNodesRoute,
   AuthenticatedPeersRoute: AuthenticatedPeersRoute,
   AuthenticatedServersRoute: AuthenticatedServersRoute,
   AuthenticatedStatisticsRoute: AuthenticatedStatisticsRoute,

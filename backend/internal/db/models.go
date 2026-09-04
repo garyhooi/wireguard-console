@@ -59,20 +59,21 @@ type Peer struct {
 }
 
 type Server struct {
-	ID                  uuid.UUID `json:"id"`
-	Name                string    `json:"name"`
-	PublicEndpoint      string    `json:"public_endpoint"`
-	ListenPort          int       `json:"listen_port"`
-	InterfaceName       string    `json:"interface_name"`
-	ServerPublicKey     string    `json:"server_public_key"`
-	NetworkCIDR         string    `json:"network_cidr"`
-	DNSServers          []string  `json:"dns_servers"`
-	DefaultAllowedIPs   string    `json:"default_allowed_ips"`
-	MTU                 int       `json:"mtu"`
-	PersistentKeepalive int       `json:"persistent_keepalive"`
-	ManagedMode         string    `json:"managed_mode"`
-	Status              string    `json:"status"`
-	CreatedAt           time.Time `json:"created_at"`
+	ID                  uuid.UUID  `json:"id"`
+	Name                string     `json:"name"`
+	PublicEndpoint      string     `json:"public_endpoint"`
+	ListenPort          int        `json:"listen_port"`
+	InterfaceName       string     `json:"interface_name"`
+	ServerPublicKey     string     `json:"server_public_key"`
+	NetworkCIDR         string     `json:"network_cidr"`
+	DNSServers          []string   `json:"dns_servers"`
+	DefaultAllowedIPs   string     `json:"default_allowed_ips"`
+	MTU                 int        `json:"mtu"`
+	PersistentKeepalive int        `json:"persistent_keepalive"`
+	ManagedMode         string     `json:"managed_mode"`
+	NodeID              *uuid.UUID `json:"node_id"`
+	Status              string     `json:"status"`
+	CreatedAt           time.Time  `json:"created_at"`
 }
 
 type DomainRule struct {

@@ -42,8 +42,8 @@ func syncServerToKernel(ctx context.Context, pool *pgxpool.Pool, serverID uuid.U
 	if err != nil {
 		return fmt.Errorf("server lookup: %w", err)
 	}
-	if mode == "manual" {
-		return nil // interface lives on a remote node — Host Setup panel covers it
+	if mode == "manual" || mode == "remote" {
+		return nil // manual: Host Setup covers it; remote: the node agent applies it
 	}
 	if privEnc == "" {
 		return fmt.Errorf("server has no private key stored")

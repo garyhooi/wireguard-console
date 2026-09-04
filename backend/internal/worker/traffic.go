@@ -2,13 +2,16 @@ package worker
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/wireguard-console/backend/internal/wgclient"
 )
 
+// TrafficWorker samples per-peer kernel counters (rx/tx bytes and last
+// handshake) from wg-helper for every locally-managed server, stores the
+// deltas as samples, and refreshes last_handshake_at.
 type TrafficWorker struct {
 	pool       *pgxpool.Pool
 	interval   time.Duration
@@ -29,6 +32,7 @@ func NewTrafficWorker(pool *pgxpool.Pool, interval time.Duration) *TrafficWorker
 }
 
 func (w *TrafficWorker) Start(ctx context.Context) {
+	log.Println("Traffic worker started (sampling kernel counters every 30s)")
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
 
@@ -45,117 +49,62 @@ func (w *TrafficWorker) Start(ctx context.Context) {
 }
 
 func (w *TrafficWorker) pollTraffic(ctx context.Context) error {
-	// TODO: Call wg-helper to get current peer stats
-	// For now, simulate with random data
-	peers := []struct {
-		ID      string
-		RXBytes uint64
-		TXBytes uint64
-	}{
-		{"peer1", 1024, 2048},
-		{"peer2", 512, 1024},
-		{"peer3", 2048, 4096},
+	rows, err := w.pool.Query(ctx, `
+		SELECT id::text, interface_name FROM servers
+		WHERE status = 'active' AND managed_mode = 'local'
+	`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type serverRef struct {
+		id    string
+		iface string
+	}
+	var servers []serverRef
+	for rows.Next() {
+		var s serverRef
+		if err := rows.Scan(&s.id, &s.iface); err != nil {
+			return err
+		}
+		servers = append(servers, s)
 	}
 
-	for _, peer := range peers {
-		current := &TrafficValues{
-			RXBytes: peer.RXBytes,
-			TXBytes: peer.TXBytes,
+	for _, srv := range servers {
+		stats, err := wgclient.Stats(srv.iface)
+		if err != nil || stats == nil {
+			continue // interface may not exist yet, or wg-helper offline
 		}
+		for _, st := range stats {
+			key := srv.id + "|" + st.PublicKey
+			prev, seen := w.lastValues[key]
 
-		last, exists := w.lastValues[peer.ID]
-		if !exists {
-			w.lastValues[peer.ID] = current
-			continue
-		}
+			rx := uint64(st.ReceiveBytes)
+			tx := uint64(st.TransmitBytes)
+			if seen {
+				deltaRX := rx - prev.RXBytes
+				deltaTX := tx - prev.TXBytes
+				if _, err := w.pool.Exec(ctx, `
+					INSERT INTO peer_traffic_samples (peer_id, rx_bytes, tx_bytes)
+					SELECT id, $2, $3 FROM peers
+					WHERE server_id = $1 AND public_key = $4 AND status != 'removed'
+				`, srv.id, int64(deltaRX), int64(deltaTX), st.PublicKey); err != nil {
+					log.Printf("traffic sample insert: %v", err)
+				}
+			}
+			w.lastValues[key] = &TrafficValues{RXBytes: rx, TXBytes: tx}
 
-		// Calculate delta (handle counter reset)
-		var rxDelta, txDelta int64
-		if current.RXBytes >= last.RXBytes {
-			rxDelta = int64(current.RXBytes - last.RXBytes)
-		}
-		if current.TXBytes >= last.TXBytes {
-			txDelta = int64(current.TXBytes - last.TXBytes)
-		}
-
-		// Store sample
-		_, err := w.pool.Exec(ctx, `
-			INSERT INTO peer_traffic_samples (peer_id, rx_bytes, tx_bytes)
-			VALUES ($1, $2, $3)
-		`, peer.ID, rxDelta, txDelta)
-
-		if err != nil {
-			log.Printf("Failed to store traffic sample for peer %s: %v", peer.ID, err)
-			continue
-		}
-
-		w.lastValues[peer.ID] = current
-	}
-
-	return nil
-}
-
-type RollupWorker struct {
-	pool *pgxpool.Pool
-}
-
-func NewRollupWorker(pool *pgxpool.Pool) *RollupWorker {
-	return &RollupWorker{pool: pool}
-}
-
-func (w *RollupWorker) Start(ctx context.Context) {
-	// Run nightly at midnight
-	ticker := time.NewTicker(24 * time.Hour)
-	defer ticker.Stop()
-
-	// Run immediately on start
-	if err := w.rollup(ctx); err != nil {
-		log.Printf("Failed to run initial rollup: %v", err)
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if err := w.rollup(ctx); err != nil {
-				log.Printf("Failed to run rollup: %v", err)
+			// Live handshake timestamps for the UI.
+			if st.LastHandshakeAt != "" {
+				if t, err := time.Parse(time.RFC3339, st.LastHandshakeAt); err == nil {
+					_, _ = w.pool.Exec(ctx, `
+						UPDATE peers SET last_handshake_at = $1
+						WHERE server_id = $2 AND public_key = $3
+					`, t, srv.id, st.PublicKey)
+				}
 			}
 		}
 	}
-}
-
-func (w *RollupWorker) rollup(ctx context.Context) error {
-	// Roll up data older than 30 days into daily aggregates
-	_, err := w.pool.Exec(ctx, `
-		INSERT INTO peer_traffic_daily (peer_id, date, rx_bytes, tx_bytes)
-		SELECT 
-			peer_id,
-			date_trunc('day', sampled_at)::date as date,
-			SUM(rx_bytes),
-			SUM(tx_bytes)
-		FROM peer_traffic_samples
-		WHERE sampled_at < now() - interval '30 days'
-		GROUP BY peer_id, date_trunc('day', sampled_at)::date
-		ON CONFLICT (peer_id, date) DO UPDATE SET
-			rx_bytes = EXCLUDED.rx_bytes,
-			tx_bytes = EXCLUDED.tx_bytes
-	`)
-
-	if err != nil {
-		return fmt.Errorf("failed to roll up traffic data: %w", err)
-	}
-
-	// Delete raw samples older than 30 days
-	_, err = w.pool.Exec(ctx, `
-		DELETE FROM peer_traffic_samples
-		WHERE sampled_at < now() - interval '30 days'
-	`)
-
-	if err != nil {
-		return fmt.Errorf("failed to delete old traffic samples: %w", err)
-	}
-
-	log.Println("Traffic rollup completed")
 	return nil
 }

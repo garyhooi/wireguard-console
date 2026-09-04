@@ -73,6 +73,8 @@ func main() {
 
 	r.Route("/api", func(r chi.Router) {
 		// Public routes
+		r.Get("/nodes/{id}/state", api.GetNodeState(store))
+		r.Post("/nodes/{id}/report", api.ReportNodeState(store))
 		r.Post("/auth/login", api.Login(store))
 		r.Post("/auth/2fa/verify", api.Verify2FA(store))
 		r.Post("/auth/logout", api.Logout(store))
@@ -122,11 +124,17 @@ func main() {
 				r.Get("/servers/{id}/status", api.GetServerStatus(store))
 				r.Get("/servers/{id}/host-config", api.GetServerHostConfig(store))
 
+				// Node management (admin session auth)
+				r.Get("/nodes", api.ListNodes(store))
+				r.Post("/nodes", api.CreateNode(store))
+				r.Delete("/nodes/{id}", api.DeleteNode(store))
+
 				r.Get("/domain-rules", api.ListDomainRules(store))
 				r.Post("/domain-rules", api.CreateDomainRule(store))
 				r.Delete("/domain-rules/{id}", api.DeleteDomainRule(store))
 
 				r.Get("/stats/overview", api.GetStatsOverview(store))
+				r.Get("/stats/traffic", api.GetTrafficStats(store))
 				r.Get("/peers/{id}/traffic", api.GetPeerTraffic(store))
 				r.Get("/users/{id}/traffic", api.GetUserTraffic(store))
 

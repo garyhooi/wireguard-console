@@ -63,6 +63,16 @@ You don't need a domain. Enter the server's public IPv4 when prompted (or run `C
 - **Want a browser-trusted certificate without buying a domain?** Use a wildcard DNS service like [sslip.io](https://sslip.io): set `CONSOLE_DOMAIN=203.0.113.5.sslip.io` (and empty `WGCONSOLE_TLS`) — sslip.io resolves to your IP, so Caddy's normal ACME flow issues a real, trusted certificate.
 - IPv6-only hosts aren't supported for the console URL (use a domain or an sslip.io address there).
 
+### Distributed nodes (one console, many regions)
+
+Every machine running this stack is a node; the console host manages its own
+interfaces automatically. To add machines in other locations: **Nodes → Add
+Node** in the console, then run the one-liner it shows on that machine. The
+agent installs itself (Docker + wg-helper), polls the console, applies WireGuard
+interfaces locally and reports stats back — no inbound ports or SSH needed.
+Then create servers with **Managed by: [node]** and everything happens
+automatically on that node.
+
 ### Manual Setup
 
 1. **Clone the repository**

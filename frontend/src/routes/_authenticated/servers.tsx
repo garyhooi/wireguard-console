@@ -1,6 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
+import { labelCls } from '../../lib/ui'
 
 interface Server {
   id: string
@@ -15,6 +16,7 @@ interface Server {
   mtu: number
   persistent_keepalive: number
   managed_mode: string
+  node_id: string | null
   status: string
   created_at: string
 }
@@ -36,6 +38,7 @@ const emptyForm = {
   mtu: '1420',
   persistent_keepalive: '25',
   managed_mode: 'local',
+  node_id: '',
 }
 
 function ServersPage() {
@@ -46,6 +49,15 @@ function ServersPage() {
   const [form, setForm] = useState(emptyForm)
   const [hostSetup, setHostSetup] = useState<{ name: string; text: string } | null>(null)
   const [hostCopied, setHostCopied] = useState(false)
+
+  const { data: nodes } = useQuery<{ id: string; name: string; status: string }[]>({
+    queryKey: ['nodes'],
+    queryFn: async () => {
+      const res = await fetch('/api/nodes', { headers: auth })
+      if (!res.ok) throw new Error('Failed to fetch nodes')
+      return res.json()
+    },
+  })
 
   const { data: servers, isLoading } = useQuery<Server[]>({
     queryKey: ['servers'],
@@ -69,6 +81,7 @@ function ServersPage() {
         mtu: Number(form.mtu),
         persistent_keepalive: Number(form.persistent_keepalive),
         managed_mode: form.managed_mode,
+        node_id: form.managed_mode === 'remote' ? form.node_id : null,
       }
       const res = await fetch(editing ? `/api/servers/${editing.id}` : '/api/servers', {
         method: editing ? 'PATCH' : 'POST',
@@ -116,6 +129,7 @@ function ServersPage() {
       mtu: String(server.mtu),
       persistent_keepalive: String(server.persistent_keepalive),
       managed_mode: server.managed_mode || 'local',
+      node_id: server.node_id || '',
     })
     setShowAdd(false)
   }
@@ -232,8 +246,32 @@ function ServersPage() {
                   <option value="local">
                     This console (automatic — interface is created and synced on this host)
                   </option>
-                  <option value="manual">Remote node (I will apply via Host Setup)</option>
+                  <option value="remote">Node (agent applies it automatically)</option>
+                  <option value="manual">Manual (Host Setup)</option>
                 </select>
+                {form.managed_mode === 'remote' && (
+                  <div className="mt-3">
+                    <label htmlFor="sNode" className={labelCls}>
+                      Node
+                    </label>
+                    <select
+                      id="sNode"
+                      required
+                      value={form.node_id}
+                      onChange={(e) => setForm((f) => ({ ...f, node_id: e.target.value }))}
+                      className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
+                    >
+                      <option value="" disabled>
+                        {!nodes || nodes.length === 0 ? 'No nodes — create one under Nodes first' : 'Select a node…'}
+                      </option>
+                      {(nodes || []).map((n) => (
+                        <option key={n.id} value={n.id}>
+                          {n.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
                 {form.managed_mode === 'manual' && (
                   <p className="text-sm text-yellow-300 mt-2">
                     Kernel sync is skipped for this server. After creating it, use the Host Setup

@@ -104,6 +104,13 @@ func (h *Handler) handleApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	warnings := h.applyState(req)
+	writeJSON(w, http.StatusOK, applyResponse{Status: "ok", Warnings: warnings})
+}
+
+// applyState applies one interface's full desired state to the local
+// kernel. Shared by the /apply endpoint and the distributed agent loop.
+func (h *Handler) applyState(req applyRequest) []string {
 	var warnings []string
 	warn := func(format string, a ...interface{}) {
 		warnings = append(warnings, fmt.Sprintf(format, a...))
@@ -120,13 +127,14 @@ func (h *Handler) handleApply(w http.ResponseWriter, r *http.Request) {
 	// 2. Apply the server's private key + listen port.
 	keyFile, err := os.CreateTemp("", "wg-key-*")
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to create temp key file")
-		return
+		warnings = append(warnings, "failed to create temp key file: "+err.Error())
+		log.Printf("wg-helper [%s]: %v", req.InterfaceName, err)
+		return warnings
 	}
 	defer os.Remove(keyFile.Name())
 	if _, err := keyFile.WriteString(req.PrivateKey + "\n"); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to write key file")
-		return
+		warnings = append(warnings, "failed to write key file: "+err.Error())
+		return warnings
 	}
 	keyFile.Close()
 
@@ -196,7 +204,18 @@ func (h *Handler) handleApply(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("wg-helper [%s]: applied %d peers", req.InterfaceName, len(config.Peers))
-	writeJSON(w, http.StatusOK, applyResponse{Status: "ok", Warnings: warnings})
+	return warnings
+}
+
+// removeInterface deletes a WireGuard interface from the kernel.
+func (h *Handler) removeInterface(iface string) []string {
+	var warnings []string
+	if err := run(exec.Command("ip", "link", "del", iface)); err != nil {
+		if !strings.Contains(err.Error(), "does not exist") {
+			warnings = append(warnings, err.Error())
+		}
+	}
+	return warnings
 }
 
 func (h *Handler) handleRemove(w http.ResponseWriter, r *http.Request) {
@@ -208,20 +227,7 @@ func (h *Handler) handleRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var warnings []string
-	warn := func(format string, a ...interface{}) {
-		warnings = append(warnings, fmt.Sprintf(format, a...))
-	}
-
-	if err := run(exec.Command("ip", "link", "del", req.InterfaceName)); err != nil {
-		if !strings.Contains(err.Error(), "does not exist") {
-			warn("%v", err)
-		}
-	}
-	// Best-effort: drop NAT/forward rules if the interface disappeared
-	// with them still set (we don't know the CIDR here, so nothing to clean
-	// precisely — the interface removal drops the routing entries).
-
+	warnings := h.removeInterface(req.InterfaceName)
 	log.Printf("wg-helper [%s]: interface removed", req.InterfaceName)
 	writeJSON(w, http.StatusOK, applyResponse{Status: "removed", Warnings: warnings})
 }

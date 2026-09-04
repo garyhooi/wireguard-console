@@ -1,28 +1,37 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
 import {
-  AreaChart,
   Area,
+  AreaChart,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Legend,
+  ResponsiveContainer,
+  Tooltip,
   XAxis,
   YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  BarChart,
-  Bar,
-  Legend,
 } from 'recharts'
+import { EmptyState, PageHeader, Panel, Skeleton, Stat, StatusBadge } from '../../lib/ui'
 
-interface TrafficSample {
-  sampled_at: string
-  rx_bytes: number
-  tx_bytes: number
+interface Overview {
+  total_rx_bytes: number
+  total_tx_bytes: number
+  connected_peers: number
+  total_peers: number
 }
 
 interface TrafficResponse {
-  samples: TrafficSample[]
-  total_rx_bytes: number
-  total_tx_bytes: number
+  series: { time: string; rx: number; tx: number }[]
+  top: { name: string; rx: number; tx: number }[]
+}
+
+interface Peer {
+  id: string
+  name: string
+  allowed_ip: string
+  status: string
+  last_handshake_at: string | null
 }
 
 export const Route = createFileRoute('/_authenticated/statistics')({
@@ -33,173 +42,185 @@ function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B'
   const k = 1024
   const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
-  const i = Math.floor(Math.log(bytes) / Math.log(k))
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1)
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
 }
 
-function formatTime(timestamp: string): string {
-  const date = new Date(timestamp)
-  return date.toLocaleTimeString()
+const auth = { Authorization: localStorage.getItem('token')! }
+
+const chartTooltipStyle = {
+  backgroundColor: '#18181b',
+  border: '1px solid #3f3f46',
+  borderRadius: '6px',
+  fontSize: '12px',
 }
 
 function StatisticsPage() {
-  const { data: overview } = useQuery({
+  const { data: overview, isLoading } = useQuery<Overview>({
     queryKey: ['stats'],
     queryFn: async () => {
-      const res = await fetch('/api/stats/overview', {
-        headers: { Authorization: localStorage.getItem('token')! },
-      })
+      const res = await fetch('/api/stats/overview', { headers: auth })
       if (!res.ok) throw new Error('Failed to fetch stats')
       return res.json()
     },
     refetchInterval: 15000,
   })
 
-  // Mock data for charts - in production, fetch from API
-  const trafficData = [
-    { time: '00:00', rx: 1024, tx: 2048 },
-    { time: '04:00', rx: 512, tx: 1024 },
-    { time: '08:00', rx: 4096, tx: 8192 },
-    { time: '12:00', rx: 8192, tx: 16384 },
-    { time: '16:00', rx: 6144, tx: 12288 },
-    { time: '20:00', rx: 3072, tx: 6144 },
-    { time: '24:00', rx: 2048, tx: 4096 },
-  ]
+  const { data: traffic, isLoading: trafficLoading } = useQuery<TrafficResponse>({
+    queryKey: ['stats-traffic'],
+    queryFn: async () => {
+      const res = await fetch('/api/stats/traffic', { headers: auth })
+      if (!res.ok) throw new Error('Failed to fetch traffic')
+      return res.json()
+    },
+    refetchInterval: 30000,
+  })
 
-  const topPeers = [
-    { name: 'Device 1', rx: 1024000, tx: 2048000 },
-    { name: 'Device 2', rx: 512000, tx: 1024000 },
-    { name: 'Device 3', rx: 256000, tx: 512000 },
-    { name: 'Device 4', rx: 128000, tx: 256000 },
-    { name: 'Device 5', rx: 64000, tx: 128000 },
-  ]
+  const { data: peers } = useQuery<Peer[]>({
+    queryKey: ['peers'],
+    queryFn: async () => {
+      const res = await fetch('/api/peers', { headers: auth })
+      if (!res.ok) throw new Error('Failed to fetch peers')
+      return res.json()
+    },
+    refetchInterval: 15000,
+  })
+
+  if (isLoading) {
+    return (
+      <div className="space-y-8">
+        <Skeleton className="h-8 w-56" />
+        <div className="grid grid-cols-2 lg:grid-cols-3 gap-px bg-zinc-800 rounded-lg overflow-hidden">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <div key={i} className="bg-zinc-900 p-5 space-y-2">
+              <Skeleton className="h-3 w-20" />
+              <Skeleton className="h-7 w-24" />
+            </div>
+          ))}
+        </div>
+        <Skeleton className="h-72 w-full rounded-lg" />
+      </div>
+    )
+  }
+
+  const hasTraffic = (traffic?.series?.length ?? 0) > 0
 
   return (
     <div>
-      <h1 className="text-2xl font-bold text-white mb-6">Statistics</h1>
+      <PageHeader
+        title="Statistics"
+        description="Kernel-sampled traffic from every managed interface, aggregated hourly. Numbers refresh every 30 seconds."
+      />
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-        <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-6">
-          <h3 className="text-neutral-400 text-sm font-medium">Total RX Today</h3>
-          <p className="mt-2 text-3xl font-bold text-teal-500">
-            {formatBytes(overview?.total_rx_bytes || 0)}
-          </p>
+      {/* KPI band */}
+      <Panel>
+        <div className="grid grid-cols-2 lg:grid-cols-3 divide-x divide-y lg:divide-y-0 divide-zinc-800">
+          <Stat label="Download · 24h" value={formatBytes(overview?.total_rx_bytes ?? 0)} tone="good" />
+          <Stat label="Upload · 24h" value={formatBytes(overview?.total_tx_bytes ?? 0)} />
+          <Stat
+            label="Connected peers"
+            value={overview?.connected_peers ?? 0}
+            tone={(overview?.connected_peers ?? 0) > 0 ? 'good' : 'default'}
+            sub={`of ${overview?.total_peers ?? 0} peers`}
+          />
         </div>
-        <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-6">
-          <h3 className="text-neutral-400 text-sm font-medium">Total TX Today</h3>
-          <p className="mt-2 text-3xl font-bold text-blue-500">
-            {formatBytes(overview?.total_tx_bytes || 0)}
-          </p>
-        </div>
-        <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-6">
-          <h3 className="text-neutral-400 text-sm font-medium">Connected Peers</h3>
-          <p className="mt-2 text-3xl font-bold text-green-500">
-            {overview?.connected_peers || 0}
-          </p>
-        </div>
+      </Panel>
+
+      {/* Charts */}
+      <div className="mt-8 grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <Panel title="Traffic over time · last 24h">
+          {trafficLoading ? (
+            <div className="p-5">
+              <Skeleton className="h-64 w-full" />
+            </div>
+          ) : hasTraffic ? (
+            <div className="p-4">
+              <ResponsiveContainer width="100%" height={280}>
+                <AreaChart data={traffic?.series} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
+                  <XAxis dataKey="time" stroke="#71717a" tick={{ fontSize: 11 }} tickLine={false} />
+                  <YAxis stroke="#71717a" tick={{ fontSize: 11 }} tickFormatter={formatBytes} tickLine={false} />
+                  <Tooltip contentStyle={chartTooltipStyle} formatter={(v) => formatBytes(Number(v ?? 0))} />
+                  <Area type="monotone" dataKey="rx" stroke="#14b8a6" fill="#14b8a6" fillOpacity={0.18} name="Download" strokeWidth={1.5} />
+                  <Area type="monotone" dataKey="tx" stroke="#71717a" fill="#71717a" fillOpacity={0.14} name="Upload" strokeWidth={1.5} />
+                  <Legend wrapperStyle={{ fontSize: 12 }} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          ) : (
+            <EmptyState
+              title="No traffic sampled yet"
+              hint="Counter deltas are captured every 30s from wg-helper once peers start passing traffic through the tunnel."
+            />
+          )}
+        </Panel>
+
+        <Panel title="Top peers by volume · last 24h">
+          {trafficLoading ? (
+            <div className="p-5">
+              <Skeleton className="h-64 w-full" />
+            </div>
+          ) : (traffic?.top?.length ?? 0) > 0 ? (
+            <div className="p-4">
+              <ResponsiveContainer width="100%" height={280}>
+                <BarChart data={traffic?.top} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
+                  <XAxis
+                    dataKey="name"
+                    stroke="#71717a"
+                    tick={{ fontSize: 10 }}
+                    tickLine={false}
+                    interval={0}
+                  />
+                  <YAxis stroke="#71717a" tick={{ fontSize: 11 }} tickFormatter={formatBytes} tickLine={false} />
+                  <Tooltip contentStyle={chartTooltipStyle} formatter={(v) => formatBytes(Number(v ?? 0))} />
+                  <Bar dataKey="rx" stackId="a" fill="#14b8a6" name="Download" />
+                  <Bar dataKey="tx" stackId="a" fill="#52525b" name="Upload" />
+                  <Legend wrapperStyle={{ fontSize: 12 }} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          ) : (
+            <EmptyState
+              title="No traffic yet"
+              hint="Top peers appear here once sampled traffic accumulates."
+            />
+          )}
+        </Panel>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-        <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-6">
-          <h2 className="text-lg font-semibold text-white mb-4">Traffic Over Time</h2>
-          <ResponsiveContainer width="100%" height={300}>
-            <AreaChart data={trafficData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#333" />
-              <XAxis dataKey="time" stroke="#666" />
-              <YAxis stroke="#666" tickFormatter={formatBytes} />
-              <Tooltip 
-                contentStyle={{ backgroundColor: '#1a1a1a', border: '1px solid #333' }}
-                formatter={(value) => formatBytes(Number(value ?? 0))}
-              />
-              <Area 
-                type="monotone" 
-                dataKey="rx" 
-                stroke="#0d9488" 
-                fill="#0d9488" 
-                fillOpacity={0.3}
-                name="Download"
-              />
-              <Area 
-                type="monotone" 
-                dataKey="tx" 
-                stroke="#3b82f6" 
-                fill="#3b82f6" 
-                fillOpacity={0.3}
-                name="Upload"
-              />
-              <Legend />
-            </AreaChart>
-          </ResponsiveContainer>
-        </div>
-
-        <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-6">
-          <h2 className="text-lg font-semibold text-white mb-4">Top Peers by Usage</h2>
-          <ResponsiveContainer width="100%" height={300}>
-            <BarChart data={topPeers}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#333" />
-              <XAxis dataKey="name" stroke="#666" />
-              <YAxis stroke="#666" tickFormatter={formatBytes} />
-              <Tooltip 
-                contentStyle={{ backgroundColor: '#1a1a1a', border: '1px solid #333' }}
-                formatter={(value) => formatBytes(Number(value ?? 0))}
-              />
-              <Bar dataKey="rx" stackId="a" fill="#0d9488" name="Download" />
-              <Bar dataKey="tx" stackId="a" fill="#3b82f6" name="Upload" />
-              <Legend />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
-
-      <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-6">
-        <h2 className="text-lg font-semibold text-white mb-4">Peer Details</h2>
-        <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-neutral-800">
-            <thead className="bg-neutral-800">
-              <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                  Peer
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                  Status
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                  Last Handshake
-                </th>
-                <th className="px-6 py-3 text-right text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                  Download
-                </th>
-                <th className="px-6 py-3 text-right text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                  Upload
-                </th>
-              </tr>
-            </thead>
-            <tbody className="bg-neutral-900 divide-y divide-neutral-800">
-              <tr>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-white">Device 1</td>
-                <td className="px-6 py-4 whitespace-nowrap">
-                  <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">
-                    Active
-                  </span>
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-neutral-400">2 min ago</td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-neutral-400 text-right">976.56 KB</td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-neutral-400 text-right">2 MB</td>
-              </tr>
-              <tr>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-white">Device 2</td>
-                <td className="px-6 py-4 whitespace-nowrap">
-                  <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">
-                    Active
-                  </span>
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-neutral-400">5 min ago</td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-neutral-400 text-right">500 KB</td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-neutral-400 text-right">1 MB</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+      {/* Peer detail table */}
+      <div className="mt-8">
+        <Panel title="Peer state">
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-zinc-800/80">
+              <thead>
+                <tr className="text-left text-[11px] uppercase tracking-wider text-zinc-600">
+                  <th className="px-5 py-2.5 font-medium">Peer</th>
+                  <th className="px-5 py-2.5 font-medium">Tunnel IP</th>
+                  <th className="px-5 py-2.5 font-medium">Status</th>
+                  <th className="px-5 py-2.5 font-medium">Last handshake</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-800/60">
+                {(peers || [])
+                  .filter((p) => p.status !== 'removed')
+                  .map((peer) => (
+                    <tr key={peer.id} className="hover:bg-zinc-800/40 transition-colors">
+                      <td className="px-5 py-3 text-sm text-zinc-200">{peer.name}</td>
+                      <td className="px-5 py-3 text-sm text-zinc-500 font-mono">{peer.allowed_ip}</td>
+                      <td className="px-5 py-3">
+                        <StatusBadge status={peer.status} />
+                      </td>
+                      <td className="px-5 py-3 text-sm text-zinc-500 font-mono tabular-nums">
+                        {peer.last_handshake_at ? new Date(peer.last_handshake_at).toLocaleString() : 'Never'}
+                      </td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
       </div>
     </div>
   )
