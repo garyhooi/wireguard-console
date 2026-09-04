@@ -92,7 +92,7 @@ function UsersPage() {
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold text-white">Users</h1>
+        <h1 className="text-2xl font-bold text-white">VPN Users</h1>
         <button
           onClick={() => setShowInviteModal(true)}
           className="bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-4 rounded-md"

@@ -32,3 +32,5 @@ docker-compose.override.yml
 
 # Logs
 *.log
+# CI workflow requires a token with the workflow scope to push; add it manually
+.github/workflows/

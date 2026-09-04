@@ -2,17 +2,20 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
 	"github.com/wireguard-console/backend/internal/auth"
 	"github.com/wireguard-console/backend/internal/db"
+	"github.com/wireguard-console/backend/internal/email"
 	"github.com/wireguard-console/backend/internal/wgclient"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
@@ -484,13 +487,26 @@ func InviteAdmin(store *Store) http.HandlerFunc {
 			return
 		}
 
+		if req.Role == "" {
+			req.Role = "admin"
+		}
+		if req.Role != "super_admin" && req.Role != "admin" && req.Role != "auditor" {
+			writeError(w, http.StatusBadRequest, "role must be super_admin, admin or auditor")
+			return
+		}
+
+		// Generate initial credentials: the invited admin changes the
+		// password after first login (Profile -> Change password).
+		initialPassword := randomPassword(16)
+		passwordHash := hashPassword(initialPassword)
+
 		ctx := context.Background()
 		adminID := getAdminID(r)
 
 		_, err := store.pool.Exec(ctx, `
 			INSERT INTO admins (email, password_hash, role, status)
 			VALUES ($1, $2, $3, 'active')
-		`, req.Email, "pending_setup", req.Role)
+		`, req.Email, passwordHash, req.Role)
 
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to invite admin")
@@ -499,8 +515,44 @@ func InviteAdmin(store *Store) http.HandlerFunc {
 
 		logAudit(ctx, store, adminID, "admin.invite", "admin", "", nil)
 
+		// Email the initial credentials (silent without SMTP, like invites).
+		subject, body := loadEmailTemplate(ctx, store.pool, "admin_invite",
+			"You've been invited to manage WireGuard Console",
+			"Login at {{console_url}} with email {{email}} and the temporary password {{password}}, then change it in Profile.")
+		vars := map[string]string{
+			"console_url": "https://" + domainFromEnv(),
+			"email":       req.Email,
+			"password":    initialPassword,
+		}
+		subject = renderTemplate(subject, vars)
+		body = renderTemplate(body, vars)
+		queue := email.NewQueue(store.pool, nil)
+		_ = queue.EnqueueRenderedEmail(ctx, req.Email, subject, body)
+
 		writeJSON(w, http.StatusCreated, map[string]string{"status": "invited"})
 	}
+}
+
+// randomPassword returns a printable 16-char password.
+func randomPassword(n int) string {
+	const chars = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789!@#$%"
+	b, _ := randBytes(n)
+	out := make([]byte, n)
+	for i := range out {
+		out[i] = chars[int(b[i])%len(chars)]
+	}
+	return string(out)
+}
+
+func randBytes(n int) ([]byte, error) {
+	b := make([]byte, n)
+	_, err := rand.Read(b)
+	return b, err
+}
+
+func domainFromEnv() string {
+	d := strings.TrimPrefix(strings.TrimPrefix(os.Getenv("CONSOLE_DOMAIN"), "https://"), "http://")
+	return d
 }
 
 func GetAdmin(store *Store) http.HandlerFunc {

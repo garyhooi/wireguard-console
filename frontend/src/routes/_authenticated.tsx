@@ -33,7 +33,7 @@ const NAV: NavGroup[] = [
     items: [
       { label: 'Servers', to: '/servers' },
       { label: 'Peers', to: '/peers' },
-      { label: 'Users', to: '/users' },
+      { label: 'VPN Users', to: '/users' },
       { label: 'Nodes', to: '/nodes' },
     ],
   },
@@ -45,6 +45,7 @@ const NAV: NavGroup[] = [
     group: 'System',
     items: [
       { label: 'Configuration', to: '/config' },
+      { label: 'Admins', to: '/admins' },
       { label: 'Profile', to: '/profile' },
     ],
   },

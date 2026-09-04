@@ -13,6 +13,7 @@ import { Route as R2faSetupRouteImport } from './routes/2fa-setup'
 import { Route as R2faVerifyRouteImport } from './routes/2fa-verify'
 import { Route as AuthenticatedRouteImport } from './routes/_authenticated'
 import { Route as LoginRouteImport } from './routes/login'
+import { Route as AuthenticatedAdminsRouteImport } from './routes/_authenticated/admins'
 import { Route as AuthenticatedAuditLogRouteImport } from './routes/_authenticated/audit-log'
 import { Route as AuthenticatedConfigRouteImport } from './routes/_authenticated/config'
 import { Route as AuthenticatedDashboardRouteImport } from './routes/_authenticated/dashboard'
@@ -43,6 +44,11 @@ const LoginRoute = LoginRouteImport.update({
   id: '/login',
   path: '/login',
   getParentRoute: () => rootRouteImport,
+} as any)
+const AuthenticatedAdminsRoute = AuthenticatedAdminsRouteImport.update({
+  id: '/admins',
+  path: '/admins',
+  getParentRoute: () => AuthenticatedRoute,
 } as any)
 const AuthenticatedAuditLogRoute = AuthenticatedAuditLogRouteImport.update({
   id: '/audit-log',
@@ -106,6 +112,7 @@ export interface FileRoutesByFullPath {
   '/2fa-verify': typeof R2faVerifyRoute
   '/': typeof AuthenticatedRouteWithChildren
   '/login': typeof LoginRoute
+  '/admins': typeof AuthenticatedAdminsRoute
   '/audit-log': typeof AuthenticatedAuditLogRoute
   '/config': typeof AuthenticatedConfigRoute
   '/dashboard': typeof AuthenticatedDashboardRoute
@@ -123,6 +130,7 @@ export interface FileRoutesByTo {
   '/2fa-verify': typeof R2faVerifyRoute
   '/': typeof AuthenticatedRouteWithChildren
   '/login': typeof LoginRoute
+  '/admins': typeof AuthenticatedAdminsRoute
   '/audit-log': typeof AuthenticatedAuditLogRoute
   '/config': typeof AuthenticatedConfigRoute
   '/dashboard': typeof AuthenticatedDashboardRoute
@@ -141,6 +149,7 @@ export interface FileRoutesById {
   '/2fa-verify': typeof R2faVerifyRoute
   '/_authenticated': typeof AuthenticatedRouteWithChildren
   '/login': typeof LoginRoute
+  '/_authenticated/admins': typeof AuthenticatedAdminsRoute
   '/_authenticated/audit-log': typeof AuthenticatedAuditLogRoute
   '/_authenticated/config': typeof AuthenticatedConfigRoute
   '/_authenticated/dashboard': typeof AuthenticatedDashboardRoute
@@ -160,6 +169,7 @@ export interface FileRouteTypes {
     | '/2fa-verify'
     | '/'
     | '/login'
+    | '/admins'
     | '/audit-log'
     | '/config'
     | '/dashboard'
@@ -177,6 +187,7 @@ export interface FileRouteTypes {
     | '/2fa-verify'
     | '/'
     | '/login'
+    | '/admins'
     | '/audit-log'
     | '/config'
     | '/dashboard'
@@ -194,6 +205,7 @@ export interface FileRouteTypes {
     | '/2fa-verify'
     | '/_authenticated'
     | '/login'
+    | '/_authenticated/admins'
     | '/_authenticated/audit-log'
     | '/_authenticated/config'
     | '/_authenticated/dashboard'
@@ -244,6 +256,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/login'
       preLoaderRoute: typeof LoginRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/_authenticated/admins': {
+      id: '/_authenticated/admins'
+      path: '/admins'
+      fullPath: '/admins'
+      preLoaderRoute: typeof AuthenticatedAdminsRouteImport
+      parentRoute: typeof AuthenticatedRoute
     }
     '/_authenticated/audit-log': {
       id: '/_authenticated/audit-log'
@@ -326,6 +345,7 @@ declare module '@tanstack/react-router' {
 }
 
 interface AuthenticatedRouteChildren {
+  AuthenticatedAdminsRoute: typeof AuthenticatedAdminsRoute
   AuthenticatedAuditLogRoute: typeof AuthenticatedAuditLogRoute
   AuthenticatedConfigRoute: typeof AuthenticatedConfigRoute
   AuthenticatedDashboardRoute: typeof AuthenticatedDashboardRoute
@@ -339,6 +359,7 @@ interface AuthenticatedRouteChildren {
 }
 
 const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
+  AuthenticatedAdminsRoute: AuthenticatedAdminsRoute,
   AuthenticatedAuditLogRoute: AuthenticatedAuditLogRoute,
   AuthenticatedConfigRoute: AuthenticatedConfigRoute,
   AuthenticatedDashboardRoute: AuthenticatedDashboardRoute,
