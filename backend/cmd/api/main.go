@@ -102,6 +102,8 @@ func main() {
 				r.Patch("/admins/{id}", api.UpdateAdmin(store))
 				r.Delete("/admins/{id}", api.DeleteAdmin(store))
 				r.Post("/admins/{id}/reset-password", api.ResetAdminPassword(store))
+				// Audit-log housekeeping — super_admin only.
+				r.Delete("/audit-logs", api.PurgeAuditLogs(store))
 			})
 
 			// User and peer management - admin and super_admin

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/wireguard-console/backend/internal/db"
@@ -312,5 +313,64 @@ func ListAuditLogs(store *Store) http.HandlerFunc {
 		}
 
 		writeJSON(w, http.StatusOK, logs)
+	}
+}
+
+// PurgeAuditLogs deletes old audit-log rows (housekeeping). super_admin only
+// (route-gated). Semantics:
+//
+//	DELETE /api/audit-logs?days=90   → delete rows older than 90 days
+//	DELETE /api/audit-logs           → delete every row
+//
+// The deletion itself is audit-logged (when rows remain to record it) via
+// logAudit, which writes a fresh row after the purge.
+func PurgeAuditLogs(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.Background()
+		actorID := getAdminID(r)
+
+		days := 0
+		if raw := r.URL.Query().Get("days"); raw != "" {
+			n, err := strconv.Atoi(raw)
+			if err != nil || n < 1 {
+				writeError(w, http.StatusBadRequest, "days must be a positive integer")
+				return
+			}
+			days = n
+		}
+
+		var tag string
+		var deleted int64
+		if days > 0 {
+			tag = "older_than_days"
+			ct, err := store.pool.Exec(ctx, `
+				DELETE FROM audit_logs WHERE created_at < now() - make_interval(days => $1)
+			`, days)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to purge audit logs")
+				return
+			}
+			deleted = ct.RowsAffected()
+		} else {
+			tag = "all"
+			ct, err := store.pool.Exec(ctx, `DELETE FROM audit_logs`)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to clear audit logs")
+				return
+			}
+			deleted = ct.RowsAffected()
+		}
+
+		logAudit(ctx, store, actorID, "audit_logs.purge", "audit_logs", "", map[string]interface{}{
+			"scope":   tag,
+			"days":    days,
+			"deleted": deleted,
+		})
+
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"status":  "purged",
+			"deleted": deleted,
+			"scope":   tag,
+		})
 	}
 }

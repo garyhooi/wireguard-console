@@ -607,6 +607,23 @@ func TestEndToEnd(t *testing.T) {
 	// Cleanup: delete local server (cascade peers) must succeed
 	resp, _ = api(t, "DELETE", "/api/servers/"+serverID, token, nil)
 	expectStatus(t, resp, 200, "DELETE /api/servers/{id}")
+
+	// ---- Audit-log housekeeping (super_admin only) ----
+	// Many actions above logged audit rows. A purge with a huge cutoff
+	// deletes nothing recent, returns 200, and the purge itself is logged.
+	purgeResp, purgeOut := api(t, "DELETE", "/api/audit-logs?days=999999", token, nil)
+	expectStatus(t, purgeResp, 200, "DELETE /api/audit-logs?days=N (super_admin)")
+	if n, _ := purgeOut["deleted"].(float64); n < 0 {
+		t.Fatalf("purge deleted = %v, want >= 0", n)
+	}
+	// Invalid days must be rejected.
+	badResp, _ := api(t, "DELETE", "/api/audit-logs?days=abc", token, nil)
+	expectStatus(t, badResp, 400, "DELETE /api/audit-logs?days=abc")
+	// An admin (not super_admin) must be denied (403).
+	op2pw, _ := resetOut["password"].(string)
+	adminTok := login(t, "op2-renamed@console.test", op2pw)
+	denyResp, _ := api(t, "DELETE", "/api/audit-logs?days=30", adminTok, nil)
+	expectStatus(t, denyResp, 403, "DELETE /api/audit-logs (admin denied)")
 }
 
 func firstID(t *testing.T, path, token string) string {
