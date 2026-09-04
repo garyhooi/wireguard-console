@@ -43,6 +43,7 @@ interface User {
   id: string
   email: string
   full_name: string | null
+  status: string
 }
 
 export const Route = createFileRoute('/_authenticated/peers')({
@@ -177,8 +178,11 @@ function PeersPage() {
   }
 
   const activePeers = (peers || []).filter((p) => p.status !== 'removed')
+  // Removed users are stripped from the Add Peer dropdown — a peer can only
+  // be attached to an active/invited/suspended user, never a removed one.
+  const addableUsers = (users || []).filter((u) => u.status !== 'removed')
   const noServers = !servers || servers.length === 0
-  const noUsers = !users || users.length === 0
+  const noUsers = !users || addableUsers.length === 0
 
   return (
     <div>
@@ -278,7 +282,7 @@ function PeersPage() {
                   <option value="" disabled>
                     {noUsers ? 'No users — invite one first' : 'Select a user…'}
                   </option>
-                  {users?.map((u) => (
+                  {addableUsers.map((u) => (
                     <option key={u.id} value={u.id}>
                       {u.full_name || u.email}
                     </option>
