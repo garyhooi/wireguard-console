@@ -39,10 +39,32 @@
 
 # Catch-all: any host that is not the console domain (e.g. a blocked
 # domain resolved by AdGuard to this server) shows the branded block page.
-# Served over plain HTTP — browsers hitting a blocked site get the page
-# instead of a connection error. HTTPS for arbitrary blocked domains can't
-# work (no valid cert), but the DNS block still stops the connection.
+#
+# Plain HTTP first — browsers hitting a blocked site that isn't forced to
+# HTTPS get the page directly.
 http://:80 {
+	root * /srv
+	handle {
+		rewrite * /blocked.html
+		file_server
+	}
+	header {
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+	}
+}
+
+# HTTPS: browsers force HTTPS for most blocked domains, so also answer :443
+# for any hostname. On-demand TLS issues an internal (self-signed)
+# certificate the first time a blocked domain is requested, then the branded
+# block page is served. The browser shows a one-time certificate warning,
+# then renders the page. HSTS-preloaded domains (google.com etc.) may refuse
+# to proceed past the warning — the DNS block still stops the connection.
+:443 {
+	tls {
+		on_demand
+		issuer internal
+	}
 	root * /srv
 	handle {
 		rewrite * /blocked.html

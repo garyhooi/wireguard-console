@@ -258,6 +258,72 @@ func DeleteDomainRule(store *Store) http.HandlerFunc {
 	}
 }
 
+// DomainRuleSyncStatus returns what AdGuard Home actually has right now, so
+// the UI can show "synced / unreachable / mismatch" instead of a silent
+// failure. Combines the DB rule set with AGH's live filtering state.
+func DomainRuleSyncStatus(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.Background()
+
+		// Rules the console wants AdGuard to have.
+		var dbRules []string
+		rows, err := store.pool.Query(ctx, `
+			SELECT scope, user_id, domain FROM domain_block_rules ORDER BY created_at
+		`)
+		if err == nil {
+			for rows.Next() {
+				var scope string
+				var userID *uuid.UUID
+				var domain string
+				if rows.Scan(&scope, &userID, &domain) == nil {
+					d := strings.Trim(strings.TrimSpace(domain), "^")
+					d = strings.TrimPrefix(strings.TrimPrefix(d, "||"), "|")
+					d = strings.TrimPrefix(d, "https://")
+					d = strings.TrimPrefix(d, "http://")
+					dbRules = append(dbRules, "||"+d+"^")
+				}
+			}
+			rows.Close()
+		}
+
+		client := adguard.NewClient()
+		ag := client.GetStatus(ctx)
+
+		// Compare expected (DB) vs actual (AGH) — but user-scoped rules get
+		// expanded per-peer in AGH ($client=), so only report a mismatch when
+		// AGH has NONE of our global rules while the DB has some.
+		missing := 0
+		if ag.Reachable && len(dbRules) > 0 {
+			have := map[string]bool{}
+			for _, ur := range ag.UserRules {
+				// Strip any $client=... suffix for comparison.
+				if i := strings.IndexByte(ur, '$'); i >= 0 {
+					ur = ur[:i]
+				}
+				have[ur] = true
+			}
+			for _, want := range dbRules {
+				if !have[want] {
+					missing++
+				}
+			}
+		}
+
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"reachable":      ag.Reachable,
+			"error":          ag.Error,
+			"protection_on":  ag.ProtEnabled,
+			"blocking_mode":  ag.BlockMode,
+			"blocking_ipv4":  ag.BlockIPv4,
+			"db_rules":       dbRules,
+			"ag_rules":       ag.UserRules,
+			"expected_rules": len(dbRules),
+			"missing_rules":  missing,
+			"block_page_ip":  blockingIP(store),
+		})
+	}
+}
+
 func ApplyNFTablesRules() error {
 	// Get the WireGuard interface name and subnet
 	_ = "wg0"

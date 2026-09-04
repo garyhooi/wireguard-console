@@ -1,7 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { IconPlus } from '@tabler/icons-react'
+import { IconPlus, IconRefresh } from '@tabler/icons-react'
 import {
   Badge,
   EmptyState,
@@ -27,6 +27,17 @@ interface DomainRule {
   created_at: string
 }
 
+interface SyncStatus {
+  reachable: boolean
+  error?: string
+  protection_on: boolean
+  blocking_mode: string
+  blocking_ipv4: string
+  expected_rules: number
+  missing_rules: number
+  block_page_ip: string
+}
+
 export const Route = createFileRoute('/_authenticated/domain-rules')({
   component: DomainRulesPage,
 })
@@ -46,6 +57,22 @@ function DomainRulesPage() {
       if (!res.ok) throw new Error('Failed to fetch domain rules')
       return res.json()
     },
+  })
+
+  const {
+    data: status,
+    refetch: refetchStatus,
+    isFetching: statusLoading,
+  } = useQuery<SyncStatus>({
+    queryKey: ['domain-rules-status'],
+    queryFn: async () => {
+      const res = await fetch('/api/domain-rules/status', {
+        headers: { Authorization: localStorage.getItem('token')! },
+      })
+      if (!res.ok) throw new Error('Failed to fetch AdGuard status')
+      return res.json()
+    },
+    refetchInterval: 30000,
   })
 
   const { data: users } = useQuery({
@@ -78,6 +105,7 @@ function DomainRulesPage() {
       setDomain('')
       setUserId('')
       refetch()
+      refetchStatus()
     },
   })
 
@@ -90,7 +118,10 @@ function DomainRulesPage() {
       if (!res.ok) throw new Error('Failed to delete domain rule')
       return res.json()
     },
-    onSuccess: () => refetch(),
+    onSuccess: () => {
+      refetch()
+      refetchStatus()
+    },
   })
 
   const handleAdd = (e: React.FormEvent) => {
@@ -119,6 +150,47 @@ function DomainRulesPage() {
           </PrimaryButton>
         }
       />
+
+      {/* AdGuard sync / health status */}
+      {status && (
+        <div
+          className={`mb-5 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm rounded-lg border px-4 py-3 ${
+            !status.reachable
+              ? 'bg-red-500/10 border-red-500/30 text-red-300'
+              : status.missing_rules > 0 || !status.protection_on
+                ? 'bg-amber-500/10 border-amber-500/30 text-amber-300'
+                : 'bg-teal-500/10 border-teal-500/30 text-teal-300'
+          }`}
+        >
+          {!status.reachable ? (
+            <span className="font-medium">AdGuard unreachable — rules are not being enforced.</span>
+          ) : status.missing_rules > 0 ? (
+            <span className="font-medium">
+              {status.missing_rules} rule(s) missing in AdGuard (out of {status.expected_rules}) —
+              re-syncing shortly.
+            </span>
+          ) : status.protection_on === false ? (
+            <span className="font-medium">AdGuard protection is paused — rules are stored but not enforced.</span>
+          ) : (
+            <span className="font-medium">AdGuard reachable — {status.expected_rules} rule(s) synced.</span>
+          )}
+          {status.reachable && (
+            <span className="opacity-80">
+              block mode: <code className="font-mono">{status.blocking_mode}</code>
+              {status.blocking_ipv4 ? ` → ${status.blocking_ipv4}` : ''}
+            </span>
+          )}
+          {status.error && <span className="opacity-80 font-mono text-xs break-all">{status.error}</span>}
+          <button
+            onClick={() => refetchStatus()}
+            disabled={statusLoading}
+            className="ml-auto inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors disabled:opacity-50 hover:bg-white/10"
+          >
+            <IconRefresh size={13} stroke={1.6} className={statusLoading ? 'animate-spin' : ''} aria-hidden="true" />
+            Check
+          </button>
+        </div>
+      )}
 
       <Modal
         open={showAddModal}

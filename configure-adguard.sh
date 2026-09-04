@@ -41,6 +41,21 @@ diag() {
     code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:3000/$ep" || true)"
     echo "  /$ep -> HTTP $code"
   done
+  echo ""
+  echo "== Live AdGuard state (Basic auth from .env) =="
+  AUTH="${ADGUARD_API_USER:-admin}:${ADGUARD_API_PASSWORD}"
+  echo "-- user rules currently in AdGuard --"
+  curl -s -u "$AUTH" "http://127.0.0.1:3000/control/filtering/status" \
+    | python3 -c "import sys,json; d=json.load(sys.stdin); print('protection:', d.get('enabled')); [print('  rule:', r) for r in d.get('user_rules',[])] or print('  (none)')" 2>&1 || echo "  (could not read filtering status)"
+  echo "-- blocking mode --"
+  curl -s -u "$AUTH" "http://127.0.0.1:3000/control/dns_config" \
+    | python3 -c "import sys,json; d=json.load(sys.stdin); print('  mode:', d.get('blocking_mode'), 'ipv4:', d.get('blocking_ipv4'))" 2>&1 || echo "  (could not read dns_config)"
+  echo ""
+  echo "== DNS answer for common blocked/test domains via AGH (127.0.0.1:53) =="
+  for host in google.com www.google.com youtube.com www.youtube.com; do
+    ans="$(dig +short +time=2 +tries=1 "@127.0.0.1" "$host" A 2>/dev/null | tr '\n' ' ')"
+    echo "  $host -> ${ans:-<no answer / timeout>}"
+  done
 }
 
 if [[ "${MODE}" == "--diag" ]]; then

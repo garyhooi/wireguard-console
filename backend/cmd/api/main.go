@@ -68,6 +68,9 @@ func main() {
 	go worker.NewTrafficWorker(conn.Pool(), 30*time.Second).Start(ctx)
 	go worker.NewRollupWorker(conn.Pool()).Start(ctx)
 	go worker.NewMailWorker(conn.Pool()).Start(ctx)
+	// Reconcile DB rules into AdGuard periodically so rules can't silently
+	// drift (AGH re-provision, manual AGH edits, partial failed syncs).
+	go worker.NewDomainRuleWorker(conn.Pool(), 5*time.Minute).Start(ctx)
 
 	// Repush persisted domain-block rules into AdGuard Home. A server reset /
 	// redeploy provisions AdGuard with a clean config (empty user_rules), so
@@ -170,6 +173,7 @@ func main() {
 				r.Get("/domain-rules", api.ListDomainRules(store))
 				r.Post("/domain-rules", api.CreateDomainRule(store))
 				r.Delete("/domain-rules/{id}", api.DeleteDomainRule(store))
+				r.Get("/domain-rules/status", api.DomainRuleSyncStatus(store))
 
 				r.Get("/stats/overview", api.GetStatsOverview(store))
 				r.Get("/stats/traffic", api.GetTrafficStats(store))

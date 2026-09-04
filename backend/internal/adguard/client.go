@@ -137,3 +137,62 @@ func (c *Client) Ping(ctx context.Context) error {
 	}
 	return nil
 }
+
+// Status describes AdGuard Home's live filtering state, used by the console
+// to confirm rules really are applied (not just stored in the DB).
+type Status struct {
+	Reachable   bool     `json:"reachable"`
+	Error       string   `json:"error,omitempty"`
+	ProtEnabled bool     `json:"protection_enabled"`
+	UserRules   []string `json:"user_rules"`
+	BlockMode   string   `json:"blocking_mode"`
+	BlockIPv4   string   `json:"blocking_ipv4"`
+}
+
+// GetStatus reads AGH filtering + DNS state. A connectivity/credential
+// problem is reported in the returned Status (Reachable=false + Error)
+// rather than as a Go error, so callers can show it in the UI.
+func (c *Client) GetStatus(ctx context.Context) Status {
+	st := Status{}
+
+	resp, err := c.do(ctx, "GET", "/control/filtering/status", nil)
+	if err != nil {
+		st.Error = err.Error()
+		return st
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		st.Error = fmt.Sprintf("adguard filtering status %d: %s", resp.StatusCode, body)
+		return st
+	}
+	var fs struct {
+		Enabled   bool     `json:"enabled"`
+		UserRules []string `json:"user_rules"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&fs); err != nil {
+		st.Error = fmt.Sprintf("decode filtering status: %v", err)
+		return st
+	}
+
+	resp2, err := c.do(ctx, "GET", "/control/dns_config", nil)
+	if err != nil {
+		st.Error = err.Error()
+		return st
+	}
+	defer resp2.Body.Close()
+	var ds struct {
+		BlockingMode string `json:"blocking_mode"`
+		BlockingIPv4 string `json:"blocking_ipv4"`
+	}
+	if resp2.StatusCode == http.StatusOK {
+		_ = json.NewDecoder(resp2.Body).Decode(&ds)
+	}
+
+	st.Reachable = true
+	st.ProtEnabled = fs.Enabled
+	st.UserRules = fs.UserRules
+	st.BlockMode = ds.BlockingMode
+	st.BlockIPv4 = ds.BlockingIPv4
+	return st
+}

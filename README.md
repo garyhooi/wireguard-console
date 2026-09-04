@@ -136,17 +136,24 @@ automatically by the installer. Peers use the tunnel gateway
 
 - Add rules under **Security → Domain Rules** (`google.com` — global, or per
   VPN user). The console pushes them to AdGuard automatically.
-- Blocked domains resolve to `10.8.0.1`, where Caddy serves the branded
-  **"Access blocked — VPN policy"** page over HTTP.
+- Blocked domains resolve to the tunnel gateway, where Caddy serves the
+  branded **"Access blocked — VPN policy"** page — over both HTTP **and**
+  HTTPS (HTTPS uses an internal certificate, so the browser shows a one-time
+  self-signed warning before the page).
 - Re-run `sudo bash configure-adguard.sh` any time to re-provision AdGuard
   (it writes `AdGuardHome.yaml` directly into the config volume — never
   depends on the interactive first-run wizard). `--diag` prints the current
   state for troubleshooting.
+- The console re-syncs the rules into AdGuard automatically on rule
+  changes, at startup, and every 5 minutes, and the **Security → Domain
+  Rules** page shows live AdGuard health (reachable / synced / missing
+  rules) so a silent failure is visible instead of a mystery.
 
-**Note:** browsers force HTTPS on most sites, so `https://blocked.example`
-shows a connection error rather than the page — the DNS block still stops the
-connection (that is the protection). The branded page renders for HTTP
-requests and can be customized by editing `frontend/public/blocked.html`.
+**Note:** a handful of HSTS-preloaded domains (e.g. `google.com`) make the
+browser refuse to proceed past the self-signed warning entirely — the
+connection is still blocked (that is the protection), it just won't render
+the branded page. The page can be customized by editing
+`frontend/public/blocked.html`.
 
 ### Manual Setup
 
