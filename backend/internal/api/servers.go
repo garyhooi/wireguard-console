@@ -3,7 +3,11 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/wireguard-console/backend/internal/auth"
@@ -245,6 +249,112 @@ func DeleteServer(store *Store) http.HandlerFunc {
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 	}
+}
+
+// GetServerHostConfig returns a wg-quick config for the HOST side of a
+// server: the server's own interface (decrypted private key, gateway
+// address, listen port) plus every active peer, and the one-time NAT
+// command required for client internet access.
+func GetServerHostConfig(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		serverID, err := parseUUID(r.PathValue("id"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "Invalid server ID")
+			return
+		}
+
+		ctx := context.Background()
+
+		var (
+			ifaceName      string
+			endpoint       string
+			listenPort     int
+			serverPub      string
+			privEnc        string
+			cidr           string
+			defaultAllowed string
+		)
+		err = store.pool.QueryRow(ctx, `
+			SELECT interface_name, public_endpoint, listen_port, server_public_key,
+			       server_private_key_encrypted, network_cidr::text, default_allowed_ips
+			FROM servers WHERE id = $1
+		`, serverID).Scan(&ifaceName, &endpoint, &listenPort, &serverPub, &privEnc, &cidr, &defaultAllowed)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "Server not found")
+			return
+		}
+		if privEnc == "" {
+			writeError(w, http.StatusConflict, "No server private key stored")
+			return
+		}
+		encSvc, err := auth.NewEncryptionService()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Encryption is not configured")
+			return
+		}
+		privKey, err := encSvc.Decrypt(privEnc)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to decrypt server key")
+			return
+		}
+
+		// Gateway = first host address in the server's network.
+		ip, maskBits, err := gatewayForCIDR(cidr)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Invalid server network: "+err.Error())
+			return
+		}
+
+		var sb strings.Builder
+		sb.WriteString("[Interface]\n")
+		sb.WriteString("Address = " + ip + "/" + strconv.Itoa(maskBits) + "\n")
+		sb.WriteString("ListenPort = " + strconv.Itoa(listenPort) + "\n")
+		sb.WriteString("PrivateKey = " + privKey + "\n\n")
+		sb.WriteString("# One-time NAT rule so clients can reach the internet:\n")
+		sb.WriteString("#   sudo iptables -t nat -A POSTROUTING -s " + cidr + " -o eth0 -j MASQUERADE\n")
+		sb.WriteString("#   (make it persistent: sudo apt install -y iptables-persistent && sudo netfilter-persistent save)\n")
+		sb.WriteString("# ip_forward is enabled by the installer; verify: sysctl net.ipv4.ip_forward\n\n")
+
+		rows, err := store.pool.Query(ctx, `
+			SELECT host(allowed_ip), public_key FROM peers
+			WHERE server_id = $1 AND status = 'active'
+			ORDER BY allowed_ip
+		`, serverID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to list peers")
+			return
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var peerIP, peerPub string
+			if err := rows.Scan(&peerIP, &peerPub); err != nil {
+				continue
+			}
+			sb.WriteString("[Peer]\n")
+			sb.WriteString("PublicKey = " + peerPub + "\n")
+			sb.WriteString("AllowedIPs = " + peerIP + "/32\n\n")
+		}
+
+		w.Header().Set("Content-Type", "text/plain")
+		w.Header().Set("Content-Disposition", "attachment; filename="+ifaceName+".conf")
+		w.Write([]byte(sb.String()))
+	}
+}
+
+// gatewayForCIDR returns the first host address and mask bits of an IPv4
+// CIDR (base+1, so .1 for a /24).
+func gatewayForCIDR(cidr string) (string, int, error) {
+	_, ipnet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return "", 0, err
+	}
+	ones, _ := ipnet.Mask.Size()
+	base := ipnet.IP.To4()
+	if base == nil {
+		return "", 0, fmt.Errorf("IPv4 networks only")
+	}
+	base[3]++
+	return base.String(), ones, nil
 }
 
 func GetServerStatus(store *Store) http.HandlerFunc {

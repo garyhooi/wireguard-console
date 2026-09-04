@@ -42,6 +42,8 @@ function ServersPage() {
   const [editing, setEditing] = useState<Server | null>(null)
   const [error, setError] = useState('')
   const [form, setForm] = useState(emptyForm)
+  const [hostSetup, setHostSetup] = useState<{ name: string; text: string } | null>(null)
+  const [hostCopied, setHostCopied] = useState(false)
 
   const { data: servers, isLoading } = useQuery<Server[]>({
     queryKey: ['servers'],
@@ -120,11 +122,43 @@ function ServersPage() {
     setShowAdd(true)
   }
 
+  const openHostSetup = async (server: Server) => {
+    setError('')
+    try {
+      const res = await fetch(`/api/servers/${server.id}/host-config`, { headers: auth })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        setError(err.error || 'Failed to load host config')
+        return
+      }
+      setHostSetup({ name: server.name, text: await res.text() })
+      setHostCopied(false)
+    } catch {
+      setError('Failed to load host config')
+    }
+  }
+
+  const copyHostConfig = async () => {
+    if (!hostSetup) return
+    try {
+      await navigator.clipboard.writeText(hostSetup.text)
+      setHostCopied(true)
+    } catch {
+      const el = document.createElement('textarea')
+      el.value = hostSetup.text
+      document.body.appendChild(el)
+      el.select()
+      document.execCommand('copy')
+      document.body.removeChild(el)
+      setHostCopied(true)
+    }
+  }
+
   if (isLoading) {
     return <div className="text-neutral-400">Loading...</div>
   }
 
-  const modalOpen = showAdd || editing !== null
+  const modalOpen = showAdd || editing !== null || hostSetup !== null
 
   return (
     <div>
@@ -251,6 +285,37 @@ function ServersPage() {
         </div>
       )}
 
+      {hostSetup && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+            <h2 className="text-xl font-bold text-white mb-1">Host Setup — {hostSetup.name}</h2>
+            <p className="text-sm text-neutral-400 mb-4">
+              On the VPN server: save this as <code className="text-teal-400">wg0.conf</code>, then{' '}
+              <code className="text-teal-400">sudo wg-quick up /tmp/wg0.conf</code> and run the NAT
+              command from the comments. This re-creates the interface — do it once, and re-open
+              this panel after adding peers to keep the peer list current.
+            </p>
+            <pre className="bg-neutral-950 border border-neutral-800 rounded-md p-4 text-xs text-neutral-300 overflow-x-auto whitespace-pre-wrap">
+              {hostSetup.text}
+            </pre>
+            <div className="flex space-x-3 mt-4">
+              <button
+                onClick={copyHostConfig}
+                className="bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-4 rounded-md"
+              >
+                {hostCopied ? 'Copied ✓' : 'Copy Config'}
+              </button>
+              <button
+                onClick={() => setHostSetup(null)}
+                className="bg-neutral-700 hover:bg-neutral-600 text-white font-medium py-2 px-4 rounded-md"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="bg-neutral-900 border border-neutral-800 rounded-lg overflow-hidden">
         <table className="min-w-full divide-y divide-neutral-800">
           <thead className="bg-neutral-800">
@@ -309,6 +374,12 @@ function ServersPage() {
                   <div className="flex justify-end gap-2">
                     <button onClick={() => openEdit(server)} className="text-teal-400 hover:text-teal-300">
                       Edit
+                    </button>
+                    <button
+                      onClick={() => openHostSetup(server)}
+                      className="text-blue-400 hover:text-blue-300"
+                    >
+                      Host Setup
                     </button>
                     <button
                       onClick={() => {

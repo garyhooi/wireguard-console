@@ -120,6 +120,7 @@ func main() {
 				r.Patch("/servers/{id}", api.UpdateServer(store))
 				r.Delete("/servers/{id}", api.DeleteServer(store))
 				r.Get("/servers/{id}/status", api.GetServerStatus(store))
+				r.Get("/servers/{id}/host-config", api.GetServerHostConfig(store))
 
 				r.Get("/domain-rules", api.ListDomainRules(store))
 				r.Post("/domain-rules", api.CreateDomainRule(store))
