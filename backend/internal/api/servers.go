@@ -600,19 +600,36 @@ func UpdateAdmin(store *Store) http.HandlerFunc {
 		}
 
 		var req struct {
-			Role string `json:"role"`
+			Role   string `json:"role"`
+			Status string `json:"status"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
+			return
+		}
+		if req.Status != "" && req.Status != "active" && req.Status != "disabled" {
+			writeError(w, http.StatusBadRequest, "status must be 'active' or 'disabled'")
+			return
+		}
+
+		// The current admin may not disable themselves (would lock everyone out).
+		if req.Status == "disabled" && adminID == getAdminID(r) {
+			writeError(w, http.StatusBadRequest, "You cannot disable your own account")
 			return
 		}
 
 		ctx := context.Background()
 		actorID := getAdminID(r)
 
+		if req.Role == "" {
+			req.Role = "admin"
+		}
+		if req.Status == "" {
+			req.Status = "active"
+		}
 		_, err = store.pool.Exec(ctx, `
-			UPDATE admins SET role = $1, updated_at = now() WHERE id = $2
-		`, req.Role, adminID)
+			UPDATE admins SET role = $1, status = $2, updated_at = now() WHERE id = $3
+		`, req.Role, req.Status, adminID)
 
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to update admin")

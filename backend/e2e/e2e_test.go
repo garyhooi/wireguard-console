@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/argon2"
 )
@@ -123,11 +124,23 @@ func seedAdmin(t *testing.T, dbURL string) {
 	hash := argon2.IDKey([]byte("e2e-Passw0rd!"), salt, 1<<15, 1, 4, 32)
 	passwordHash := hex.EncodeToString(salt) + ":" + hex.EncodeToString(hash)
 
-	_, err = pool.Exec(ctx, `
-		INSERT INTO admins (email, password_hash, role, status)
-		VALUES ('e2e@console.test', $1, 'super_admin', 'active')
-		ON CONFLICT (email) DO NOTHING
-	`, passwordHash)
+	var exists bool
+	err = pool.QueryRow(ctx,
+		`SELECT true FROM admins WHERE email = 'e2e@console.test'`).Scan(&exists)
+	if err == pgx.ErrNoRows {
+		exists = false
+	} else if err != nil {
+		t.Fatalf("check admin: %v", err)
+	}
+	if !exists {
+		_, err = pool.Exec(ctx, `
+			INSERT INTO admins (email, password_hash, role, status)
+			VALUES ('e2e@console.test', $1, 'super_admin', 'active')
+		`, passwordHash)
+		if err != nil {
+			t.Fatalf("seed admin: %v", err)
+		}
+	}
 	if err != nil {
 		t.Fatalf("seed admin: %v", err)
 	}
@@ -407,6 +420,27 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatal("reset password not returned")
 	}
 
+	// ---- Admins: disable then enable ----
+	// (op2 was created earlier; toggle disabled -> active -> disabled)
+	statusResp, _ := api(t, "PATCH", "/api/admins/"+op2ID, token, map[string]interface{}{
+		"role": "admin", "status": "disabled",
+	})
+	expectStatus(t, statusResp, 200, "PATCH /api/admins/{id} (disable)")
+	adminList3 := rawGet(t, baseURL+"/api/admins", token)
+	var adminRows3 []map[string]interface{}
+	json.Unmarshal([]byte(adminList3), &adminRows3)
+	for _, a := range adminRows3 {
+		if e, _ := a["email"].(string); e == "op2@console.test" {
+			if st, _ := a["status"].(string); st != "disabled" {
+				t.Fatalf("op2 status = %q, want disabled", st)
+			}
+		}
+	}
+	statusResp, _ = api(t, "PATCH", "/api/admins/"+op2ID, token, map[string]interface{}{
+		"role": "admin", "status": "active",
+	})
+	expectStatus(t, statusResp, 200, "PATCH /api/admins/{id} (enable)")
+
 	// ---- Peers carry their owner ----
 	peerJSON := rawGet(t, baseURL+"/api/peers", token)
 	var peerRows []map[string]interface{}
@@ -436,6 +470,14 @@ func TestEndToEnd(t *testing.T) {
 	expectStatus(t, lifeResp, 200, "POST /api/users/{id}/resume")
 	lifeResp, _ = api(t, "DELETE", "/api/users/"+userID, token, nil)
 	expectStatus(t, lifeResp, 200, "DELETE /api/users/{id}")
+
+	// ---- Email reuse after removal ----
+	// The lifecycle test above removed user@example.com; inviting the same
+	// address again must succeed (reactivation, not a unique violation).
+	reviveResp, _ := api(t, "POST", "/api/users", token, map[string]string{
+		"email": "user@example.com", "full_name": "E2E User Again",
+	})
+	expectStatus(t, reviveResp, 201, "POST /api/users (reuse removed email)")
 
 	// Cleanup: delete local server (cascade peers) must succeed
 	resp, _ = api(t, "DELETE", "/api/servers/"+serverID, token, nil)

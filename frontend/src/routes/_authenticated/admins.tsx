@@ -101,10 +101,14 @@ function AdminsPage() {
     onError: (e: Error) => setError(e.message),
   })
 
-  const disableMutation = useMutation({
+  const statusMutation = useMutation({
     mutationFn: async (a: Admin) => {
-      const res = await fetch(`/api/admins/${a.id}`, { method: 'DELETE', headers: auth })
-      if (!res.ok) throw new Error('Failed to disable admin')
+      const res = await fetch(`/api/admins/${a.id}`, {
+        method: 'PATCH',
+        headers: { ...auth, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: a.role, status: a.status === 'active' ? 'disabled' : 'active' }),
+      })
+      if (!res.ok) throw new Error('Failed to update admin status')
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['admins'] }),
     onError: (e: Error) => setError(e.message),
@@ -218,29 +222,35 @@ function AdminsPage() {
                       {a.created_at ? new Date(a.created_at).toLocaleDateString() : '—'}
                     </td>
                     <td className="px-5 py-3 text-right text-sm">
-                      {a.status === 'active' ? (
-                        <div className="flex justify-end gap-3">
+                      <div className="flex justify-end gap-3">
+                        {a.status === 'active' ? (
+                          <>
+                            <button
+                              onClick={() => {
+                                if (confirm(`Reset password for "${a.email}"?`)) resetPwMutation.mutate(a)
+                              }}
+                              className="text-teal-400 hover:text-teal-300"
+                            >
+                              Reset password
+                            </button>
+                            <button
+                              onClick={() => {
+                                if (confirm(`Disable admin "${a.email}"?`)) statusMutation.mutate(a)
+                              }}
+                              className="text-red-400 hover:text-red-300"
+                            >
+                              Disable
+                            </button>
+                          </>
+                        ) : (
                           <button
-                            onClick={() => {
-                              if (confirm(`Reset password for "${a.email}"?`)) resetPwMutation.mutate(a)
-                            }}
+                            onClick={() => statusMutation.mutate(a)}
                             className="text-teal-400 hover:text-teal-300"
                           >
-                            Reset password
+                            Enable
                           </button>
-                          <button
-                            onClick={() => {
-                              if (confirm(`Disable admin "${a.email}"? (soft delete, role kept)`))
-                                disableMutation.mutate(a)
-                            }}
-                            className="text-red-400 hover:text-red-300"
-                          >
-                            Disable
-                          </button>
-                        </div>
-                      ) : (
-                        <span className="text-zinc-600">disabled</span>
-                      )}
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}

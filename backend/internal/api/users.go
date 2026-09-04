@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/wireguard-console/backend/internal/db"
 	"github.com/wireguard-console/backend/internal/email"
 )
@@ -91,12 +92,36 @@ func CreateUser(store *Store) http.HandlerFunc {
 		now := time.Now()
 		invitedAt := now
 
-		_, err := store.pool.Exec(ctx, `
-			INSERT INTO users (email, full_name, status, invited_by, invited_at)
-			VALUES ($1, $2, 'invited', $3, $4)
-		`, req.Email, req.FullName, invitedBy, invitedAt)
-
-		if err != nil {
+		// Emails are reusable after removal: a removed row with this email is
+		// revived in place (no duplicate rows, no ambiguous lookups).
+		var (
+			existingID string
+			curStatus  string
+		)
+		err := store.pool.QueryRow(ctx,
+			`SELECT id::text, status FROM users WHERE email = $1`, req.Email).Scan(&existingID, &curStatus)
+		switch {
+		case err == nil && curStatus == "removed":
+			// Revive the old row.
+			if _, err := store.pool.Exec(ctx, `
+				UPDATE users SET full_name = $2, status = 'invited', updated_at = now()
+				WHERE id = $1
+			`, existingID, req.FullName); err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to revive user")
+				return
+			}
+		case err == nil:
+			writeError(w, http.StatusConflict, "A user with this email already exists")
+			return
+		case err == pgx.ErrNoRows:
+			if _, err := store.pool.Exec(ctx, `
+				INSERT INTO users (email, full_name, status, invited_by, invited_at)
+				VALUES ($1, $2, 'invited', $3, $4)
+			`, req.Email, req.FullName, invitedBy, invitedAt); err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to create user")
+				return
+			}
+		default:
 			writeError(w, http.StatusInternalServerError, "Failed to create user")
 			return
 		}

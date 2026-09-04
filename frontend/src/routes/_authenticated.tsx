@@ -1,4 +1,5 @@
 import { createFileRoute, Link, Outlet } from '@tanstack/react-router'
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 
 interface Stats {
@@ -21,7 +22,7 @@ export const Route = createFileRoute('/_authenticated')({
 
 const NAV: NavGroup[] = [
   {
-    group: 'Overview',
+    group: 'Monitoring',
     items: [
       { label: 'Dashboard', to: '/dashboard' },
       { label: 'Statistics', to: '/statistics' },
@@ -29,23 +30,28 @@ const NAV: NavGroup[] = [
     ],
   },
   {
-    group: 'Manage',
+    group: 'Network',
     items: [
       { label: 'Servers', to: '/servers' },
       { label: 'Peers', to: '/peers' },
-      { label: 'VPN Users', to: '/users' },
       { label: 'Nodes', to: '/nodes' },
     ],
   },
   {
-    group: 'Guarding',
+    group: 'Directory',
+    items: [
+      { label: 'VPN Users', to: '/users' },
+      { label: 'Admins', to: '/admins' },
+    ],
+  },
+  {
+    group: 'Security',
     items: [{ label: 'Domain Rules', to: '/domain-rules' }],
   },
   {
     group: 'System',
     items: [
       { label: 'Configuration', to: '/config' },
-      { label: 'Admins', to: '/admins' },
       { label: 'Profile', to: '/profile' },
     ],
   },
@@ -55,6 +61,7 @@ type NavEntry = { label: string; to: string }
 type NavGroup = { group: string; items: NavEntry[] }
 
 function AuthenticatedLayout() {
+  const [mobileNav, setMobileNav] = useState(false)
   const { data: stats } = useQuery<Stats>({
     queryKey: ['stats'],
     queryFn: async () => {
@@ -77,6 +84,12 @@ function AuthenticatedLayout() {
     localStorage.removeItem('token')
     window.location.href = '/login'
   }
+
+  const currentPath = window.location.pathname
+  const flat = NAV.flatMap((g) => g.items)
+  const current = flat.find((i) => i.to === currentPath)
+  const currentGroup = NAV.find((g) => g.items.some((i) => i.to === currentPath))?.group
+  const currentLabel = current?.label
 
   return (
     <div className="min-h-[100dvh] bg-zinc-950 flex">
@@ -136,19 +149,18 @@ function AuthenticatedLayout() {
             <span className="lg:hidden text-white font-semibold tracking-tight text-sm">
               WireGuard Console
             </span>
-            <nav className="flex items-center gap-1 overflow-x-auto no-scrollbar">
-              {NAV.flatMap((g) => g.items).map((item) => (
-                <Link
-                  key={item.to}
-                  to={item.to as never}
-                  activeOptions={{ exact: item.to === '/dashboard' }}
-                  className="px-3 py-1.5 whitespace-nowrap rounded-md text-xs font-medium text-zinc-400 hover:text-zinc-100 transition-colors [&.active]:text-teal-400 [&.active]:bg-teal-500/10"
-                  activeProps={{ className: 'active' }}
-                >
-                  {item.label}
-                </Link>
-              ))}
-            </nav>
+
+            {/* Desktop: contextual path (breadcrumb-ish) */}
+            <div className="hidden lg:flex items-center gap-2 text-xs text-zinc-600">
+              {currentGroup && (
+                <>
+                  <span className="text-zinc-500">{currentGroup}</span>
+                  <span className="text-zinc-700">/</span>
+                  <span className="text-zinc-300 font-medium">{currentLabel}</span>
+                </>
+              )}
+            </div>
+
             <div className="flex items-center gap-3 shrink-0">
               <span className="hidden sm:inline-flex items-center gap-1.5 text-xs text-zinc-500">
                 <span
@@ -164,9 +176,46 @@ function AuthenticatedLayout() {
               >
                 Sign out
               </button>
+              {/* Mobile: hamburger -> grouped drawer */}
+              <button
+                onClick={() => setMobileNav(!mobileNav)}
+                className="lg:hidden text-zinc-300 hover:text-white text-xl leading-none"
+                aria-label="Toggle menu"
+              >
+                ☰
+              </button>
             </div>
           </div>
         </header>
+
+        {/* Mobile grouped drawer */}
+        {mobileNav && (
+          <div className="lg:hidden bg-zinc-900 border-b border-zinc-800">
+            <nav className="px-4 py-3 space-y-4 max-h-[70dvh] overflow-y-auto">
+              {NAV.map((group) => (
+                <div key={group.group}>
+                  <p className="text-[11px] uppercase tracking-wider text-zinc-600 font-medium mb-1 px-2">
+                    {group.group}
+                  </p>
+                  <div className="space-y-0.5">
+                    {group.items.map((item) => (
+                      <Link
+                        key={item.to}
+                        to={item.to as never}
+                        onClick={() => setMobileNav(false)}
+                        className="block px-3 py-2 rounded-md text-sm text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 [&.active]:text-teal-400 [&.active]:bg-teal-500/10"
+                        activeOptions={{ exact: item.to === '/dashboard' }}
+                        activeProps={{ className: 'active' }}
+                      >
+                        {item.label}
+                      </Link>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </nav>
+          </div>
+        )}
 
         <main className="px-4 sm:px-6 lg:px-8 py-8 max-w-[1400px] mx-auto">
           <Outlet />

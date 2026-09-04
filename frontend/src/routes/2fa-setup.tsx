@@ -32,6 +32,7 @@ function Setup2FAPage() {
   const setupMutation = useMutation({
     mutationFn: async () => {
       const res = await fetch('/api/auth/2fa/setup', {
+        method: 'POST',
         headers: { Authorization: localStorage.getItem('token')! },
       })
       if (!res.ok) throw new Error('Failed to setup 2FA')
