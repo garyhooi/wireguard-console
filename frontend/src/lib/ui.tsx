@@ -326,20 +326,39 @@ export function Modal({
   className?: string
 }) {
   const ref = useRef<HTMLDivElement>(null)
+  // Keep the latest onClose without making the focus/scroll-lock effect
+  // re-run on every parent render. Callers pass a fresh inline arrow each
+  // render (e.g. () => setShowX(false)); if onClose were a dependency, the
+  // effect would re-run on every keystroke and refocus() would yank the
+  // caret out of whatever input the user is typing in.
+  const onCloseRef = useRef(onClose)
+  useEffect(() => {
+    onCloseRef.current = onClose
+  })
+  // True once the dialog has been focused; reset in the effect cleanup when
+  // the modal closes, so the next closed→open transition focuses again.
+  const hasFocused = useRef(false)
 
   useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape') onCloseRef.current()
     }
     document.addEventListener('keydown', onKey)
     document.body.style.overflow = 'hidden'
-    ref.current?.focus()
+    // Focus the dialog only on the closed→open transition, not on re-renders
+    // (typing in a field re-renders the parent, which would steal focus).
+    if (!hasFocused.current) {
+      ref.current?.focus()
+      hasFocused.current = true
+    }
     return () => {
       document.removeEventListener('keydown', onKey)
       document.body.style.overflow = ''
+      hasFocused.current = false
     }
-  }, [open, onClose])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- onClose deliberately omitted
+  }, [open])
 
   if (!open) return null
 

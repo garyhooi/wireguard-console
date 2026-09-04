@@ -1,13 +1,13 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
+import QRCode from 'qrcode'
 import { IconDownload } from '@tabler/icons-react'
 import { PrimaryButton, inputCls, labelCls } from '../lib/ui'
 
 interface ClaimResponse {
   peer_id: string
   config: string
-  qr_code_url: string
 }
 
 export const Route = createFileRoute('/claim/$token')({
@@ -19,6 +19,7 @@ function ClaimPage() {
   const [step, setStep] = useState<'form' | 'success'>('form')
   const [fullName, setFullName] = useState('')
   const [response, setResponse] = useState<ClaimResponse | null>(null)
+  const [qrDataUrl, setQrDataUrl] = useState('')
 
   const claimMutation = useMutation({
     mutationFn: async (data: { token: string; full_name: string; public_key: string }) => {
@@ -33,6 +34,9 @@ function ClaimPage() {
     onSuccess: (data) => {
       setResponse(data)
       setStep('success')
+      // The QR encodes the same client config the user downloads — rendered
+      // in the browser (the API has no QR-image endpoint).
+      void QRCode.toDataURL(data.config, { width: 320, margin: 1 }).then(setQrDataUrl)
     },
   })
 
@@ -116,7 +120,13 @@ function ClaimPage() {
             <div>
               <h3 className="text-sm font-medium text-zinc-400 mb-2">Scan QR Code</h3>
               <div className="bg-white p-4 rounded-lg inline-block mx-auto block">
-                <img src={response.qr_code_url} alt="QR Code" className="w-48 h-48" />
+                {qrDataUrl ? (
+                  <img src={qrDataUrl} alt="WireGuard config QR code" className="w-48 h-48" />
+                ) : (
+                  <div className="w-48 h-48 flex items-center justify-center text-zinc-400 text-sm">
+                    Generating…
+                  </div>
+                )}
               </div>
               <p className="text-zinc-400 text-sm mt-2 text-center">
                 Scan with WireGuard app on iOS or Android

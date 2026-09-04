@@ -58,51 +58,35 @@ func (c *Client) do(ctx context.Context, method, path string, body interface{}) 
 }
 
 // ReplaceUserRules atomically replaces AdGuard's custom user rules.
+//
+// The correct endpoint is POST /control/filtering/set_rules with
+// {"rules": [...]}. POST /control/filtering/config does NOT apply user_rules
+// in AdGuard Home v0.107.x — its handler only reads `enabled` and `interval`
+// and silently ignores everything else, so round-tripping the filtering
+// status through /filtering/config made sync "succeed" while no rule ever
+// took effect.
 func (c *Client) ReplaceUserRules(ctx context.Context, rules []string) error {
-	// Read current config so we preserve enabled/interval/filters.
-	resp, err := c.do(ctx, "GET", "/control/filtering/status", nil)
+	reqBody := map[string]interface{}{"rules": rules}
+	resp, err := c.do(ctx, "POST", "/control/filtering/set_rules", reqBody)
 	if err != nil {
-		return fmt.Errorf("read filtering status: %w", err)
+		return fmt.Errorf("set user rules: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("adguard filtering status %d: %s", resp.StatusCode, body)
-	}
-	var status struct {
-		Enabled         bool          `json:"enabled"`
-		Interval        int           `json:"interval"`
-		Filters         []interface{} `json:"filters"`
-		WhitelistFilter []interface{} `json:"whitelist_filters"`
-		UserRules       []string      `json:"user_rules"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
-		return fmt.Errorf("decode filtering status: %w", err)
-	}
-
-	status.UserRules = rules
-	cfg := map[string]interface{}{
-		"enabled":           status.Enabled,
-		"interval":          status.Interval,
-		"filters":           status.Filters,
-		"whitelist_filters": status.WhitelistFilter,
-		"user_rules":        status.UserRules,
-	}
-
-	resp2, err := c.do(ctx, "POST", "/control/filtering/config", cfg)
-	if err != nil {
-		return fmt.Errorf("set user rules: %w", err)
-	}
-	defer resp2.Body.Close()
-	if resp2.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp2.Body)
-		return fmt.Errorf("adguard filtering config %d: %s", resp2.StatusCode, body)
+		return fmt.Errorf("adguard filtering set_rules %d: %s", resp.StatusCode, body)
 	}
 	return nil
 }
 
 // EnsureCustomBlockingMode switches AdGuard to return a custom IP for
 // blocked domains (so an HTTP listener there can show a branded page).
+//
+// Only the blocking fields are sent: AGH's /control/dns_config applies each
+// provided field independently, so a GET→POST round-trip of the full config
+// is both unnecessary and destructive (non-pointer fields like blocking_ipv4
+// would reset unrelated settings, e.g. disable EDNS/DNSSEC or clear the
+// cache). A read first avoids an unnecessary write when already configured.
 func (c *Client) EnsureCustomBlockingMode(ctx context.Context, ipv4 string) error {
 	resp, err := c.do(ctx, "GET", "/control/dns_config", nil)
 	if err != nil {
@@ -114,19 +98,8 @@ func (c *Client) EnsureCustomBlockingMode(ctx context.Context, ipv4 string) erro
 		return fmt.Errorf("adguard dns_config %d: %s", resp.StatusCode, body)
 	}
 	var cfg struct {
-		Upstreams          []string `json:"upstream_dns"`
-		BootstrapDNS       []string `json:"bootstrap_dns"`
-		FallbackDNS        []string `json:"fallback_dns"`
-		UpstreamMode       string   `json:"upstream_mode"`
-		RateLimit          int      `json:"ratelimit"`
-		BlockingMode       string   `json:"blocking_mode"`
-		BlockingIPv4       string   `json:"blocking_ipv4"`
-		BlockingIPv6       string   `json:"blocking_ipv6"`
-		BlockedResponseTTL int      `json:"blocked_response_ttl"`
-		EDNSCSEnabled      bool     `json:"edns_cs_enabled"`
-		DNSSECEnabled      bool     `json:"dnssec_enabled"`
-		DisableIPv6        bool     `json:"disable_ipv6"`
-		UpstreamDNSFile    bool     `json:"upstream_dns_file"`
+		BlockingMode string `json:"blocking_mode"`
+		BlockingIPv4 string `json:"blocking_ipv4"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&cfg); err != nil {
 		return fmt.Errorf("decode dns config: %w", err)
@@ -134,20 +107,20 @@ func (c *Client) EnsureCustomBlockingMode(ctx context.Context, ipv4 string) erro
 	if cfg.BlockingMode == "custom_ip" && cfg.BlockingIPv4 == ipv4 {
 		return nil // already configured
 	}
-	cfg.BlockingMode = "custom_ip"
-	cfg.BlockingIPv4 = ipv4
-	if cfg.BlockingIPv6 == "" {
-		cfg.BlockingIPv6 = "::"
-	}
 
-	resp2, err := c.do(ctx, "POST", "/control/dns_config", cfg)
+	body := map[string]interface{}{
+		"blocking_mode": "custom_ip",
+		"blocking_ipv4": ipv4,
+		"blocking_ipv6": "::",
+	}
+	resp2, err := c.do(ctx, "POST", "/control/dns_config", body)
 	if err != nil {
 		return fmt.Errorf("set blocking mode: %w", err)
 	}
 	defer resp2.Body.Close()
 	if resp2.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp2.Body)
-		return fmt.Errorf("adguard dns_config set %d: %s", resp2.StatusCode, body)
+		body2, _ := io.ReadAll(resp2.Body)
+		return fmt.Errorf("adguard dns_config set %d: %s", resp2.StatusCode, body2)
 	}
 	return nil
 }

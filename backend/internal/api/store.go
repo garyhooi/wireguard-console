@@ -525,7 +525,6 @@ func Setup2FA(store *Store) http.HandlerFunc {
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"secret":      totp.Secret(),
 			"otpauth_url": totp.URL(),
-			"qr_code_url": totp.URL(),
 		})
 	}
 }

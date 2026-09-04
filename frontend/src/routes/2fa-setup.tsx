@@ -1,12 +1,12 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
+import QRCode from 'qrcode'
 import { PrimaryButton, inputCls, labelCls } from '../lib/ui'
 
 interface TOTPSetupResponse {
   secret: string
   otpauth_url: string
-  qr_code_url: string
 }
 
 interface Enable2FAResponse {
@@ -27,6 +27,7 @@ export const Route = createFileRoute('/2fa-setup')({
 function Setup2FAPage() {
   const [step, setStep] = useState<'setup' | 'verify' | 'complete'>('setup')
   const [totpData, setTotpData] = useState<TOTPSetupResponse | null>(null)
+  const [qrDataUrl, setQrDataUrl] = useState('')
   const [code, setCode] = useState('')
   const [backupCodes, setBackupCodes] = useState<string[]>([])
 
@@ -42,6 +43,9 @@ function Setup2FAPage() {
     onSuccess: (data) => {
       setTotpData(data)
       setStep('verify')
+      // The otpauth:// URI encodes the secret; render the QR in the browser
+      // so the authenticator app can scan it.
+      void QRCode.toDataURL(data.otpauth_url, { width: 320, margin: 1 }).then(setQrDataUrl)
     },
   })
 
@@ -98,7 +102,13 @@ function Setup2FAPage() {
             <div className="mb-6">
               <h2 className="text-base font-semibold text-zinc-100 mb-4">Scan QR Code</h2>
               <div className="bg-white p-4 rounded-lg inline-block">
-                <img src={totpData.qr_code_url} alt="QR Code" className="w-48 h-48" />
+                {qrDataUrl ? (
+                  <img src={qrDataUrl} alt="TOTP setup QR code" className="w-48 h-48" />
+                ) : (
+                  <div className="w-48 h-48 flex items-center justify-center text-zinc-400 text-sm">
+                    Generating…
+                  </div>
+                )}
               </div>
               <p className="text-zinc-400 text-sm mt-4">
                 Or enter this key manually in your authenticator app: <br />
