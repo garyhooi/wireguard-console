@@ -15,6 +15,11 @@ A self-hosted, production-grade web console for issuing, monitoring, and revokin
   (each node runs wg-helper in agent mode; setup is a one-liner)
 - **Domain blocking** — global and per-user DNS filtering via AdGuard Home,
   with an editable branded block page (Caddy catch-all)
+- **Web Activity** — per-VPN-user / per-peer browsing history imported from
+  AdGuard's query log, with allowed/blocked flags, domain search + date range,
+  CSV export, and top-10 domain panels (allowed + blocked attempts) on the
+  Statistics page; super admins can purge history, and a nightly worker keeps
+  only the retention window (default 30 days) to bound storage
 - **Email templates** — editable invite / peer-config / admin-invite emails
   (CMS in Configuration), sent when SMTP is configured
 - **Traffic usage reports** — per peer or per VPN user within any date range,
@@ -149,6 +154,26 @@ automatically by the installer. Peers use the tunnel gateway
   Rules** page shows live AdGuard health (reachable / synced / missing
   rules) so a silent failure is visible instead of a mystery.
 
+#### Web Activity (what each user browsed)
+
+AdGuard's query log is also the source for **Monitoring → Web Activity**:
+a worker imports every DNS query made by a tunnel peer into the console DB
+every 30 seconds, tagged with the owning VPN user and peer, the domain, and
+whether AdGuard blocked it (`FilteredBlackList`, parental, blocked service,
+…). You can:
+
+- Browse activity **by VPN user or by peer**, filtered by date range,
+  status (all / allowed / blocked) and a domain search, with CSV export.
+- See **Statistics → Top domains browsed** and **Top blocked-domain
+  attempts** (the 10 most-resolved domains and the 10 most-refused
+  domains across all users, last 7 days).
+- Keep storage bounded: the worker purges records older than
+  `BROWSE_RETENTION_DAYS` (default 30) every night, and **super admins**
+  can purge immediately from the Web Activity page's Housekeeping panel.
+
+Only *domain names* are visible — WireGuard encrypts full URLs and page
+content, so the console never sees paths, queries, or page text.
+
 **Note:** a handful of HSTS-preloaded domains (e.g. `google.com`) make the
 browser refuse to proceed past the self-signed warning entirely — the
 connection is still blocked (that is the protection), it just won't render
@@ -243,10 +268,10 @@ wireguard-console/
 │   │   ├── db/        # Database models and queries
 │   │   ├── email/     # Mail queue + worker
 │   │   ├── adguard/   # AdGuard Home /control API client
-│   │   └── worker/    # Traffic sampler, rollup, mail worker
+│   │   └── worker/    # Traffic sampler, rollup, mail, browse (web-activity import)
 │   ├── cmd/api/       # API entrypoint (migrations + admin bootstrap)
 │   ├── cmd/aghenc/    # bcrypt helper for the AdGuard config
-│   ├── migrations/    # SQL migrations (001-008)
+│   ├── migrations/    # SQL migrations (001-011)
 │   ├── e2e/           # End-to-end tests (boot the real API + Postgres)
 │   └── Dockerfile
 ├── frontend/          # React SPA (served by Caddy + TLS in one container)
@@ -353,7 +378,7 @@ Backups only live on the console's Docker volume — copy them off the server re
 
 ## License
 
-[MIT](LICENSE) — © 2026 Gary Hooi. See the `LICENSE` file for the full text.
+Licensed under the [Apache License, Version 2.0](LICENSE) — © 2026 Gary Hooi. See the `LICENSE` file for the full text.
 
 ## Documentation
 

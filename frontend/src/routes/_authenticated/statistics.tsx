@@ -43,6 +43,12 @@ interface TrafficResponse {
   top: { name: string; rx: number; tx: number }[]
 }
 
+interface TopDomainsResponse {
+  days: number
+  allowed: { domain: string; count: number }[]
+  blocked: { domain: string; count: number }[]
+}
+
 interface Peer {
   id: string
   name: string
@@ -98,6 +104,56 @@ const chartTooltipStyle = {
   fontSize: '12px',
 }
 
+// Ranked list of domains with counts (top-10 panel).
+function DomainRankList({
+  items,
+  tone,
+  emptyHint,
+}: {
+  items?: { domain: string; count: number }[]
+  tone: 'allowed' | 'blocked'
+  emptyHint: string
+}) {
+  const list = items ?? []
+  const max = list.length ? list[0].count : 1
+  return (
+    <div className="p-4">
+      {list.length === 0 ? (
+        <p className="text-sm text-zinc-500 px-2 py-8 text-center">{emptyHint}</p>
+      ) : (
+        <ul className="divide-y divide-zinc-800/50">
+          {list.map((d, i) => {
+            const pct = Math.max(4, Math.round((d.count / max) * 100))
+            return (
+              <li key={d.domain} className="flex items-center gap-3 px-1 py-2">
+                <span className="w-5 text-right text-xs text-zinc-600 font-mono tabular-nums">
+                  {i + 1}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-baseline justify-between gap-3">
+                    <span className="text-sm text-zinc-200 font-mono truncate">{d.domain}</span>
+                    <span className="text-xs text-zinc-500 font-mono tabular-nums shrink-0">
+                      {d.count.toLocaleString()}
+                    </span>
+                  </div>
+                  <div className="mt-1 h-1 rounded-full bg-zinc-800 overflow-hidden">
+                    <div
+                      className={`h-full rounded-full ${
+                        tone === 'allowed' ? 'bg-teal-500/70' : 'bg-red-500/70'
+                      }`}
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                </div>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 function StatisticsPage() {
   const { data: overview, isLoading } = useQuery<Overview>({
     queryKey: ['stats'],
@@ -117,6 +173,18 @@ function StatisticsPage() {
       return res.json()
     },
     refetchInterval: 30000,
+  })
+
+  // Top domains browsed (allowed) and blocked-domain attempts over the last
+  // 7 days, from the AdGuard query-log import (web-activity records).
+  const { data: topDomains } = useQuery<TopDomainsResponse>({
+    queryKey: ['web-activity-top-domains', 7],
+    queryFn: async () => {
+      const res = await fetch('/api/web-activity/top-domains?days=7', { headers: auth })
+      if (!res.ok) throw new Error('Failed to fetch top domains')
+      return res.json()
+    },
+    refetchInterval: 60000,
   })
 
   const [usageScope, setUsageScope] = useState<'user' | 'peer'>('user')
@@ -205,6 +273,30 @@ function StatisticsPage() {
           />
         </div>
       </Panel>
+
+      {/* Top domains (allowed + blocked attempts) · last 7 days */}
+      <div className="mt-8 grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <Panel
+          title="Top domains browsed · last 7 days"
+          description="Most-resolved domains (allowed by the DNS filter), across all VPN users."
+        >
+          <DomainRankList
+            items={topDomains?.allowed}
+            tone="allowed"
+            emptyHint="No allowed lookups recorded yet — browsing records appear once peers pass DNS through the tunnel filter."
+          />
+        </Panel>
+        <Panel
+          title="Blocked domain attempts · last 7 days"
+          description="Domains users tried to reach that the DNS filter refused (across all VPN users)."
+        >
+          <DomainRankList
+            items={topDomains?.blocked}
+            tone="blocked"
+            emptyHint="No blocked-domain attempts recorded yet. Add domain rules on the Domain Blocking page and blocked lookups will surface here."
+          />
+        </Panel>
+      </div>
 
       {/* Charts */}
       <div className="mt-8 grid grid-cols-1 lg:grid-cols-2 gap-6">

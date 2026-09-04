@@ -16,6 +16,7 @@ import {
   IconShieldLock,
   IconUsers,
   IconUserShield,
+  IconWorld,
   IconX,
 } from '@tabler/icons-react'
 
@@ -45,6 +46,7 @@ const NAV: NavGroup[] = [
     items: [
       { label: 'Dashboard', to: '/dashboard', icon: IconLayoutDashboard },
       { label: 'Statistics', to: '/statistics', icon: IconChartBar },
+      { label: 'Web Activity', to: '/web-activity', icon: IconWorld },
       { label: 'Audit Log', to: '/audit-log', icon: IconHistory },
     ],
   },

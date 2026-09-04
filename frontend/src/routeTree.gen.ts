@@ -26,6 +26,7 @@ import { Route as AuthenticatedProfileRouteImport } from './routes/_authenticate
 import { Route as AuthenticatedServersRouteImport } from './routes/_authenticated/servers'
 import { Route as AuthenticatedStatisticsRouteImport } from './routes/_authenticated/statistics'
 import { Route as AuthenticatedUsersRouteImport } from './routes/_authenticated/users'
+import { Route as AuthenticatedWebActivityRouteImport } from './routes/_authenticated/web-activity'
 import { Route as ClaimTokenRouteImport } from './routes/claim.$token'
 import { Route as PeerTokenRouteImport } from './routes/peer.$token'
 
@@ -114,6 +115,12 @@ const AuthenticatedUsersRoute = AuthenticatedUsersRouteImport.update({
   path: '/users',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
+const AuthenticatedWebActivityRoute =
+  AuthenticatedWebActivityRouteImport.update({
+    id: '/web-activity',
+    path: '/web-activity',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
 const ClaimTokenRoute = ClaimTokenRouteImport.update({
   id: '/claim/$token',
   path: '/claim/$token',
@@ -142,6 +149,7 @@ export interface FileRoutesByFullPath {
   '/servers': typeof AuthenticatedServersRoute
   '/statistics': typeof AuthenticatedStatisticsRoute
   '/users': typeof AuthenticatedUsersRoute
+  '/web-activity': typeof AuthenticatedWebActivityRoute
   '/claim/$token': typeof ClaimTokenRoute
   '/peer/$token': typeof PeerTokenRoute
 }
@@ -162,6 +170,7 @@ export interface FileRoutesByTo {
   '/servers': typeof AuthenticatedServersRoute
   '/statistics': typeof AuthenticatedStatisticsRoute
   '/users': typeof AuthenticatedUsersRoute
+  '/web-activity': typeof AuthenticatedWebActivityRoute
   '/claim/$token': typeof ClaimTokenRoute
   '/peer/$token': typeof PeerTokenRoute
 }
@@ -184,6 +193,7 @@ export interface FileRoutesById {
   '/_authenticated/servers': typeof AuthenticatedServersRoute
   '/_authenticated/statistics': typeof AuthenticatedStatisticsRoute
   '/_authenticated/users': typeof AuthenticatedUsersRoute
+  '/_authenticated/web-activity': typeof AuthenticatedWebActivityRoute
   '/claim/$token': typeof ClaimTokenRoute
   '/peer/$token': typeof PeerTokenRoute
 }
@@ -206,6 +216,7 @@ export interface FileRouteTypes {
     | '/servers'
     | '/statistics'
     | '/users'
+    | '/web-activity'
     | '/claim/$token'
     | '/peer/$token'
   fileRoutesByTo: FileRoutesByTo
@@ -226,6 +237,7 @@ export interface FileRouteTypes {
     | '/servers'
     | '/statistics'
     | '/users'
+    | '/web-activity'
     | '/claim/$token'
     | '/peer/$token'
   id:
@@ -247,6 +259,7 @@ export interface FileRouteTypes {
     | '/_authenticated/servers'
     | '/_authenticated/statistics'
     | '/_authenticated/users'
+    | '/_authenticated/web-activity'
     | '/claim/$token'
     | '/peer/$token'
   fileRoutesById: FileRoutesById
@@ -382,6 +395,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedUsersRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
+    '/_authenticated/web-activity': {
+      id: '/_authenticated/web-activity'
+      path: '/web-activity'
+      fullPath: '/web-activity'
+      preLoaderRoute: typeof AuthenticatedWebActivityRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
     '/claim/$token': {
       id: '/claim/$token'
       path: '/claim/$token'
@@ -412,6 +432,7 @@ interface AuthenticatedRouteChildren {
   AuthenticatedServersRoute: typeof AuthenticatedServersRoute
   AuthenticatedStatisticsRoute: typeof AuthenticatedStatisticsRoute
   AuthenticatedUsersRoute: typeof AuthenticatedUsersRoute
+  AuthenticatedWebActivityRoute: typeof AuthenticatedWebActivityRoute
 }
 
 const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
@@ -427,6 +448,7 @@ const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedServersRoute: AuthenticatedServersRoute,
   AuthenticatedStatisticsRoute: AuthenticatedStatisticsRoute,
   AuthenticatedUsersRoute: AuthenticatedUsersRoute,
+  AuthenticatedWebActivityRoute: AuthenticatedWebActivityRoute,
 }
 
 const AuthenticatedRouteWithChildren = AuthenticatedRoute._addFileChildren(

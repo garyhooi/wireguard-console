@@ -71,6 +71,9 @@ func main() {
 	// Reconcile DB rules into AdGuard periodically so rules can't silently
 	// drift (AGH re-provision, manual AGH edits, partial failed syncs).
 	go worker.NewDomainRuleWorker(conn.Pool(), 5*time.Minute).Start(ctx)
+	// Import AdGuard Home's DNS query log into browsing_records so the Web
+	// Activity page and domain statistics have data (see worker/browse.go).
+	go worker.NewBrowseWorker(conn.Pool()).Start(ctx)
 
 	// Repush persisted domain-block rules into AdGuard Home. A server reset /
 	// redeploy provisions AdGuard with a clean config (empty user_rules), so
@@ -129,6 +132,10 @@ func main() {
 				r.Post("/admins/{id}/reset-password", api.ResetAdminPassword(store))
 				// Audit-log housekeeping — super_admin only.
 				r.Delete("/audit-logs", api.PurgeAuditLogs(store))
+				// Web-activity housekeeping — super_admin only (raw browsing
+				// records grow with peer traffic; nightly auto-purge keeps the
+				// retention window, this allows an immediate manual cleanup).
+				r.Delete("/web-activity", api.PurgeWebActivity(store))
 			})
 
 			// User and peer management - admin and super_admin
@@ -174,6 +181,12 @@ func main() {
 				r.Post("/domain-rules", api.CreateDomainRule(store))
 				r.Delete("/domain-rules/{id}", api.DeleteDomainRule(store))
 				r.Get("/domain-rules/status", api.DomainRuleSyncStatus(store))
+
+				// Web activity (per-peer DNS browsing history). Records are
+				// imported from AdGuard Home by the browse worker.
+				r.Get("/web-activity", api.ListWebActivity(store))
+				r.Get("/web-activity/summary", api.GetWebActivitySummary(store))
+				r.Get("/web-activity/top-domains", api.GetTopDomains(store))
 
 				r.Get("/stats/overview", api.GetStatsOverview(store))
 				r.Get("/stats/traffic", api.GetTrafficStats(store))

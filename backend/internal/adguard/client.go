@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
+	"time"
 )
 
 // Client talks to AdGuard Home's /control API. AdGuard Home authenticates
@@ -136,6 +138,71 @@ func (c *Client) Ping(ctx context.Context) error {
 		return fmt.Errorf("adguard status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// QueryLogEntry is one DNS query as recorded by AdGuard Home. Only the fields
+// the console needs to build per-peer browsing records are decoded.
+type QueryLogEntry struct {
+	// Time is when the DNS request was processed (RFC3339Nano, AGH clock).
+	Time string `json:"time"`
+	// Client is the source IP — for tunnel clients this is the peer's
+	// tunnel IP (10.x.y.z), which is how records are attributed to peers.
+	Client string `json:"client"`
+	// Question is the DNS question block: {"name": "...", "type": "A", ...}.
+	Question struct {
+		Name string `json:"name"`
+	} `json:"question"`
+	// Reason is the AdGuard filtering reason (e.g. "FilteredBlackList").
+	Reason string `json:"reason"`
+	// Rule is the first rule that matched (populated when filtered).
+	Rule string `json:"rule"`
+	// Cached marks responses served from AdGuard's cache.
+	Cached bool `json:"cached"`
+}
+
+// IsBlocked reports whether an AGH reason means the query was filtered out
+// (i.e. the client did NOT reach the domain). Anything else — including
+// NotFiltered*, Rewrite and RewriteEtcHosts/Registry, and empty reasons from
+// older versions — counts as an allowed/processed query.
+func (e QueryLogEntry) IsBlocked() bool {
+	switch e.Reason {
+	case "FilteredBlackList",
+		"FilteredSafeBrowsing",
+		"FilteredParental",
+		"FilteredInvalid",
+		"FilteredSafeSearch",
+		"FilteredBlockedService":
+		return true
+	}
+	return false
+}
+
+// GetQueryLog fetches up to limit query-log entries, newest first. When
+// olderThan is non-zero only entries strictly older than that instant are
+// returned (AdGuard pagination semantics), so the worker walks history back
+// page by page with limit entries per call.
+func (c *Client) GetQueryLog(ctx context.Context, olderThan time.Time, limit int) ([]QueryLogEntry, error) {
+	q := url.Values{}
+	q.Set("limit", fmt.Sprintf("%d", limit))
+	if !olderThan.IsZero() {
+		q.Set("older_than", olderThan.Format(time.RFC3339Nano))
+	}
+	resp, err := c.do(ctx, "GET", "/control/querylog?"+q.Encode(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("querylog request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("adguard querylog %d: %s", resp.StatusCode, body)
+	}
+	var out struct {
+		Data []QueryLogEntry `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode querylog: %w", err)
+	}
+	return out.Data, nil
 }
 
 // Status describes AdGuard Home's live filtering state, used by the console
