@@ -324,6 +324,12 @@ function ServersPage() {
                   onChange={set('dns_servers')}
                   className="w-full bg-neutral-800 border border-neutral-700 rounded-md px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
                 />
+                <p className="text-xs text-neutral-500 mt-2">
+                  Leave empty to use the tunnel gateway (e.g. 10.8.0.1) — required for domain
+                  filtering: AdGuard Home listens there and every peer DNS lookup passes the
+                  filter. If you enter a public DNS (e.g. 1.1.1.1, 8.8.8.8), peers bypass AdGuard
+                  and domain blocking won't apply to this server's peers.
+                </p>
               </div>
               <div className="flex space-x-3">
                 <button
