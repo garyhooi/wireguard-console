@@ -3,6 +3,7 @@ import { apiJson } from '../../lib/api'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { IconShieldLock } from '@tabler/icons-react'
+import { ActiveSessions } from '../../components/ActiveSessions'
 import {
   Badge,
   GhostButton,
@@ -212,6 +213,10 @@ function ProfilePage() {
           </Panel>
         </div>
       )}
+
+      <div className="mt-6">
+        <ActiveSessions />
+      </div>
     </div>
   )
 }

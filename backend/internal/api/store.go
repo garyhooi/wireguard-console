@@ -440,8 +440,10 @@ func Logout(store *Store) http.HandlerFunc {
 
 // AuthMiddleware authenticates a request from the session cookie (primary)
 // or, during the localStorage→cookie transition only, the legacy
-// Authorization header (AUTH_ACCEPT_HEADER=1). It resolves the admin and
-// loads the session's CSRF token into the request context.
+// Authorization header (AUTH_ACCEPT_HEADER=1). It resolves the admin, loads
+// the session's CSRF token + row id, enforces the idle timeout, and writes
+// last_seen_at throttled (at most once a minute per session) so the Active
+// Sessions panel shows real activity without hammering the DB per request.
 func AuthMiddleware(store *Store) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -461,23 +463,55 @@ func AuthMiddleware(store *Store) func(http.Handler) http.Handler {
 			var (
 				adminID   uuid.UUID
 				csrfToken string
+				sessionID uuid.UUID
+				lastSeen  *time.Time
 			)
 			err := store.pool.QueryRow(ctx, `
-				SELECT admin_id, csrf_token FROM admin_sessions 
-				WHERE token_hash = $1 AND expires_at > now()
-			`, hashToken(token)).Scan(&adminID, &csrfToken)
+				SELECT s.admin_id, s.csrf_token, s.id, s.last_seen_at
+				FROM admin_sessions s
+				WHERE s.token_hash = $1 AND s.expires_at > now()
+			`, hashToken(token)).Scan(&adminID, &csrfToken, &sessionID, &lastSeen)
 
 			if err != nil {
 				writeError(w, http.StatusUnauthorized, "Invalid or expired session")
 				return
 			}
 
+			// Idle timeout: reject sessions that have been inactive for
+			// longer than the configured window (default 30 min; 0 disables).
+			if timeout := idleTimeout(); timeout > 0 {
+				if lastSeen != nil && time.Since(*lastSeen) > timeout {
+					// Idle-expired: drop the row so a retry with the same
+					// cookie gets a clean 401, and clear the cookie so the
+					// browser stops replaying it.
+					store.pool.Exec(ctx, `DELETE FROM admin_sessions WHERE id = $1`, sessionID)
+					clearSessionCookie(w, r, sessionCookieName)
+					writeError(w, http.StatusUnauthorized, "Session timed out due to inactivity")
+					return
+				}
+			}
+
+			// Throttled last_seen_at write (≤1/min). A null last_seen_at
+			// (pre-Phase-B rows) always counts as fresh and gets stamped.
+			if lastSeen == nil || time.Since(*lastSeen) >= time.Minute {
+				store.pool.Exec(ctx, `
+					UPDATE admin_sessions SET last_seen_at = now() WHERE id = $1
+				`, sessionID)
+			}
+
 			ctx = context.WithValue(ctx, adminIDKey{}, adminID)
 			ctx = context.WithValue(ctx, csrfTokenKey{}, csrfToken)
 			ctx = context.WithValue(ctx, viaHeaderKey{}, viaHeader)
+			ctx = context.WithValue(ctx, sessionRowIDKey{}, sessionID)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// getSessionRowID returns the acting session's admin_sessions row id.
+func getSessionRowID(r *http.Request) uuid.UUID {
+	id, _ := r.Context().Value(sessionRowIDKey{}).(uuid.UUID)
+	return id
 }
 
 // RequireCSRF rejects state-changing requests that do not carry the session's

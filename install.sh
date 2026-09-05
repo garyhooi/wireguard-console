@@ -477,6 +477,12 @@ ADMIN_PASSWORD='${FIRST_ADMIN_PASSWORD}'
 # Remove this line (and re-run) once the cookie-only frontend is proven.
 AUTH_ACCEPT_HEADER=1
 
+# --- Session lifecycle ---
+# Sessions idle longer than this are rejected (0 disables; the absolute
+# 24h expiry always applies). Profile → Active Sessions can revoke live
+# sessions manually.
+SESSION_IDLE_MINUTES=30
+
 # --- Optional: SMTP for user/admin invite emails ---
 # Configurable later from Configuration → Email in the console itself.
 SMTP_HOST=

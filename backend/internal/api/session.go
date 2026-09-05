@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,11 +18,13 @@ import (
 var uuidNil = uuid.Nil
 
 // Typed context keys (unexported) carrying per-request auth state populated
-// by AuthMiddleware: resolved admin id, the session's CSRF token, and
-// whether the request authenticated via the (transition-only) header.
+// by AuthMiddleware: resolved admin id, the session's CSRF token, whether
+// the request authenticated via the (transition-only) header, and the acting
+// admin_sessions row id (for the Active Sessions UI).
 type adminIDKey struct{}
 type csrfTokenKey struct{}
 type viaHeaderKey struct{}
+type sessionRowIDKey struct{}
 
 // Session cookie names. The token value is the same opaque 32-byte hex the
 // API used to return in JSON — only the transport changes (HttpOnly cookie
@@ -33,11 +36,30 @@ const (
 	sessionLifetime = 24 * time.Hour
 	pending2FALife  = 10 * time.Minute
 
+	// Idle timeout: a session whose last activity is older than this is
+	// rejected even though its absolute expiry has not been reached.
+	// Overridable via SESSION_IDLE_MINUTES (0 disables the idle check).
+	defaultIdleMinutes = 30
+
 	// Legacy transition: accept the old Authorization header too while the
 	// cookie-only frontend rolls out (AUTH_ACCEPT_HEADER=1). Remove after
 	// cutover — never rely on the header as the long-term transport.
 	envAcceptLegacyHeader = "AUTH_ACCEPT_HEADER"
 )
+
+// idleTimeout returns the configured session idle timeout. SESSION_IDLE_MINUTES
+// unset/empty → default 30m; "0" → no idle limit (absolute expiry only).
+func idleTimeout() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("SESSION_IDLE_MINUTES"))
+	if raw == "" {
+		return defaultIdleMinutes * time.Minute
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return time.Duration(n) * time.Minute
+}
 
 // acceptLegacyHeader reports whether the Authorization-header transport is
 // still honored during the localStorage→cookie migration window.
@@ -163,4 +185,57 @@ func revokeAdminSessionsExcept(ctx context.Context, store *Store, adminID uuid.U
 		DELETE FROM admin_sessions WHERE admin_id = $1 AND token_hash <> $2
 	`, adminID, keepTokenHash)
 	return err
+}
+
+// SessionView is the Active Sessions UI row: the session's own row id
+// (revoke target), device/user-agent label, ip, created/last-seen/expiry.
+type SessionView struct {
+	ID          uuid.UUID  `json:"id"`
+	IPAddress   *string    `json:"ip_address"`
+	UserAgent   string     `json:"user_agent"`
+	CreatedAt   time.Time  `json:"created_at"`
+	LastSeenAt  *time.Time `json:"last_seen_at"`
+	ExpiresAt   time.Time  `json:"expires_at"`
+	IsCurrent   bool       `json:"is_current"`
+	IsPending2F bool       `json:"is_pending_2fa"` // 10-min login attempt, not a full session
+}
+
+// listAdminSessions returns every live session row for an admin (used by the
+// Profile → Active Sessions panel). Live = not past absolute expiry. A row is
+// a pending-2FA login attempt when it carries no csrf_token (see
+// createSession: only full sessions get one).
+func listAdminSessions(ctx context.Context, store *Store, adminID uuid.UUID, currentHash string) ([]SessionView, error) {
+	rows, err := store.pool.Query(ctx, `
+		SELECT id, ip_address::text, COALESCE(user_agent, ''), created_at, last_seen_at, expires_at,
+		       (token_hash = $2) AS is_current, (csrf_token IS NULL) AS is_pending_2fa
+		FROM admin_sessions
+		WHERE admin_id = $1 AND expires_at > now()
+		ORDER BY created_at DESC
+	`, adminID, currentHash)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []SessionView{}
+	for rows.Next() {
+		var s SessionView
+		if err := rows.Scan(&s.ID, &s.IPAddress, &s.UserAgent, &s.CreatedAt, &s.LastSeenAt, &s.ExpiresAt, &s.IsCurrent, &s.IsPending2F); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// revokeAdminSession deletes one session row, but only if it belongs to the
+// given admin. Returns (false, nil) when no such row exists (already gone).
+func revokeAdminSession(ctx context.Context, store *Store, adminID, sessionID uuid.UUID) (bool, error) {
+	tag, err := store.pool.Exec(ctx, `
+		DELETE FROM admin_sessions WHERE id = $1 AND admin_id = $2
+	`, sessionID, adminID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }

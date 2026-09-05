@@ -146,3 +146,80 @@ func Disable2FA(store *Store) http.HandlerFunc {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "disabled"})
 	}
 }
+
+// ListMySessions returns the signed-in admin's live sessions (Profile →
+// Active Sessions), each flagged is_current / is_pending_2fa.
+func ListMySessions(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		adminID := getAdminID(r)
+		ctx := context.Background()
+
+		sessions, err := listAdminSessions(ctx, store, adminID, currentSessionTokenHash(r))
+		if err != nil {
+			log.Printf("Failed to list sessions: admin_id=%s, err=%v", adminID, err)
+			writeError(w, http.StatusInternalServerError, "Failed to list sessions")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"sessions": sessions})
+	}
+}
+
+// RevokeMySession terminates one of the signed-in admin's own sessions.
+// The acting session may not revoke itself through this endpoint (that is
+// what logout is for); trying to revoke the current session returns 400.
+// Revoking a pending-2FA login attempt is allowed — it aborts that sign-in.
+func RevokeMySession(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sessionID, err := parseUUID(r.PathValue("id"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "Invalid session ID")
+			return
+		}
+
+		adminID := getAdminID(r)
+		ctx := context.Background()
+
+		if sessionID == getSessionRowID(r) {
+			writeError(w, http.StatusBadRequest, "Cannot revoke the current session — use Sign out instead")
+			return
+		}
+
+		removed, err := revokeAdminSession(ctx, store, adminID, sessionID)
+		if err != nil {
+			log.Printf("Failed to revoke session: admin_id=%s session=%s err=%v", adminID, sessionID, err)
+			writeError(w, http.StatusInternalServerError, "Failed to revoke session")
+			return
+		}
+		if !removed {
+			writeError(w, http.StatusNotFound, "Session not found")
+			return
+		}
+
+		logAudit(ctx, store, adminID, "session.revoke", "session", sessionID.String(), nil)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
+	}
+}
+
+// RevokeMyOtherSessions signs out every one of the admin's sessions except
+// the current one ("Sign out elsewhere"). Returns the count revoked.
+func RevokeMyOtherSessions(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		adminID := getAdminID(r)
+		ctx := context.Background()
+		currentHash := currentSessionTokenHash(r)
+
+		var before int
+		store.pool.QueryRow(ctx, `
+			SELECT count(*) FROM admin_sessions WHERE admin_id = $1 AND expires_at > now() AND token_hash <> $2
+		`, adminID, currentHash).Scan(&before)
+
+		if err := revokeAdminSessionsExcept(ctx, store, adminID, currentHash); err != nil {
+			log.Printf("Failed to revoke other sessions: admin_id=%s, err=%v", adminID, err)
+			writeError(w, http.StatusInternalServerError, "Failed to revoke other sessions")
+			return
+		}
+
+		logAudit(ctx, store, adminID, "session.revoke_others", "admin", adminID.String(), map[string]int{"revoked": before})
+		writeJSON(w, http.StatusOK, map[string]int{"revoked": before})
+	}
+}

@@ -1356,3 +1356,122 @@ func seedTraffic(dbURL, peerID string, rx, tx int64) error {
 	}
 	return nil
 }
+
+// listSessionsOut extracts the sessions array from a {sessions:[...]} body.
+func listSessionsOut(t *testing.T, out map[string]interface{}) []map[string]interface{} {
+	t.Helper()
+	arr, _ := out["sessions"].([]interface{})
+	res := make([]map[string]interface{}, 0, len(arr))
+	for _, it := range arr {
+		m, ok := it.(map[string]interface{})
+		if !ok {
+			t.Fatalf("session row not an object: %T", it)
+		}
+		res = append(res, m)
+	}
+	return res
+}
+
+func sessionCount(out map[string]interface{}) int {
+	arr, _ := out["sessions"].([]interface{})
+	return len(arr)
+}
+
+// ageSessionLastSeen rewrites a session row's last_seen_at into the past so
+// the idle-timeout path (SESSION_IDLE_MINUTES, default 30) can be exercised
+// without restarting the API.
+func ageSessionLastSeen(dbURL, sessionRowID string, d time.Duration) {
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		fmt.Println("ageSessionLastSeen connect:", err)
+		os.Exit(1)
+	}
+	defer pool.Close()
+	pool.Exec(ctx, `
+		UPDATE admin_sessions SET last_seen_at = now() - $1::interval WHERE id = $2
+	`, d.String(), sessionRowID)
+}
+
+// TestSessionLifecycle exercises Phase B: the Active Sessions list contract,
+// per-session revoke, "sign out elsewhere", and the idle timeout.
+func TestSessionLifecycle(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	seedAdmin(dbURL, "lifecycle@console.test", "Lifecycle-Passw0rd!", "super_admin")
+	fromIP := "203.0.113.50"
+
+	c := newCookieClient()
+	csrf := c.loginFrom(t, fromIP, "lifecycle@console.test", "Lifecycle-Passw0rd!")
+
+	// List: the acting session is present and flagged is_current.
+	resp, out := c.doFrom(t, fromIP, "GET", "/api/admins/me/sessions", "", nil)
+	expectStatus(t, resp, 200, "GET /api/admins/me/sessions")
+	sessions := listSessionsOut(t, out)
+	if len(sessions) < 1 {
+		t.Fatalf("expected >=1 session, got %d", len(sessions))
+	}
+	cur := sessions[0]
+	if isCur, _ := cur["is_current"].(bool); !isCur {
+		t.Fatal("acting session not flagged is_current")
+	}
+	if ua, _ := cur["user_agent"].(string); ua == "" {
+		t.Fatal("session row missing user_agent")
+	}
+	currentID, _ := cur["id"].(string)
+	if currentID == "" {
+		t.Fatal("session row missing id")
+	}
+
+	// A second session (different client IP) appears in the list.
+	c2 := newCookieClient()
+	_ = c2.loginFrom(t, "203.0.113.51", "lifecycle@console.test", "Lifecycle-Passw0rd!")
+	resp, out = c.doFrom(t, fromIP, "GET", "/api/admins/me/sessions", "", nil)
+	expectStatus(t, resp, 200, "GET sessions with two")
+	if n := sessionCount(out); n != 2 {
+		t.Fatalf("expected 2 sessions, got %d", n)
+	}
+	var otherID string
+	for _, s := range listSessionsOut(t, out) {
+		if id, _ := s["id"].(string); id != currentID {
+			otherID = id
+		}
+	}
+	if otherID == "" {
+		t.Fatal("could not find the second session id")
+	}
+
+	// Revoking the CURRENT session through the endpoint is refused.
+	resp, _ = c.doFrom(t, fromIP, "DELETE", "/api/admins/me/sessions/"+currentID, csrf, nil)
+	expectStatus(t, resp, 400, "DELETE current session refused")
+
+	// Revoke the OTHER session: it dies, the acting one stays.
+	resp, _ = c.doFrom(t, fromIP, "DELETE", "/api/admins/me/sessions/"+otherID, csrf, nil)
+	expectStatus(t, resp, 200, "DELETE other session")
+	resp, _ = c2.doFrom(t, "203.0.113.51", "GET", "/api/admins/me", "", nil)
+	expectStatus(t, resp, 401, "revoked second session is dead")
+	resp, _ = c.doFrom(t, fromIP, "GET", "/api/admins/me", "", nil)
+	expectStatus(t, resp, 200, "acting session survives revoke")
+
+	// Sign out elsewhere: open a fresh second session then revoke-others.
+	c3 := newCookieClient()
+	_ = c3.loginFrom(t, "203.0.113.52", "lifecycle@console.test", "Lifecycle-Passw0rd!")
+	resp, out = c.doFrom(t, fromIP, "POST", "/api/admins/me/sessions/revoke-others", csrf, nil)
+	expectStatus(t, resp, 200, "revoke-others")
+	if n, _ := out["revoked"].(float64); n != 1 {
+		t.Fatalf("revoke-others revoked %v, want 1", n)
+	}
+	resp, _ = c3.doFrom(t, "203.0.113.52", "GET", "/api/admins/me", "", nil)
+	expectStatus(t, resp, 401, "revoked-elsewhere session is dead")
+
+	// Idle timeout: age the acting session's last_seen_at past the 30-min
+	// window; the next request must 401 and clear the cookie.
+	ageSessionLastSeen(dbURL, currentID, 40*time.Minute)
+	resp, _ = c.doFrom(t, fromIP, "GET", "/api/admins/me", "", nil)
+	expectStatus(t, resp, 401, "idle session rejected")
+	if _, still := c.jar["wgc_session"]; still {
+		t.Fatal("idle-expired cookie not cleared")
+	}
+}

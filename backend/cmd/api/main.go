@@ -92,6 +92,9 @@ func main() {
 	// Import AdGuard Home's DNS query log into browsing_records so the Web
 	// Activity page and domain statistics have data (see worker/browse.go).
 	go worker.NewBrowseWorker(conn.Pool()).Start(ctx)
+	// Remove expired admin_sessions rows (absolute-expiry backstop; idle-
+	// expired rows are deleted inline on next use).
+	go worker.NewSessionPurgeWorker(conn.Pool(), time.Hour).Start(ctx)
 
 	// Repush persisted domain-block rules into AdGuard Home. A server reset /
 	// redeploy provisions AdGuard with a clean config (empty user_rules), so
@@ -202,6 +205,9 @@ func main() {
 				// Node management (admin session auth)
 				r.Get("/admins/me", api.GetMe(store))
 				r.Post("/admins/me/password", api.ChangePassword(store))
+				r.Get("/admins/me/sessions", api.ListMySessions(store))
+				r.Delete("/admins/me/sessions/{id}", api.RevokeMySession(store))
+				r.Post("/admins/me/sessions/revoke-others", api.RevokeMyOtherSessions(store))
 				r.Post("/auth/2fa/disable", api.Disable2FA(store))
 				r.Get("/config/email-templates", api.ListEmailTemplates(store))
 				r.Patch("/config/email-templates/{key}", api.UpdateEmailTemplate(store))
