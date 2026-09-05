@@ -9,18 +9,37 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/wireguard-console/wg-helper/internal/metrics"
 	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
 type Handler struct {
-	client *wgctrl.Client
+	client    *wgctrl.Client
+	collector *metrics.Collector
+	metricsMu sync.Mutex // serializes Collect (net-rate baseline must not race)
 }
 
 func NewHandler(client *wgctrl.Client) *Handler {
-	return &Handler{client: client}
+	root := os.Getenv("WG_HOST_ROOT")
+	if root == "" {
+		root = "/"
+	}
+	return &Handler{
+		client:    client,
+		collector: metrics.NewCollector(root),
+	}
+}
+
+// collectMetrics returns one host snapshot, serialized so concurrent callers
+// (the agent loop, local /system requests) never race the net-rate baseline.
+func (h *Handler) collectMetrics() metrics.Snapshot {
+	h.metricsMu.Lock()
+	defer h.metricsMu.Unlock()
+	return h.collector.Collect()
 }
 
 type syncRequest struct {
@@ -75,6 +94,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleSync(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/stats":
 		h.handleStats(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/system":
+		h.handleSystem(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/health":
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
@@ -265,6 +286,14 @@ func (h *Handler) handleSync(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "synced"})
 }
 
+// handleSystem serves a live host snapshot for the console's monitoring
+// page. In local mode the console host's own card reads this directly over
+// the unix socket (no database round-trip needed).
+func (h *Handler) handleSystem(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, h.collectMetrics())
+}
+
+// handleStats returns per-peer kernel stats for an interface.
 func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 	var req statsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

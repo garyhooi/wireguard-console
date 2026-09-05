@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"time"
@@ -49,13 +50,15 @@ func nodeTokenAuth(store *Store, r *http.Request, nodeID uuid.UUID) bool {
 }
 
 type nodeView struct {
-	ID          string  `json:"id"`
-	Name        string  `json:"name"`
-	Location    string  `json:"location"`
-	Status      string  `json:"status"`
-	LastSeenAt  *string `json:"last_seen_at"`
-	LastStatus  string  `json:"last_status"`
-	ServerCount int     `json:"server_count"`
+	ID          string          `json:"id"`
+	Name        string          `json:"name"`
+	Location    string          `json:"location"`
+	Status      string          `json:"status"`
+	LastSeenAt  *string         `json:"last_seen_at"`
+	LastStatus  string          `json:"last_status"`
+	ServerCount int             `json:"server_count"`
+	Metrics     json.RawMessage `json:"metrics"` // latest host snapshot (see metrics package)
+	MetricsAt   *string         `json:"metrics_at"`
 }
 
 func ListNodes(store *Store) http.HandlerFunc {
@@ -63,7 +66,8 @@ func ListNodes(store *Store) http.HandlerFunc {
 		ctx := context.Background()
 		rows, err := store.pool.Query(ctx, `
 			SELECT n.id, n.name, n.location, n.status, n.last_seen_at, n.last_status,
-			       (SELECT count(*) FROM servers s WHERE s.node_id = n.id AND s.status = 'active')
+			       (SELECT count(*) FROM servers s WHERE s.node_id = n.id AND s.status = 'active'),
+			       n.metrics, n.metrics_at
 			FROM nodes n
 			ORDER BY n.created_at ASC
 		`)
@@ -76,14 +80,24 @@ func ListNodes(store *Store) http.HandlerFunc {
 		nodes := []nodeView{}
 		for rows.Next() {
 			var n nodeView
-			var lastSeen *time.Time
-			if err := rows.Scan(&n.ID, &n.Name, &n.Location, &n.Status, &lastSeen, &n.LastStatus, &n.ServerCount); err != nil {
+			var lastSeen, metricsAt *time.Time
+			var metrics json.RawMessage
+			if err := rows.Scan(&n.ID, &n.Name, &n.Location, &n.Status, &lastSeen, &n.LastStatus, &n.ServerCount, &metrics, &metricsAt); err != nil {
 				writeError(w, http.StatusInternalServerError, "Failed to scan node")
 				return
 			}
 			if lastSeen != nil {
 				ts := lastSeen.UTC().Format(time.RFC3339)
 				n.LastSeenAt = &ts
+			}
+			if metricsAt != nil {
+				ts := metricsAt.UTC().Format(time.RFC3339)
+				n.MetricsAt = &ts
+			}
+			if len(metrics) == 0 || string(metrics) == "null" {
+				n.Metrics = json.RawMessage("{}")
+			} else {
+				n.Metrics = metrics
 			}
 			nodes = append(nodes, n)
 		}
@@ -164,6 +178,36 @@ func DeleteNode(store *Store) http.HandlerFunc {
 
 		logAudit(ctx, store, adminID, "node.delete", "node", nodeID.String(), nil)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	}
+}
+
+// GetLocalNodeStatus returns the console host's own live metrics from the
+// local wg-helper (same host snapshot schema the remote agents report). The
+// monitoring page renders this as a synthetic "Local host" card so every
+// WireGuard machine appears in one place. 503 when wg-helper is
+// unreachable/absent (dev mode without the helper) — the UI hides the card.
+func GetLocalNodeStatus(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		raw, err := wgclient.System()
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "Local wg-helper is not available")
+			return
+		}
+		if raw == nil {
+			writeError(w, http.StatusServiceUnavailable, "Local wg-helper is not configured")
+			return
+		}
+		sanitized, err := sanitizeMetrics(raw)
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "Local wg-helper returned invalid metrics")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"hostname":   "Local host (console)",
+			"is_local":   true,
+			"metrics":    json.RawMessage(sanitized),
+			"metrics_at": time.Now().UTC().Format(time.RFC3339),
+		})
 	}
 }
 
@@ -255,7 +299,10 @@ func GetNodeState(store *Store) http.HandlerFunc {
 	}
 }
 
-// ReportNodeState is called by the agent after each apply cycle.
+// ReportNodeState is called by the agent after each apply cycle. The body
+// may carry a host metrics snapshot (from agents with monitoring support)
+// which is stored on the node row for the monitoring page. Old agents omit
+// it and simply keep the previous snapshot.
 func ReportNodeState(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		nodeID, err := parseUUID(r.PathValue("id"))
@@ -264,23 +311,224 @@ func ReportNodeState(store *Store) http.HandlerFunc {
 			return
 		}
 
+		// Guard against a misbehaving agent flooding the row with a huge
+		// payload (a valid snapshot is a few hundred bytes).
+		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+
 		var req struct {
-			Status  string `json:"status"`
-			Details string `json:"details"`
+			Status  string          `json:"status"`
+			Details string          `json:"details"`
+			Metrics json.RawMessage `json:"metrics"` // optional host snapshot
 		}
 		json.NewDecoder(r.Body).Decode(&req)
 		if req.Status == "" {
 			req.Status = "ok"
 		}
 
-		_, err = store.pool.Exec(context.Background(), `
-			UPDATE nodes SET last_seen_at = now(), last_status = $1 WHERE id = $2
-		`, req.Status+" "+req.Details, nodeID)
-		if err != nil {
+		var metricsJSON []byte
+		if len(req.Metrics) > 0 && string(req.Metrics) != "null" {
+			metricsJSON, err = sanitizeMetrics(req.Metrics)
+			if err != nil {
+				// Garbage metrics never fail the poll: log and keep the
+				// previous snapshot on the row.
+				log.Printf("node %s: ignoring invalid metrics payload: %v", nodeID, err)
+				metricsJSON = nil
+			}
+		}
+
+		var qerr error
+		if metricsJSON != nil {
+			_, qerr = store.pool.Exec(context.Background(), `
+				UPDATE nodes SET last_seen_at = now(), last_status = $1,
+				                 metrics = $2::jsonb, metrics_at = now()
+				WHERE id = $3
+			`, req.Status+" "+req.Details, string(metricsJSON), nodeID)
+		} else {
+			_, qerr = store.pool.Exec(context.Background(), `
+				UPDATE nodes SET last_seen_at = now(), last_status = $1
+				WHERE id = $2
+			`, req.Status+" "+req.Details, nodeID)
+		}
+		if qerr != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to update node")
 			return
 		}
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	}
+}
+
+// sanitizeMetrics validates and bounds a reported metrics payload so the
+// JSONB column only ever holds well-formed, sane numbers. It re-marshals a
+// strict subset of the agent's snapshot schema; unknown fields are dropped.
+func sanitizeMetrics(raw json.RawMessage) ([]byte, error) {
+	var in struct {
+		CPU struct {
+			Cores   *int     `json:"cores"`
+			Percent *float64 `json:"percent"`
+		} `json:"cpu"`
+		Load []float64 `json:"load"`
+		Mem  struct {
+			Total   *uint64  `json:"total"`
+			Used    *uint64  `json:"used"`
+			Percent *float64 `json:"percent"`
+		} `json:"mem"`
+		Swap struct {
+			Total   *uint64  `json:"total"`
+			Used    *uint64  `json:"used"`
+			Percent *float64 `json:"percent"`
+		} `json:"swap"`
+		Disk []struct {
+			Mount   string  `json:"mount"`
+			Device  string  `json:"device"`
+			FS      string  `json:"fs"`
+			Total   uint64  `json:"total"`
+			Used    uint64  `json:"used"`
+			Percent float64 `json:"percent"`
+		} `json:"disk"`
+		Net []struct {
+			Interface string  `json:"interface"`
+			RxBps     float64 `json:"rx_bps"`
+			TxBps     float64 `json:"tx_bps"`
+		} `json:"net"`
+		UptimeSec   *int64          `json:"uptime_s"`
+		Host        json.RawMessage `json:"host"`
+		CollectedAt *time.Time      `json:"collected_at"`
+	}
+	if err := json.Unmarshal(raw, &in); err != nil {
+		return nil, err
+	}
+	if in.CPU.Cores != nil && (*in.CPU.Cores < 1 || *in.CPU.Cores > 1024) {
+		return nil, fmt.Errorf("cpu cores out of range")
+	}
+
+	clampPct := func(p *float64) *float64 {
+		if p == nil {
+			return nil
+		}
+		v := *p
+		if v < 0 {
+			v = 0
+		}
+		if v > 100 {
+			v = 100
+		}
+		return &v
+	}
+
+	type memOut struct {
+		Total   uint64   `json:"total"`
+		Used    uint64   `json:"used"`
+		Percent *float64 `json:"percent"`
+	}
+	memOutOf := func(m struct {
+		Total   *uint64  `json:"total"`
+		Used    *uint64  `json:"used"`
+		Percent *float64 `json:"percent"`
+	}) memOut {
+		var o memOut
+		if m.Total != nil {
+			o.Total = *m.Total
+		}
+		if m.Used != nil {
+			o.Used = *m.Used
+		}
+		if o.Used > o.Total {
+			o.Used = o.Total
+		}
+		o.Percent = clampPct(m.Percent)
+		return o
+	}
+
+	type diskOut struct {
+		Mount   string   `json:"mount"`
+		Device  string   `json:"device"`
+		FS      string   `json:"fs"`
+		Total   uint64   `json:"total"`
+		Used    uint64   `json:"used"`
+		Percent *float64 `json:"percent"`
+	}
+	disks := make([]diskOut, 0, len(in.Disk))
+	for _, d := range in.Disk {
+		if d.Mount == "" || d.Device == "" || len(disks) >= 16 {
+			continue
+		}
+		used := d.Used
+		if used > d.Total {
+			used = d.Total
+		}
+		disks = append(disks, diskOut{
+			Mount: d.Mount, Device: d.Device, FS: d.FS,
+			Total: d.Total, Used: used, Percent: clampPct(&d.Percent),
+		})
+	}
+
+	type netOut struct {
+		Interface string   `json:"interface"`
+		RxBps     *float64 `json:"rx_bps"`
+		TxBps     *float64 `json:"tx_bps"`
+	}
+	nets := make([]netOut, 0, len(in.Net))
+	for _, n := range in.Net {
+		if n.Interface == "" || len(nets) >= 8 {
+			continue
+		}
+		clampRate := func(v float64) *float64 {
+			if v < 0 {
+				v = 0
+			}
+			if v > 1<<40 { // 1 TB/s sanity cap
+				v = 1 << 40
+			}
+			return &v
+		}
+		nets = append(nets, netOut{Interface: n.Interface, RxBps: clampRate(n.RxBps), TxBps: clampRate(n.TxBps)})
+	}
+
+	load := in.Load
+	if len(load) > 3 {
+		load = load[:3]
+	}
+	for i, v := range load {
+		if v < 0 {
+			load[i] = 0
+		}
+		if v > 1<<20 {
+			load[i] = 1 << 20
+		}
+	}
+
+	out := map[string]interface{}{
+		"cpu": map[string]interface{}{
+			"cores":   in.CPU.Cores,
+			"percent": clampPct(in.CPU.Percent),
+		},
+		"load":     load,
+		"mem":      memOutOf(in.Mem),
+		"swap":     memOutOf(in.Swap),
+		"disk":     disks,
+		"net":      nets,
+		"uptime_s": in.UptimeSec,
+	}
+	if len(in.Host) > 0 && string(in.Host) != "null" {
+		var host struct {
+			Hostname     string `json:"hostname"`
+			OS           string `json:"os"`
+			Arch         string `json:"arch"`
+			Kernel       string `json:"kernel"`
+			AgentVersion string `json:"agent_version"`
+		}
+		// Host is informational only: if it fails to parse, drop it.
+		if err := json.Unmarshal(in.Host, &host); err == nil {
+			if len(host.Hostname) > 128 {
+				host.Hostname = ""
+			}
+			out["host"] = host
+		}
+	}
+	if in.CollectedAt != nil {
+		out["collected_at"] = in.CollectedAt.UTC().Format(time.RFC3339)
+	}
+
+	return json.Marshal(out)
 }

@@ -56,15 +56,21 @@ cd "${INSTALL_DIR}"
 docker build -q -t wireguard-console-wg-helper wg-helper >/dev/null
 
 # 4. Run the agent. Stale containers are replaced.
+#    The host root is bind-mounted read-only at /host (slave propagation) so
+#    the agent can statfs the host's real filesystems for the monitoring
+#    page's disk gauges; CPU/memory/load/uptime come from kernel-global proc
+#    files and need nothing extra.
 docker rm -f wgconsole-agent >/dev/null 2>&1 || true
 docker run -d --name wgconsole-agent \
   --restart unless-stopped \
   --cap-add NET_ADMIN \
   --cap-add SYS_MODULE \
   --network host \
+  -v /:/host:ro,rslave \
   -e WGCONSOLE_URL="${CONSOLE_URL}" \
   -e WGCONSOLE_NODE_TOKEN="${TOKEN}" \
   -e WGCONSOLE_NODE_ID="${NODE_ID}" \
+  -e WG_HOST_ROOT=/host \
   wireguard-console-wg-helper >/dev/null
 
 info "Node agent started for node ${NODE_ID}."

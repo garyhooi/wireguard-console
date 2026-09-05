@@ -45,7 +45,9 @@ fi
 
 if [[ -n "$E2E_URL" ]]; then
   echo "== backend: E2E suite =="
-  (cd backend && TEST_DATABASE_URL="$E2E_URL" E2E_PG_USER=wgconsole E2E_PG_DB=wgconsole go test ./e2e/ -v -count=1)
+  # E2E_PG_PASSWORD feeds the API subprocess's POSTGRES_PASSWORD (needed by
+  # the pg_dump-based backup tests). testp123 matches the throwaway PG above.
+  (cd backend && TEST_DATABASE_URL="$E2E_URL" E2E_PG_USER=wgconsole E2E_PG_PASSWORD=testp123 E2E_PG_DB=wgconsole go test ./e2e/ -v -count=1)
 fi
 
 echo "== frontend: install + tests + build =="

@@ -10,11 +10,26 @@ import (
 	"syscall"
 
 	"github.com/wireguard-console/wg-helper/internal/api"
+	"github.com/wireguard-console/wg-helper/internal/metrics"
 	"github.com/wireguard-console/wg-helper/internal/server"
 	"golang.zx2c4.com/wireguard/wgctrl"
 )
 
+// version is stamped at build time by the Dockerfile via
+//
+//	-ldflags "-X main.version=vX.Y.Z"
+//
+// and passed into the metrics collector so every snapshot identifies the
+// agent build that produced it.
+var version = "dev"
+
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "version" {
+		fmt.Println(version)
+		return
+	}
+	metrics.Version = version
+
 	client, err := wgctrl.New()
 	if err != nil {
 		log.Fatalf("Failed to create wgctrl client: %v", err)

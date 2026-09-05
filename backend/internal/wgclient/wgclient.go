@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -13,11 +14,11 @@ import (
 
 // ApplyRequest mirrors the wg-helper /apply endpoint.
 type ApplyRequest struct {
-	InterfaceName string     `json:"interface_name"`
-	ListenPort    int        `json:"listen_port"`
-	PrivateKey    string     `json:"private_key"`
-	Address       string     `json:"address"`
-	NatCIDR       string     `json:"nat_cidr"`
+	InterfaceName string      `json:"interface_name"`
+	ListenPort    int         `json:"listen_port"`
+	PrivateKey    string      `json:"private_key"`
+	Address       string      `json:"address"`
+	NatCIDR       string      `json:"nat_cidr"`
 	Peers         []ApplyPeer `json:"peers"`
 }
 
@@ -128,4 +129,27 @@ func Stats(interfaceName string) ([]StatsPeer, error) {
 		return nil, err
 	}
 	return out.Peers, nil
+}
+
+// System returns the wg-helper host snapshot (CPU/mem/disk/load/uptime) for
+// the console host's own monitoring card. Returns (nil, nil) when no socket
+// is configured (e.g. local development) so callers can skip the card.
+func System() (json.RawMessage, error) {
+	socket := Socket()
+	if socket == "" {
+		return nil, nil
+	}
+	resp, err := post(socket, "/system", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("wg-helper system: status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(body), nil
 }

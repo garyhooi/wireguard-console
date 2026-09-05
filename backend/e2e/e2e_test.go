@@ -73,6 +73,22 @@ func startFakeWGHelper(sock string) func() {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"status":"removed","warnings":[]}`)
 	})
+	// /system serves a canned host snapshot so GET /api/nodes/local/status
+	// can be exercised end-to-end.
+	mux.HandleFunc("/system", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{
+			"cpu": {"cores": 4, "percent": 12.5},
+			"load": [0.4, 0.5, 0.6],
+			"mem": {"total": 16777216000, "used": 5242880000, "percent": 31.2},
+			"swap": {"total": 2147483648, "used": 0, "percent": 0},
+			"disk": [{"mount": "/", "device": "/dev/sda1", "fs": "ext4", "total": 107374182400, "used": 58195968000, "percent": 54.2}],
+			"net": [{"interface": "eth0", "rx_bps": 1024, "tx_bps": 2048}],
+			"uptime_s": 3564000,
+			"host": {"hostname": "fake-host", "os": "linux", "arch": "amd64", "kernel": "6.8.0", "agent_version": "e2e"},
+			"collected_at": "2025-09-05T02:00:00Z"
+		}`)
+	})
 	srv := &http.Server{Handler: mux}
 	go srv.Serve(l)
 	return func() {
@@ -431,10 +447,72 @@ func TestEndToEnd(t *testing.T) {
 	resp, _ = api(t, "POST", "/api/nodes/"+nodeID+"/report", "Bearer "+nodeToken, map[string]string{
 		"status": "ok", "details": "",
 	})
-	expectStatus(t, resp, 200, "POST /api/nodes/{id}/report")
-	resp, nodesOut := api(t, "GET", "/api/nodes", token, nil)
-	expectStatus(t, resp, 200, "GET /api/nodes")
-	_ = nodesOut
+	expectStatus(t, resp, 200, "POST /api/nodes/{id}/report (no metrics)")
+
+	// Report with a host metrics snapshot (monitoring support) → list returns it
+	resp, _ = api(t, "POST", "/api/nodes/"+nodeID+"/report", "Bearer "+nodeToken, map[string]interface{}{
+		"status":  "ok",
+		"details": "",
+		"metrics": map[string]interface{}{
+			"cpu":          map[string]interface{}{"cores": 2, "percent": 41.5},
+			"load":         []float64{0.2, 0.3, 0.4},
+			"mem":          map[string]interface{}{"total": 8000000000, "used": 4000000000, "percent": 50},
+			"swap":         map[string]interface{}{"total": 1000000000, "used": 0, "percent": 0},
+			"disk":         []interface{}{map[string]interface{}{"mount": "/", "device": "/dev/vda1", "fs": "ext4", "total": 100000000000, "used": 50000000000, "percent": 50}},
+			"net":          []interface{}{map[string]interface{}{"interface": "eth0", "rx_bps": 100, "tx_bps": 200}},
+			"uptime_s":     86400,
+			"host":         map[string]string{"hostname": "node-1", "os": "linux", "arch": "amd64", "kernel": "6.8", "agent_version": "e2e"},
+			"collected_at": "2025-09-05T02:00:00Z",
+		},
+	})
+	expectStatus(t, resp, 200, "POST /api/nodes/{id}/report (with metrics)")
+
+	var nodeRows []map[string]interface{}
+	json.Unmarshal([]byte(rawGet(t, baseURL+"/api/nodes", token)), &nodeRows)
+	if len(nodeRows) != 1 {
+		t.Fatalf("GET /api/nodes: expected 1 node, got %d", len(nodeRows))
+	}
+	if id, _ := nodeRows[0]["id"].(string); id != nodeID {
+		t.Fatalf("node list id = %q, want %q", id, nodeID)
+	}
+	if _, ok := nodeRows[0]["metrics_at"]; !ok {
+		t.Fatal("node list missing metrics_at")
+	}
+	metricsObj, ok := nodeRows[0]["metrics"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("node list: metrics not persisted (type %T)", nodeRows[0]["metrics"])
+	}
+	cpu, _ := metricsObj["cpu"].(map[string]interface{})
+	if cpu == nil {
+		t.Fatalf("node list metrics missing cpu: %v", metricsObj)
+	}
+	if pct, _ := cpu["percent"].(float64); pct != 41.5 {
+		t.Fatalf("node list cpu percent = %v, want 41.5", cpu["percent"])
+	}
+	host, _ := metricsObj["host"].(map[string]interface{})
+	if host == nil || host["hostname"] != "node-1" {
+		t.Fatalf("node list metrics missing host: %v", metricsObj)
+	}
+	load, _ := metricsObj["load"].([]interface{})
+	if len(load) != 3 {
+		t.Fatalf("node list metrics load = %v", metricsObj["load"])
+	}
+
+	// Garbage metrics must not break the report (row keeps prior snapshot)
+	resp, _ = api(t, "POST", "/api/nodes/"+nodeID+"/report", "Bearer "+nodeToken, map[string]interface{}{
+		"status": "ok", "details": "", "metrics": map[string]interface{}{"cpu": map[string]interface{}{"percent": "not-a-number"}},
+	})
+	expectStatus(t, resp, 200, "POST /api/nodes/{id}/report (invalid metrics tolerated)")
+
+	// Console host card: /api/nodes/local/status reads the fake wg-helper
+	resp, localOut := api(t, "GET", "/api/nodes/local/status", token, nil)
+	expectStatus(t, resp, 200, "GET /api/nodes/local/status")
+	if hostname, _ := localOut["hostname"].(string); hostname != "Local host (console)" {
+		t.Fatalf("local status hostname = %q", hostname)
+	}
+	if _, ok := localOut["metrics"]; !ok {
+		t.Fatal("local status missing metrics")
+	}
 
 	// ---- Email templates ----
 	resp, _ = api(t, "GET", "/api/config/email-templates", token, nil)

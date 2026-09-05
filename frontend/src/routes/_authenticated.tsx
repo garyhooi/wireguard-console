@@ -6,6 +6,7 @@ import {
   IconChartBar,
   IconDeviceDesktop,
   IconDots,
+  IconGauge,
   IconHistory,
   IconHome2,
   IconLayoutDashboard,
@@ -46,6 +47,7 @@ const NAV: NavGroup[] = [
     items: [
       { label: 'Dashboard', to: '/dashboard', icon: IconLayoutDashboard },
       { label: 'Statistics', to: '/statistics', icon: IconChartBar },
+      { label: 'Server Monitoring', to: '/monitoring', icon: IconGauge },
       { label: 'Web Activity', to: '/web-activity', icon: IconWorld },
       { label: 'Audit Log', to: '/audit-log', icon: IconHistory },
     ],

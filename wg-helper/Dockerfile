@@ -2,13 +2,19 @@
 # (granted in docker-compose.yml, not here). Needs wireguard-tools in the runtime
 # image for the base interface bring-up; everything after that goes
 # through wgctrl-go over netlink.
+#
+# VERSION build arg stamps the agent version reported in host metrics so the
+# console can hint when a node's agent predates monitoring support.
 
 FROM golang:1.27 AS build
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o /out/wg-helper ./cmd/wg-helper
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -ldflags "-X github.com/wireguard-console/wg-helper/internal/metrics.Version=${VERSION}" \
+    -o /out/wg-helper ./cmd/wg-helper
 
 FROM debian:12-slim
 RUN apt-get update \

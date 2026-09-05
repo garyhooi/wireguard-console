@@ -9,6 +9,8 @@ import (
 	"log"
 	"net/http"
 	"time"
+
+	"github.com/wireguard-console/wg-helper/internal/metrics"
 )
 
 // Agent is the distributed-node loop: it polls the console for the
@@ -66,7 +68,7 @@ func (a *Agent) cycle() {
 	state, err := a.fetchState()
 	if err != nil {
 		log.Printf("agent: fetch failed: %v", err)
-		a.report("error", err.Error())
+		a.report("error", err.Error(), a.handler.collectMetrics())
 		return
 	}
 
@@ -104,7 +106,7 @@ func (a *Agent) cycle() {
 	if details != "" {
 		status = "warning"
 	}
-	a.report(status, details)
+	a.report(status, details, a.handler.collectMetrics())
 }
 
 func (a *Agent) fetchState() (*desiredState, error) {
@@ -130,8 +132,24 @@ func (a *Agent) fetchState() (*desiredState, error) {
 	return &state, nil
 }
 
-func (a *Agent) report(status, details string) {
-	body, _ := json.Marshal(map[string]string{"status": status, "details": details})
+// report sends status (+ optional host metrics) back to the console. The
+// console stores the metrics for the monitoring page; old consoles ignore
+// the extra field.
+func (a *Agent) report(status, details string, snap metrics.Snapshot) {
+	type reportBody struct {
+		Status  string            `json:"status"`
+		Details string            `json:"details"`
+		Metrics *metrics.Snapshot `json:"metrics,omitempty"`
+	}
+	// Only attach metrics when at least one subsystem produced data —
+	// avoids a 200-byte '{}' snapshot on every poll of a broken collector.
+	attach := snap.CollectedAt.IsZero() == false && (snap.Mem.Total > 0 || snap.CPU.Cores > 0 || len(snap.Disk) > 0 || snap.UptimeSec > 0)
+	var m *metrics.Snapshot
+	if attach {
+		s := snap
+		m = &s
+	}
+	body, _ := json.Marshal(reportBody{Status: status, Details: details, Metrics: m})
 	req, err := http.NewRequest(http.MethodPost,
 		fmt.Sprintf("%s/api/nodes/%s/report", a.url, a.nodeID), bytes.NewReader(body))
 	if err != nil {

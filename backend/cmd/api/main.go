@@ -188,6 +188,7 @@ func main() {
 				r.Patch("/config/email-templates/{key}", api.UpdateEmailTemplate(store))
 				r.Get("/nodes", api.ListNodes(store))
 				r.Post("/nodes", api.CreateNode(store))
+				r.Get("/nodes/local/status", api.GetLocalNodeStatus(store))
 				r.Delete("/nodes/{id}", api.DeleteNode(store))
 
 				r.Get("/domain-rules", api.ListDomainRules(store))

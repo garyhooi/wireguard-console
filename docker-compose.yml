@@ -55,17 +55,25 @@ services:
   # The only privileged component. Holds CAP_NET_ADMIN so nothing else in
   # the stack has to. Talks to the API over a Unix socket, not the network.
   wg-helper:
-    build: ./wg-helper
+    build:
+      context: ./wg-helper
+      args:
+        VERSION: ${WG_HELPER_VERSION:-dev}
     restart: unless-stopped
     # WG_HELPER_SOCKET is the *directory* the helper creates its socket in.
     environment:
       WG_HELPER_SOCKET: /run/wg-helper
+      # Host root bind-mounted read-only for the monitoring disk gauges (the
+      # console host's own card reads /system over the socket; statfs must
+      # see the host's real filesystems through /host).
+      WG_HOST_ROOT: /host
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
     network_mode: host
     volumes:
       - /lib/modules:/lib/modules:ro
+      - /:/host:ro,rslave
       - wg-config:/etc/wireguard
       - wg-helper-sock:/run/wg-helper
 
