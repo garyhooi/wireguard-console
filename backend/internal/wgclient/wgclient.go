@@ -49,6 +49,15 @@ func post(socket, path string, body interface{}) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
+	return request("POST", socket, path, bytes.NewReader(buf))
+}
+
+// get performs a GET against the wg-helper unix socket.
+func get(socket, path string) (*http.Response, error) {
+	return request("GET", socket, path, nil)
+}
+
+func request(method, socket, path string, body io.Reader) (*http.Response, error) {
 	client := &http.Client{
 		Timeout: 15 * time.Second,
 		Transport: &http.Transport{
@@ -57,7 +66,14 @@ func post(socket, path string, body interface{}) (*http.Response, error) {
 			},
 		},
 	}
-	return client.Post("http://wg-helper"+path, "application/json", bytes.NewReader(buf))
+	req, err := http.NewRequest(method, "http://wg-helper"+path, body)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	return client.Do(req)
 }
 
 // Apply pushes a server's full desired state to wg-helper.
@@ -134,12 +150,16 @@ func Stats(interfaceName string) ([]StatsPeer, error) {
 // System returns the wg-helper host snapshot (CPU/mem/disk/load/uptime) for
 // the console host's own monitoring card. Returns (nil, nil) when no socket
 // is configured (e.g. local development) so callers can skip the card.
+//
+// Must be a GET: wg-helper serves /system only on GET (the agent's other
+// endpoints /apply /remove /sync /stats are POST). Sending POST here 404s
+// and the monitoring page would never see the console host.
 func System() (json.RawMessage, error) {
 	socket := Socket()
 	if socket == "" {
 		return nil, nil
 	}
-	resp, err := post(socket, "/system", nil)
+	resp, err := get(socket, "/system")
 	if err != nil {
 		return nil, err
 	}

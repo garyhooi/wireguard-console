@@ -74,8 +74,14 @@ func startFakeWGHelper(sock string) func() {
 		fmt.Fprint(w, `{"status":"removed","warnings":[]}`)
 	})
 	// /system serves a canned host snapshot so GET /api/nodes/local/status
-	// can be exercised end-to-end.
+	// can be exercised end-to-end. Method-strict like the real wg-helper:
+	// ServeMux matches any method, so a POST here must 404 — otherwise a
+	// backend using the wrong HTTP method would pass silently.
 	mux.HandleFunc("/system", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{
 			"cpu": {"cores": 4, "percent": 12.5},
