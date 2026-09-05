@@ -24,7 +24,7 @@ interface Server {
   public_endpoint: string
   listen_port: number
   interface_name: string
-  server_public_key: string
+  server_public_key: string | null
   network_cidr: string
   dns_servers: string[]
   default_allowed_ips: string
@@ -405,7 +405,9 @@ function ServersPage() {
                   <td className={tdCls + ' font-mono'}>{server.public_endpoint}</td>
                   <td className={tdCls + ' font-mono'}>{server.interface_name}</td>
                   <td className={tdCls + ' font-mono'}>{server.network_cidr}</td>
-                  <td className={tdCls + ' font-mono'}>{server.server_public_key.substring(0, 16)}...</td>
+                  <td className={tdCls + ' font-mono'}>
+                    {server.server_public_key ? `${server.server_public_key.substring(0, 16)}...` : '—'}
+                  </td>
                   <td className="px-5 py-3.5 whitespace-nowrap">
                     <div className="flex items-center gap-1.5">
                       <Badge tone={server.status === 'active' ? 'good' : 'bad'}>{server.status}</Badge>

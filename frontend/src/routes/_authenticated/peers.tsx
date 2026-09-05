@@ -25,7 +25,7 @@ interface Peer {
   user_id: string
   server_id: string
   name: string
-  public_key: string
+  public_key: string | null
   allowed_ip: string
   status: string
   last_handshake_at: string | null
@@ -450,7 +450,9 @@ function PeersPage() {
                     <td className={tdCls}>
                       {peer.user_full_name || peer.user_email || '—'}
                     </td>
-                    <td className={tdCls + ' font-mono'}>{peer.public_key.substring(0, 16)}...</td>
+                    <td className={tdCls + ' font-mono'}>
+                      {peer.public_key ? `${peer.public_key.substring(0, 16)}...` : '—'}
+                    </td>
                     <td className={tdCls + ' font-mono'}>{peer.allowed_ip}</td>
                     <td className="px-5 py-3.5 whitespace-nowrap">
                       <Badge tone={peer.status === 'active' ? 'good' : peer.status === 'suspended' ? 'warn' : 'bad'}>
