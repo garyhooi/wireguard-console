@@ -2,7 +2,6 @@ import { createFileRoute, Link, Outlet } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
-  IconBrandGithub,
   IconChartBar,
   IconDeviceDesktop,
   IconDots,
@@ -213,16 +212,6 @@ function AuthenticatedLayout() {
             </div>
 
             <div className="flex items-center gap-3 shrink-0">
-              <a
-                href="https://github.com/garyhooi/wireguard-console"
-                target="_blank"
-                rel="noopener noreferrer"
-                title="Source on GitHub"
-                className="hidden sm:inline-flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-200 transition-colors"
-              >
-                <IconBrandGithub size={16} stroke={1.6} aria-hidden="true" />
-                GitHub
-              </a>
               <span
                 className="hidden sm:inline-flex items-center gap-1.5 text-xs text-zinc-500"
                 title="API availability"
@@ -261,16 +250,6 @@ function AuthenticatedLayout() {
                   </div>
                 </div>
               ))}
-              <a
-                href="https://github.com/garyhooi/wireguard-console"
-                target="_blank"
-                rel="noopener noreferrer"
-                onClick={() => setMobileNav(false)}
-                className="flex items-center gap-2.5 px-3 py-2 rounded-md text-sm text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
-              >
-                <IconBrandGithub size={16} stroke={1.6} aria-hidden="true" />
-                GitHub
-              </a>
             </nav>
           </div>
         )}
