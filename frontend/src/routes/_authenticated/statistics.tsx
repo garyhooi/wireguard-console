@@ -154,7 +154,7 @@ function DomainRankList({
   )
 }
 
-function StatisticsPage() {
+export function StatisticsPage() {
   const { data: overview, isLoading } = useQuery<Overview>({
     queryKey: ['stats'],
     queryFn: async () => {
@@ -233,6 +233,12 @@ function StatisticsPage() {
     },
     refetchInterval: 15000,
   })
+
+  // Whole-report totals: the API returns every user/peer with traffic in the
+  // range, so summing the rows gives the total usage across all of them.
+  const usageRows = usageQuery.data?.rows ?? []
+  const totalRX = usageRows.reduce((n, r) => n + (r.rx_bytes ?? 0), 0)
+  const totalTX = usageRows.reduce((n, r) => n + (r.tx_bytes ?? 0), 0)
 
   if (isLoading) {
     return (
@@ -513,6 +519,29 @@ function StatisticsPage() {
                     )
                   })}
                 </tbody>
+                <tfoot>
+                  <tr className="border-t border-zinc-700 bg-zinc-900">
+                    <th scope="row" colSpan={2} className="px-5 py-3 text-right text-xs font-semibold uppercase tracking-wider text-zinc-400">
+                      Total · {usageRows.length}{' '}
+                      {usageRows.length === 1
+                        ? usageScope === 'user'
+                          ? 'VPN user'
+                          : 'peer'
+                        : usageScope === 'user'
+                          ? 'VPN users'
+                          : 'peers'}
+                    </th>
+                    <td className="px-5 py-3 text-sm text-zinc-100 font-mono tabular-nums text-right">
+                      {formatBytes(totalRX)}
+                    </td>
+                    <td className="px-5 py-3 text-sm text-zinc-100 font-mono tabular-nums text-right">
+                      {formatBytes(totalTX)}
+                    </td>
+                    <td className="px-5 py-3 text-sm text-teal-300 font-mono tabular-nums text-right">
+                      {formatBytes(totalRX + totalTX)}
+                    </td>
+                  </tr>
+                </tfoot>
               </table>
             </div>
           )}
