@@ -1,8 +1,14 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { IconMail, IconSend } from '@tabler/icons-react'
+import {
+  IconCode,
+  IconMail,
+  IconSend,
+  IconSettings,
+} from '@tabler/icons-react'
 import { PageHeader, PrimaryButton, GhostButton, inputCls, labelCls } from '../../lib/ui'
+import { EmailTemplatesSection } from '../../components/EmailTemplatesSection'
 
 interface SMTPConfig {
   host: string
@@ -19,7 +25,55 @@ export const Route = createFileRoute('/_authenticated/config')({
   component: ConfigPage,
 })
 
+type ConfigTab = 'smtp' | 'templates'
+
+// Each tab keeps its own scroll container so the page never grows into one
+// long column as configuration sections are added. Sections that belong to a
+// tab (e.g. future SMTP relay / send limits) slot in beneath it.
+const TABS: { id: ConfigTab; label: string; icon: React.ComponentType<{ size?: number; stroke?: number; className?: string }> }[] = [
+  { id: 'smtp', label: 'Email (SMTP)', icon: IconSettings },
+  { id: 'templates', label: 'Email templates', icon: IconCode },
+]
+
 function ConfigPage() {
+  const [tab, setTab] = useState<ConfigTab>('smtp')
+
+  return (
+    <div>
+      <PageHeader
+        title="Configuration"
+        description="Outbound email (SMTP) and the templates the console uses for invites and peer configs."
+      />
+
+      {/* Tab bar */}
+      <div className="mb-6 flex flex-wrap items-center gap-1 border-b border-zinc-800">
+        {TABS.map(({ id, label, icon: Icon }) => {
+          const active = tab === id
+          return (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setTab(id)}
+              aria-current={active ? 'page' : undefined}
+              className={`inline-flex items-center gap-2 border-b-2 px-4 py-2.5 text-sm font-medium transition-colors -mb-px ${
+                active
+                  ? 'border-teal-500 text-teal-300'
+                  : 'border-transparent text-zinc-500 hover:text-zinc-200 hover:border-zinc-700'
+              }`}
+            >
+              <Icon size={16} stroke={1.7} aria-hidden="true" />
+              {label}
+            </button>
+          )
+        })}
+      </div>
+
+      {tab === 'smtp' ? <SmtpSettings /> : <EmailTemplatesSection />}
+    </div>
+  )
+}
+
+function SmtpSettings() {
   const queryClient = useQueryClient()
   const [form, setForm] = useState({ host: '', port: '587', username: '', password: '', from: '' })
   const [testTo, setTestTo] = useState('')
@@ -112,60 +166,9 @@ function ConfigPage() {
   const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setForm((f) => ({ ...f, [k]: e.target.value }))
 
-  // ---- Email templates ----
-  interface Template {
-    key: string
-    subject: string
-    body: string
-  }
-  const [templates, setTemplates] = useState<Template[]>([])
-  const [templateMsg, setTemplateMsg] = useState('')
-  const [templateErr, setTemplateErr] = useState('')
-  const [loadingTemplates, setLoadingTemplates] = useState(true)
-
-  const loadTemplates = async () => {
-    try {
-      const res = await fetch('/api/config/email-templates', { headers: authH })
-      if (!res.ok) throw new Error('Failed to load templates')
-      setTemplates(await res.json())
-    } catch (e) {
-      setTemplateErr((e as Error).message)
-    } finally {
-      setLoadingTemplates(false)
-    }
-  }
-
-  useEffect(() => {
-    loadTemplates()
-  }, [])
-
-  const saveTemplate = async (t: Template) => {
-    try {
-      const res = await fetch(`/api/config/email-templates/${t.key}`, {
-        method: 'PATCH',
-        headers: { ...authH, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subject: t.subject, body: t.body }),
-      })
-      if (!res.ok) throw new Error('Failed to save template')
-      setTemplateMsg(`Template "${t.key}" saved.`)
-      setTemplateErr('')
-    } catch (e) {
-      setTemplateErr((e as Error).message)
-    }
-  }
-
   return (
-    <div>
-      <PageHeader
-        title="Configuration"
-        description="Outbound email (SMTP) used for user invitations and admin invites, plus the templates those emails use."
-      />
-
-      {error && <p className="text-red-400 text-sm mb-3">{error}</p>}
-      {message && <p className="text-teal-400 text-sm mb-3">{message}</p>}
-
-      {/* SMTP card */}
-      <div className="border border-zinc-800 rounded-lg bg-zinc-900/50 p-6 max-w-xl">
+    <div className="max-w-xl">
+      <div className="border border-zinc-800 rounded-lg bg-zinc-900/50 p-6">
         <div className="flex items-center gap-2 mb-1">
           <IconMail size={18} stroke={1.6} className="text-zinc-400" aria-hidden="true" />
           <h2 className="text-base font-semibold text-zinc-100">Email (SMTP)</h2>
@@ -174,6 +177,9 @@ function ConfigPage() {
           Used for user invitations and admin invites. Saved in the console database — no server
           file edits needed.
         </p>
+
+        {error && <p className="text-red-400 text-sm mb-3">{error}</p>}
+        {message && <p className="text-teal-400 text-sm mb-3">{message}</p>}
 
         {isLoading ? (
           <p className="text-zinc-400 text-sm">Loading…</p>
@@ -266,52 +272,6 @@ function ConfigPage() {
                 </div>
               )}
             </div>
-          </div>
-        )}
-      </div>
-
-      {/* Templates card */}
-      <div className="border border-zinc-800 rounded-lg bg-zinc-900/50 p-6 max-w-xl mt-8">
-        <h2 className="text-base font-semibold text-zinc-100 mb-1">Email templates</h2>
-        <p className="text-sm text-zinc-400 mb-4">
-          Customize the emails the console sends. Placeholders: user_invite uses{' '}
-          <code className="text-teal-400">{"{{full_name}}"}</code> and{' '}
-          <code className="text-teal-400">{"{{invite_link}}"}</code>; peer_config also uses{' '}
-          <code className="text-teal-400">{"{{peer_name}}"}</code> and{' '}
-          <code className="text-teal-400">{"{{config_link}}"}</code>.
-        </p>
-        {templateErr && <p className="text-red-400 text-sm mb-3">{templateErr}</p>}
-        {templateMsg && <p className="text-teal-400 text-sm mb-3">{templateMsg}</p>}
-        {loadingTemplates ? (
-          <p className="text-zinc-400 text-sm">Loading…</p>
-        ) : (
-          <div className="space-y-6">
-            {templates.map((t) => (
-              <div key={t.key} className="border border-zinc-800 rounded-md p-4">
-                <p className="text-xs uppercase tracking-wider text-zinc-500 mb-2">{t.key}</p>
-                <input
-                  className={inputCls + ' mb-2'}
-                  value={t.subject}
-                  onChange={(e) =>
-                    setTemplates((all) => all.map((x) => (x.key === t.key ? { ...x, subject: e.target.value } : x)))
-                  }
-                />
-                <textarea
-                  rows={6}
-                  className={inputCls + ' font-mono text-xs'}
-                  value={t.body}
-                  onChange={(e) =>
-                    setTemplates((all) => all.map((x) => (x.key === t.key ? { ...x, body: e.target.value } : x)))
-                  }
-                />
-                <button
-                  onClick={() => saveTemplate(t)}
-                  className="mt-2 bg-zinc-800/80 hover:bg-zinc-700 border border-zinc-700 text-zinc-200 text-sm font-medium py-2 px-3 rounded-md transition-colors"
-                >
-                  Save template
-                </button>
-              </div>
-            ))}
           </div>
         )}
       </div>
