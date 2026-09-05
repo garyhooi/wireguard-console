@@ -130,6 +130,9 @@ func main() {
 				r.Patch("/admins/{id}", api.UpdateAdmin(store))
 				r.Delete("/admins/{id}", api.DeleteAdmin(store))
 				r.Post("/admins/{id}/reset-password", api.ResetAdminPassword(store))
+				// Super-admin helpdesk: clear another admin's 2FA so they
+				// can re-enroll (requires the acting admin's own 2FA code).
+				r.Post("/admins/{id}/reset-2fa", api.ResetAdmin2FA(store))
 				// Audit-log housekeeping — super_admin only.
 				r.Delete("/audit-logs", api.PurgeAuditLogs(store))
 				// Web-activity housekeeping — super_admin only (raw browsing
@@ -202,10 +205,13 @@ func main() {
 				r.Patch("/config/smtp", api.UpdateSMTPConfig(store))
 				r.Post("/config/email/test", api.SendTestEmail(store))
 
-				// Backup endpoints
+				// Backup endpoints (download/restore/delete require the
+				// acting admin's own 2FA code — see each handler).
 				r.Post("/backup/create", api.CreateBackup(store))
 				r.Post("/backup/restore", api.RestoreBackup(store))
 				r.Get("/backup/list", api.ListBackups(store))
+				r.Post("/backup/download", api.DownloadBackup(store))
+				r.Post("/backup/restore-upload", api.RestoreBackupUpload(store))
 				r.Post("/backup/delete", api.DeleteBackup(store))
 			})
 		})

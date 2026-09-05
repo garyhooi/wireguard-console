@@ -85,6 +85,25 @@ func (s *BackupService) RestoreBackup(backupPath string) error {
 		return fmt.Errorf("database credentials not configured")
 	}
 
+	psqlEnv := append(os.Environ(), fmt.Sprintf("PGPASSWORD=%s", dbPassword))
+
+	// The backup is a plain pg_dump WITHOUT --clean, so it cannot be applied
+	// over an existing schema (CREATE TABLE would collide). "Restore" is
+	// defined as *replace*: drop and recreate the public schema first, then
+	// apply the dump. This matches the UI wording and makes restores onto the
+	// live database actually work.
+	dropCmd := exec.Command("psql",
+		"-h", dbHost,
+		"-U", dbUser,
+		"-d", dbName,
+		"-v", "ON_ERROR_STOP=1",
+		"-c", `DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO public;`,
+	)
+	dropCmd.Env = psqlEnv
+	if out, err := dropCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to reset schema before restore: %w: %s", err, out)
+	}
+
 	// Decompress the backup and pipe it straight into psql.
 	gunzipCmd := exec.Command("gunzip", "-c", backupPath)
 	psqlCmd := exec.Command("psql",
@@ -93,7 +112,7 @@ func (s *BackupService) RestoreBackup(backupPath string) error {
 		"-d", dbName,
 		"-v", "ON_ERROR_STOP=1",
 	)
-	psqlCmd.Env = append(os.Environ(), fmt.Sprintf("PGPASSWORD=%s", dbPassword))
+	psqlCmd.Env = psqlEnv
 
 	pipe, err := gunzipCmd.StdoutPipe()
 	if err != nil {
@@ -104,8 +123,8 @@ func (s *BackupService) RestoreBackup(backupPath string) error {
 	if err := gunzipCmd.Start(); err != nil {
 		return fmt.Errorf("failed to start gunzip: %w", err)
 	}
-	if err := psqlCmd.Run(); err != nil {
-		return fmt.Errorf("failed to restore backup: %w", err)
+	if out, err := psqlCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to restore backup: %w: %s", err, out)
 	}
 	if err := gunzipCmd.Wait(); err != nil {
 		return fmt.Errorf("failed to decompress backup: %w", err)

@@ -611,6 +611,7 @@ func UpdateAdmin(store *Store) http.HandlerFunc {
 			Email  string `json:"email"`
 			Role   string `json:"role"`
 			Status string `json:"status"`
+			Code   string `json:"code"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
@@ -620,6 +621,16 @@ func UpdateAdmin(store *Store) http.HandlerFunc {
 		ctx := context.Background()
 		actorID := getAdminID(r)
 		isSelf := adminID == actorID
+
+		// Changing an admin's email, role or status is a privileged action:
+		// the acting admin must confirm with their own 2FA code (step-up).
+		// A no-op PATCH (nothing to change) is allowed through untouched so
+		// the UI can send the current values safely.
+		if req.Email != "" || req.Role != "" || req.Status != "" {
+			if !verifyActor2FA(w, ctx, store, actorID, req.Code) {
+				return
+			}
+		}
 
 		// The current admin may not disable themselves (would lock everyone out).
 		if req.Status == "disabled" && isSelf {
@@ -745,6 +756,7 @@ func UpdateAdmin(store *Store) http.HandlerFunc {
 
 // ResetAdminPassword issues a new temporary password for an admin
 // (emailed when SMTP is configured; always returned once for manual share).
+// The acting super_admin must confirm with their own 2FA code.
 func ResetAdminPassword(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		adminID, err := parseUUID(r.PathValue("id"))
@@ -754,6 +766,17 @@ func ResetAdminPassword(store *Store) http.HandlerFunc {
 		}
 		ctx := context.Background()
 		actorID := getAdminID(r)
+
+		// Resetting someone's password is a privileged action: require the
+		// actor's own 2FA code (step-up) before issuing a new password.
+		var req stepUpRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "Invalid request body")
+			return
+		}
+		if !verifyActor2FA(w, ctx, store, actorID, req.Code) {
+			return
+		}
 
 		newPassword := randomPassword(16)
 		if _, err := store.pool.Exec(ctx, `
