@@ -136,12 +136,36 @@ describe('ConsoleVersionControl', () => {
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith(updatable.install_cmd)
   })
 
-  it('renders the GitHub Releases link pointing at the repo releases page', async () => {
+  it('does not show a separate top-bar Releases button (version/update UI is enough)', async () => {
     renderWithClient(<ConsoleVersionControl />)
     await waitFor(() => expect(screen.getByText('v1.0.1')).toBeTruthy())
-    const link = screen.getByRole('link', { name: /view the latest release on github/i })
-    expect(link.getAttribute('href')).toBe('https://github.com/garyhooi/wireguard-console/releases')
-    expect(link.getAttribute('target')).toBe('_blank')
+    // No standalone GitHub releases link in the top bar anymore.
+    expect(
+      screen.queryByRole('link', { name: /view the latest release on github/i }),
+    ).toBeNull()
+    expect(screen.queryByRole('link', { name: /releases/i })).toBeNull()
+  })
+
+  it('still links the release notes from inside the update modal', async () => {
+    const updatable = {
+      ...baseResponse,
+      latest: 'v1.1.0',
+      latest_url: 'https://github.com/garyhooi/wireguard-console/releases/tag/v1.1.0',
+      outdated: true,
+      update: true,
+    }
+    vi.stubGlobal('fetch', vi.fn(async () => ok(updatable)))
+
+    renderWithClient(<ConsoleVersionControl />)
+    await waitFor(() => expect(screen.getByRole("button", { name: "Update available" })).toBeTruthy())
+    fireEvent.click(screen.getByRole("button", { name: "Update available" }))
+    await waitFor(() => expect(screen.getByRole('dialog')).toBeTruthy())
+
+    const noteLink = screen.getByRole('link', { name: /v1\.1\.0 on github/i })
+    expect(noteLink.getAttribute('href')).toBe(
+      'https://github.com/garyhooi/wireguard-console/releases/tag/v1.1.0',
+    )
+    expect(noteLink.getAttribute('target')).toBe('_blank')
   })
 
   it('does not claim an update when only the check failed', async () => {

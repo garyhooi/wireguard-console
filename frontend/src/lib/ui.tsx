@@ -363,31 +363,42 @@ export function Modal({
 
   if (!open) return null
 
+  // The overlay is the scroll container, not the panel: on mobile the URL
+  // bar shrinks the visible viewport mid-scroll, and a centered flex with a
+  // capped panel leaves the top of a tall dialog unreachable. Making the
+  // full overlay scrollable (with margin-based centering instead of flex
+  // centering) guarantees the whole dialog can always be scrolled into view,
+  // whatever the current viewport height is.
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div
+      className="fixed inset-0 z-50 overflow-y-auto overscroll-contain"
+      role="presentation"
+    >
       <div
         className="absolute inset-0 bg-zinc-950/70 backdrop-blur-sm"
         onClick={onClose}
         aria-hidden="true"
       />
-      <div
-        ref={ref}
-        tabIndex={-1}
-        role="dialog"
-        aria-modal="true"
-        aria-label={title}
-        className={`relative w-full bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl max-h-[90dvh] overflow-y-auto focus:outline-none ${
-          className || 'max-w-lg'
-        }`}
-      >
-        {(title || description) && (
-          <div className="px-6 pt-6 pb-2">
-            {title && <h2 className="text-lg font-semibold text-zinc-100">{title}</h2>}
-            {description && <p className="mt-1 text-sm text-zinc-400 leading-relaxed">{description}</p>}
-          </div>
-        )}
-        <div className="px-6 py-4">{children}</div>
-        {footer && <div className="px-6 pb-6 pt-2 flex justify-end gap-3">{footer}</div>}
+      <div className="flex min-h-full items-center justify-center p-4 pointer-events-none">
+        <div
+          ref={ref}
+          tabIndex={-1}
+          role="dialog"
+          aria-modal="true"
+          aria-label={title}
+          className={`relative w-full pointer-events-auto bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl max-h-[90dvh] overflow-y-auto focus:outline-none ${
+            className || 'max-w-lg'
+          }`}
+        >
+          {(title || description) && (
+            <div className="px-6 pt-6 pb-2">
+              {title && <h2 className="text-lg font-semibold text-zinc-100">{title}</h2>}
+              {description && <p className="mt-1 text-sm text-zinc-400 leading-relaxed">{description}</p>}
+            </div>
+          )}
+          <div className="px-6 py-4">{children}</div>
+          {footer && <div className="px-6 pb-6 pt-2 flex justify-end gap-3">{footer}</div>}
+        </div>
       </div>
     </div>
   )

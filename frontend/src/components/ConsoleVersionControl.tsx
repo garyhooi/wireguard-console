@@ -2,7 +2,6 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   IconAlertTriangle,
-  IconBrandGithub,
   IconCheck,
   IconCopy,
   IconExternalLink,
@@ -153,20 +152,6 @@ export function ConsoleVersionControl() {
             Update available
           </button>
         )}
-
-        {/* GitHub releases — "check on the latest release" top-banner button */}
-        <a
-          href={GITHUB_RELEASES_URL}
-          target="_blank"
-          rel="noopener noreferrer"
-          title={`WireGuard Console releases (latest: ${latestV || '—'})`}
-          aria-label="View the latest release on GitHub"
-          className="inline-flex items-center gap-1.5 text-xs rounded-md border border-zinc-700 hover:border-zinc-500 hover:text-zinc-100 text-zinc-400 px-2.5 py-1.5 transition-colors"
-        >
-          <IconBrandGithub size={14} stroke={1.7} aria-hidden="true" />
-          <span className="hidden sm:inline">Releases</span>
-          <IconExternalLink size={11} stroke={1.8} aria-hidden="true" />
-        </a>
       </div>
 
       <Modal
