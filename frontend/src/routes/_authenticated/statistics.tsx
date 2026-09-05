@@ -1,4 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
+import { apiJson } from '../../lib/api'
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
@@ -95,7 +96,6 @@ const fmtTooltip = (v: unknown): string => {
   return formatBytes(Number.isFinite(n) ? n : 0)
 }
 
-const auth = { Authorization: localStorage.getItem('token')! }
 
 const chartTooltipStyle = {
   backgroundColor: '#18181b',
@@ -158,9 +158,7 @@ export function StatisticsPage() {
   const { data: overview, isLoading } = useQuery<Overview>({
     queryKey: ['stats'],
     queryFn: async () => {
-      const res = await fetch('/api/stats/overview', { headers: auth })
-      if (!res.ok) throw new Error('Failed to fetch stats')
-      return res.json()
+      return apiJson<Overview>('/api/stats/overview')
     },
     refetchInterval: 15000,
   })
@@ -168,9 +166,7 @@ export function StatisticsPage() {
   const { data: traffic, isLoading: trafficLoading } = useQuery<TrafficResponse>({
     queryKey: ['stats-traffic'],
     queryFn: async () => {
-      const res = await fetch('/api/stats/traffic', { headers: auth })
-      if (!res.ok) throw new Error('Failed to fetch traffic')
-      return res.json()
+      return apiJson<TrafficResponse>('/api/stats/traffic')
     },
     refetchInterval: 30000,
   })
@@ -180,9 +176,7 @@ export function StatisticsPage() {
   const { data: topDomains } = useQuery<TopDomainsResponse>({
     queryKey: ['web-activity-top-domains', 7],
     queryFn: async () => {
-      const res = await fetch('/api/web-activity/top-domains?days=7', { headers: auth })
-      if (!res.ok) throw new Error('Failed to fetch top domains')
-      return res.json()
+      return apiJson<TopDomainsResponse>('/api/web-activity/top-domains?days=7')
     },
     refetchInterval: 60000,
   })
@@ -199,9 +193,7 @@ export function StatisticsPage() {
     queryKey: ['stats-usage', usageScope, fromDate, toDate],
     queryFn: async () => {
       const q = new URLSearchParams({ scope: usageScope, from: fromDate, to: toDate })
-      const res = await fetch(`/api/stats/usage?${q}`, { headers: auth })
-      if (!res.ok) throw new Error('Failed to fetch usage')
-      return res.json()
+      return apiJson<UsageResponse>(`/api/stats/usage?${q}`)
     },
   })
 
@@ -227,9 +219,7 @@ export function StatisticsPage() {
   const { data: peers } = useQuery<Peer[]>({
     queryKey: ['peers'],
     queryFn: async () => {
-      const res = await fetch('/api/peers', { headers: auth })
-      if (!res.ok) throw new Error('Failed to fetch peers')
-      return res.json()
+      return apiJson<Peer[]>('/api/peers')
     },
     refetchInterval: 15000,
   })

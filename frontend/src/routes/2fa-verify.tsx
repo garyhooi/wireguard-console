@@ -2,23 +2,14 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { PrimaryButton, inputCls, labelCls } from '../lib/ui'
-
-interface Verify2FARequest {
-  code: string
-}
+import { apiFetch, setCsrfToken } from '../lib/api'
 
 interface Verify2FAResponse {
-  token: string
+  csrf_token?: string
 }
 
 export const Route = createFileRoute('/2fa-verify')({
   component: Verify2FAPage,
-  beforeLoad: async () => {
-    const token = localStorage.getItem('pending2fa_token')
-    if (!token) {
-      window.location.href = '/login'
-    }
-  },
 })
 
 function Verify2FAPage() {
@@ -26,24 +17,22 @@ function Verify2FAPage() {
 
   const verifyMutation = useMutation({
     mutationFn: async (code: string) => {
-      const pendingToken = localStorage.getItem('pending2fa_token')
-      const res = await fetch('/api/auth/2fa/verify', {
+      // The pending-2FA token is in the wgc_pending2fa HttpOnly cookie (set
+      // at login); the browser sends it automatically. No CSRF token exists
+      // yet — this endpoint is pre-session.
+      const res = await apiFetch('/api/auth/2fa/verify', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: pendingToken!,
-        },
-        body: JSON.stringify({ code }),
+        body: { code },
+        skipCsrf: true,
       })
       if (!res.ok) {
-        const error = await res.json()
-        throw new Error(error.error || 'Verification failed')
+        const error = await res.json().catch(() => null)
+        throw new Error((error as { error?: string } | null)?.error || 'Verification failed')
       }
       return res.json() as Promise<Verify2FAResponse>
     },
     onSuccess: (data) => {
-      localStorage.setItem('token', data.token)
-      localStorage.removeItem('pending2fa_token')
+      setCsrfToken(data.csrf_token)
       window.location.href = '/dashboard'
     },
   })

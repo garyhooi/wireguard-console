@@ -171,12 +171,19 @@ type adminResponse struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+// Session tokens normally travel only as HttpOnly cookies; the JSON carries
+// just the CSRF token. During the localStorage→cookie transition
+// (AUTH_ACCEPT_HEADER=1) the raw token is ALSO returned in JSON so an old
+// frontend bundle (deployed a minute before the new API during a rolling
+// rebuild) can keep authenticating via the legacy Authorization header.
 type sessionResponse struct {
-	Token string `json:"token"`
+	Token     string `json:"token,omitempty"`
+	CSRFToken string `json:"csrf_token,omitempty"`
 }
 
 type loginResponse struct {
 	Token      string         `json:"token,omitempty"`
+	CSRFToken  string         `json:"csrf_token,omitempty"`
 	Pending2FA bool           `json:"pending_2fa,omitempty"`
 	Admin      *adminResponse `json:"admin,omitempty"`
 }
@@ -273,59 +280,46 @@ func Login(store *Store) http.HandlerFunc {
 			// The pending token is persisted as a short-lived session row so
 			// Verify2FA can resolve it back to this admin. It is NOT yet a
 			// usable session: Verify2FA checks TOTP and only then swaps it
-			// for a full 24h session token. Keep it short (10 min) so an
-			// abandoned login attempt expires on its own.
-			tokenHash := hashToken(token)
-			expiresAt := time.Now().Add(10 * time.Minute)
-			ip := r.RemoteAddr
-			if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-				ip = host
-			}
-			_, err = store.pool.Exec(ctx, `
-				INSERT INTO admin_sessions (admin_id, token_hash, ip_address, user_agent, expires_at)
-				VALUES ($1, $2, $3, $4, $5)
-			`, admin.ID, tokenHash, ip, r.UserAgent(), expiresAt)
-			if err != nil {
+			// for a full 24h session. Keep it short (10 min) so an
+			// abandoned login attempt expires on its own. Transported as an
+			// HttpOnly cookie (wgc_pending2fa) — never visible to JS.
+			if _, err := createSession(ctx, store, admin.ID, token, r, pending2FALife, false); err != nil {
 				log.Printf("Failed to create pending 2FA session: admin_id=%s, err=%v", admin.ID, err)
 				writeError(w, http.StatusInternalServerError, "Failed to start 2FA verification")
 				return
 			}
+			setSessionCookie(w, r, pending2FACookieName, token, int(pending2FALife.Seconds()))
+			if acceptLegacyHeader() {
+				resp.Token = token
+			}
 
 			resp.Pending2FA = true
-			resp.Token = token
-		} else {
-			sessionToken, err := generateToken()
-			if err != nil {
-				log.Printf("Failed to generate session token: %v", err)
-				writeError(w, http.StatusInternalServerError, "Failed to generate token")
-				return
-			}
-
-			tokenHash := hashToken(sessionToken)
-			expiresAt := time.Now().Add(24 * time.Hour)
-
-			// Extract just the IP address from RemoteAddr (host:port)
-			ip := r.RemoteAddr
-			if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-				ip = host
-			}
-
-			log.Printf("Creating session: admin_id=%s, token_hash=%s, ip=%s", admin.ID, tokenHash, ip)
-
-			_, err = store.pool.Exec(ctx, `
-				INSERT INTO admin_sessions (admin_id, token_hash, ip_address, user_agent, expires_at)
-				VALUES ($1, $2, $3, $4, $5)
-			`, admin.ID, tokenHash, ip, r.UserAgent(), expiresAt)
-
-			if err != nil {
-				log.Printf("Failed to create session: admin_id=%s, err=%v", admin.ID, err)
-				writeError(w, http.StatusInternalServerError, "Failed to create session")
-				return
-			}
-
-			resp.Token = sessionToken
+			writeJSON(w, http.StatusOK, resp)
+			return
 		}
 
+		// Full 24h session. The raw token travels as an HttpOnly cookie; the
+		// per-session CSRF token returns in JSON so the SPA can echo it on
+		// state-changing requests (the cookie itself is invisible to JS).
+		token, err := generateToken()
+		if err != nil {
+			log.Printf("Failed to generate session token: %v", err)
+			writeError(w, http.StatusInternalServerError, "Failed to generate token")
+			return
+		}
+
+		csrfToken, err := createSession(ctx, store, admin.ID, token, r, sessionLifetime, true)
+		if err != nil {
+			log.Printf("Failed to create session: admin_id=%s, err=%v", admin.ID, err)
+			writeError(w, http.StatusInternalServerError, "Failed to create session")
+			return
+		}
+		setSessionCookie(w, r, sessionCookieName, token, int(sessionLifetime.Seconds()))
+		if acceptLegacyHeader() {
+			resp.Token = token
+		}
+
+		resp.CSRFToken = csrfToken
 		writeJSON(w, http.StatusOK, resp)
 	}
 }
@@ -338,7 +332,12 @@ func Verify2FA(store *Store) http.HandlerFunc {
 			return
 		}
 
-		token := r.Header.Get("Authorization")
+		token := readCookieToken(r, pending2FACookieName)
+		// Transition: accept the pending token via the legacy header too so
+		// an old frontend tab can still finish a 2FA login mid-deploy.
+		if token == "" && acceptLegacyHeader() {
+			token = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		}
 		if token == "" {
 			writeError(w, http.StatusUnauthorized, "Missing authorization token")
 			return
@@ -383,8 +382,8 @@ func Verify2FA(store *Store) http.HandlerFunc {
 
 		if !auth.VerifyTOTP(decryptedSecret, req.Code) {
 			// Wrong code: keep the pending row so the user can retry with
-			// the same login token (the login rate limiter guards brute
-			// force). The 10-minute expiry still bounds the window.
+			// the same login (the login rate limiter guards brute force).
+			// The 10-minute expiry still bounds the window.
 			writeError(w, http.StatusBadRequest, "Invalid verification code")
 			return
 		}
@@ -400,50 +399,58 @@ func Verify2FA(store *Store) http.HandlerFunc {
 			return
 		}
 
-		tokenHash := hashToken(sessionToken)
-		expiresAt := time.Now().Add(24 * time.Hour)
-
-		// admin_sessions.ip_address is INET — store the bare IP, not the
-		// host:port from RemoteAddr (Postgres would reject the latter).
-		ip := r.RemoteAddr
-		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-			ip = host
-		}
-
-		_, err = store.pool.Exec(ctx, `
-			INSERT INTO admin_sessions (admin_id, token_hash, ip_address, user_agent, expires_at)
-			VALUES ($1, $2, $3, $4, $5)
-		`, admin.ID, tokenHash, ip, r.UserAgent(), expiresAt)
+		csrfToken, err := createSession(ctx, store, admin.ID, sessionToken, r, sessionLifetime, true)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to create session")
 			return
 		}
 
-		writeJSON(w, http.StatusOK, sessionResponse{Token: sessionToken})
+		setSessionCookie(w, r, sessionCookieName, sessionToken, int(sessionLifetime.Seconds()))
+		clearSessionCookie(w, r, pending2FACookieName)
+
+		resp := sessionResponse{CSRFToken: csrfToken}
+		if acceptLegacyHeader() {
+			resp.Token = sessionToken
+		}
+		writeJSON(w, http.StatusOK, resp)
 	}
 }
 
+// Logout revokes the session server-side (delete the row) and clears the
+// cookie. Idempotent: with no/expired session it still returns 200 after
+// clearing — the UI always lands on a logged-out state.
 func Logout(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token := r.Header.Get("Authorization")
-		if token == "" {
-			writeError(w, http.StatusUnauthorized, "Missing authorization token")
-			return
+		token := readCookieToken(r, sessionCookieName)
+		if token == "" && acceptLegacyHeader() {
+			token = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		}
 
-		ctx := context.Background()
-		store.pool.Exec(ctx, `
-			DELETE FROM admin_sessions WHERE token_hash = $1
-		`, hashToken(token))
+		if token != "" {
+			store.pool.Exec(context.Background(), `
+				DELETE FROM admin_sessions WHERE token_hash = $1
+			`, hashToken(token))
+		}
 
+		clearSessionCookie(w, r, sessionCookieName)
+		clearSessionCookie(w, r, pending2FACookieName)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	}
 }
 
+// AuthMiddleware authenticates a request from the session cookie (primary)
+// or, during the localStorage→cookie transition only, the legacy
+// Authorization header (AUTH_ACCEPT_HEADER=1). It resolves the admin and
+// loads the session's CSRF token into the request context.
 func AuthMiddleware(store *Store) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			token := r.Header.Get("Authorization")
+			token := readCookieToken(r, sessionCookieName)
+			viaHeader := false
+			if token == "" && acceptLegacyHeader() {
+				token = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+				viaHeader = token != ""
+			}
 			if token == "" {
 				writeError(w, http.StatusUnauthorized, "Missing authorization token")
 				return
@@ -451,25 +458,71 @@ func AuthMiddleware(store *Store) func(http.Handler) http.Handler {
 
 			ctx := context.Background()
 
-			var adminID uuid.UUID
+			var (
+				adminID   uuid.UUID
+				csrfToken string
+			)
 			err := store.pool.QueryRow(ctx, `
-				SELECT admin_id FROM admin_sessions 
+				SELECT admin_id, csrf_token FROM admin_sessions 
 				WHERE token_hash = $1 AND expires_at > now()
-			`, hashToken(token)).Scan(&adminID)
+			`, hashToken(token)).Scan(&adminID, &csrfToken)
 
 			if err != nil {
 				writeError(w, http.StatusUnauthorized, "Invalid or expired session")
 				return
 			}
 
-			ctx = context.WithValue(ctx, "admin_id", adminID)
+			ctx = context.WithValue(ctx, adminIDKey{}, adminID)
+			ctx = context.WithValue(ctx, csrfTokenKey{}, csrfToken)
+			ctx = context.WithValue(ctx, viaHeaderKey{}, viaHeader)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }
 
+// RequireCSRF rejects state-changing requests that do not carry the session's
+// CSRF token. It must run AFTER AuthMiddleware (needs the resolved session).
+// GET/HEAD/OPTIONS are never state-changing and skip the check; public
+// (unauthenticated) routes are not mounted behind this middleware.
+//
+// A request authenticated via the legacy Authorization header (transition
+// only, AUTH_ACCEPT_HEADER=1) skips the check: cross-site attackers cannot
+// attach that header to a same-origin fetch, so the cookie auto-attach
+// attack CSRF defends against does not apply to the header transport.
+// Once the transition ends the header transport disappears and every
+// authenticated state-changing request is cookie+CSRF.
+func RequireCSRF(store *Store) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Transition exemption: header-authed legacy clients.
+			if viaHeader, _ := r.Context().Value(viaHeaderKey{}).(bool); viaHeader && acceptLegacyHeader() {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			csrfToken, _ := r.Context().Value(csrfTokenKey{}).(string)
+			if csrfToken == "" {
+				writeError(w, http.StatusForbidden, "CSRF validation failed")
+				return
+			}
+			provided := r.Header.Get("X-CSRF-Token")
+			if provided == "" || provided != csrfToken {
+				writeError(w, http.StatusForbidden, "CSRF validation failed")
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 func getAdminID(r *http.Request) uuid.UUID {
-	adminID, _ := r.Context().Value("admin_id").(uuid.UUID)
+	adminID, _ := r.Context().Value(adminIDKey{}).(uuid.UUID)
 	return adminID
 }
 
@@ -629,6 +682,13 @@ func Enable2FA(store *Store) http.HandlerFunc {
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to enable 2FA")
 			return
+		}
+
+		// 2FA enrollment upgrades the account's security posture: retire
+		// sessions minted under the weaker policy, keeping only the acting
+		// one (which just proved possession of the new secret).
+		if err := revokeAdminSessionsExcept(ctx, store, adminID, currentSessionTokenHash(r)); err != nil {
+			log.Printf("Failed to revoke other sessions after 2FA enable: admin_id=%s, err=%v", adminID, err)
 		}
 
 		logAudit(ctx, store, adminID, "2fa.enable", "admin", adminID.String(), nil)

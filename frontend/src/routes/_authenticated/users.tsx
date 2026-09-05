@@ -1,4 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
+import { apiJson } from '../../lib/api'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 import { IconCopy, IconMailForward, IconMailPlus } from '@tabler/icons-react'
@@ -21,7 +22,6 @@ import {
   labelCls,
 } from '../../lib/ui'
 
-const authH = { Authorization: localStorage.getItem('token')! }
 
 interface User {
   id: string
@@ -60,37 +60,20 @@ function UsersPage() {
   const { data: smtp } = useQuery<{ configured: boolean }>({
     queryKey: ['smtp-config'],
     queryFn: async () => {
-      const res = await fetch('/api/config/smtp', {
-        headers: { Authorization: localStorage.getItem('token')! },
-      })
-      if (!res.ok) throw new Error('Failed to fetch SMTP config')
-      return res.json()
+      return apiJson<{ configured: boolean }>('/api/config/smtp')
     },
   })
 
   const { data: users, isLoading, refetch } = useQuery<User[]>({
     queryKey: ['users'],
     queryFn: async () => {
-      const res = await fetch('/api/users', {
-        headers: { Authorization: localStorage.getItem('token')! },
-      })
-      if (!res.ok) throw new Error('Failed to fetch users')
-      return res.json()
+      return apiJson<User[]>('/api/users')
     },
   })
 
   const inviteMutation = useMutation({
     mutationFn: async (data: { email: string; full_name: string }) => {
-      const res = await fetch('/api/users', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: localStorage.getItem('token')!,
-        },
-        body: JSON.stringify(data),
-      })
-      if (!res.ok) throw new Error('Failed to invite user')
-      return res.json()
+      return apiJson<{ invite_link?: string }>('/api/users', { method: 'POST', body: data })
     },
     onSuccess: (data) => {
       setInviteLink(data.invite_link || '')
@@ -103,15 +86,7 @@ function UsersPage() {
 
   const resendMutation = useMutation({
     mutationFn: async (u: User) => {
-      const res = await fetch(`/api/users/${u.id}/resend-invite`, {
-        method: 'POST',
-        headers: authH,
-      })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error((err as { error?: string }).error || 'Failed to resend invite email')
-      }
-      return res.json()
+      return apiJson<{ invite_link?: string }>(`/api/users/${u.id}/resend-invite`, { method: 'POST' })
     },
     onSuccess: (data, u) => {
       // Keep the row's link visible so an SMTP hiccup never strands the
@@ -144,22 +119,19 @@ function UsersPage() {
 
   const suspendMutation = useMutation({
     mutationFn: async (u: User) => {
-      const res = await fetch(`/api/users/${u.id}/suspend`, { method: 'POST', headers: authH })
-      if (!res.ok) throw new Error('Failed to suspend user')
+      await apiJson(`/api/users/${u.id}/suspend`, { method: 'POST' })
     },
     onSuccess: () => refetch(),
   })
   const resumeMutation = useMutation({
     mutationFn: async (u: User) => {
-      const res = await fetch(`/api/users/${u.id}/resume`, { method: 'POST', headers: authH })
-      if (!res.ok) throw new Error('Failed to resume user')
+      await apiJson(`/api/users/${u.id}/resume`, { method: 'POST' })
     },
     onSuccess: () => refetch(),
   })
   const removeMutation = useMutation({
     mutationFn: async (u: User) => {
-      const res = await fetch(`/api/users/${u.id}`, { method: 'DELETE', headers: authH })
-      if (!res.ok) throw new Error('Failed to remove user')
+      await apiJson(`/api/users/${u.id}`, { method: 'DELETE' })
     },
     onSuccess: () => refetch(),
   })

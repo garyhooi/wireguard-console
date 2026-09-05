@@ -16,6 +16,7 @@ import {
   thCls,
 } from '../../lib/ui'
 import { Confirm2FA } from '../../lib/Confirm2FA'
+import { apiFetch, apiJson } from '../../lib/api'
 
 interface BackupList {
   backups: string[]
@@ -25,7 +26,6 @@ export const Route = createFileRoute('/_authenticated/backups')({
   component: BackupsPage,
 })
 
-const auth = { Authorization: localStorage.getItem('token')! }
 
 // "wgconsole_backup_20260903_120405.sql.gz" → "2026-09-03 12:04"
 function backupLabel(name: string): string {
@@ -60,17 +60,13 @@ function BackupsPage() {
   const { data, isLoading } = useQuery<BackupList>({
     queryKey: ['backups'],
     queryFn: async () => {
-      const res = await fetch('/api/backup/list', { headers: auth })
-      if (!res.ok) throw new Error('Failed to load backups')
-      return res.json()
+      return apiJson<BackupList>('/api/backup/list')
     },
   })
 
   const createMutation = useMutation({
     mutationFn: async () => {
-      const res = await fetch('/api/backup/create', { method: 'POST', headers: auth })
-      if (!res.ok) throw new Error(await errMsg(res, 'Failed to create backup'))
-      return res.json()
+      return apiJson('/api/backup/create', { method: 'POST' })
     },
     onSuccess: () => {
       setNotice('Backup created.')
@@ -82,10 +78,9 @@ function BackupsPage() {
 
   // Download streams the file; the server requires the actor's 2FA code.
   const download = (filename: string, code: string) => {
-    const res = fetch('/api/backup/download', {
+    return apiFetch('/api/backup/download', {
       method: 'POST',
-      headers: { ...auth, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filename, code }),
+      body: { filename, code },
     }).then(async (r) => {
       if (!r.ok) throw new Error(await errMsg(r, 'Failed to download backup'))
       const blob = await r.blob()
@@ -96,7 +91,6 @@ function BackupsPage() {
       a.click()
       URL.revokeObjectURL(url)
     })
-    return res
   }
 
   const confirmDownload = (filename: string) => {
@@ -109,13 +103,10 @@ function BackupsPage() {
   // Restore from an existing server-side backup (2FA-gated).
   const restoreMutation = useMutation({
     mutationFn: async (a: { filename: string; code: string }) => {
-      const res = await fetch('/api/backup/restore', {
+      return apiJson('/api/backup/restore', {
         method: 'POST',
-        headers: { ...auth, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filename: a.filename, code: a.code }),
+        body: { filename: a.filename, code: a.code },
       })
-      if (!res.ok) throw new Error(await errMsg(res, 'Failed to restore backup'))
-      return res.json()
     },
     onSuccess: () => {
       setNotice('Backup restored. The API reloads data; refresh the page if needed.')
@@ -145,13 +136,10 @@ function BackupsPage() {
       const fd = new FormData()
       fd.append('file', a.file)
       fd.append('code', a.code)
-      const res = await fetch('/api/backup/restore-upload', {
+      return apiJson('/api/backup/restore-upload', {
         method: 'POST',
-        headers: auth,
         body: fd,
       })
-      if (!res.ok) throw new Error(await errMsg(res, 'Failed to restore uploaded backup'))
-      return res.json()
     },
     onSuccess: () => {
       setNotice('Uploaded backup restored. The API reloads data; refresh the page if needed.')
@@ -163,13 +151,10 @@ function BackupsPage() {
 
   const deleteMutation = useMutation({
     mutationFn: async (a: { filename: string; code: string }) => {
-      const res = await fetch('/api/backup/delete', {
+      return apiJson('/api/backup/delete', {
         method: 'POST',
-        headers: { ...auth, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filename: a.filename, code: a.code }),
+        body: { filename: a.filename, code: a.code },
       })
-      if (!res.ok) throw new Error(await errMsg(res, 'Failed to delete backup'))
-      return res.json()
     },
     onSuccess: () => {
       setNotice('Backup deleted.')

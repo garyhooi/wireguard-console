@@ -107,7 +107,6 @@ describe('WebActivityPage', () => {
         throw new Error(`unexpected fetch: ${url}`)
       }),
     )
-    localStorage.setItem('token', 'test-token')
   })
 
   it('renders the per-user summary table', async () => {

@@ -1,4 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
+import { apiFetch, apiJson } from '../../lib/api'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { IconCopy, IconPlus, IconTerminal2 } from '@tabler/icons-react'
@@ -40,7 +41,6 @@ export const Route = createFileRoute('/_authenticated/servers')({
   component: ServersPage,
 })
 
-const auth = { Authorization: localStorage.getItem('token')! }
 
 const emptyForm = {
   name: '',
@@ -74,18 +74,14 @@ function ServersPage() {
   const { data: nodes } = useQuery<{ id: string; name: string; status: string }[]>({
     queryKey: ['nodes'],
     queryFn: async () => {
-      const res = await fetch('/api/nodes', { headers: auth })
-      if (!res.ok) throw new Error('Failed to fetch nodes')
-      return res.json()
+      return apiJson<{ id: string; name: string; status: string }[]>('/api/nodes')
     },
   })
 
   const { data: servers, isLoading } = useQuery<Server[]>({
     queryKey: ['servers'],
     queryFn: async () => {
-      const res = await fetch('/api/servers', { headers: auth })
-      if (!res.ok) throw new Error('Failed to fetch servers')
-      return res.json()
+      return apiJson<Server[]>('/api/servers')
     },
   })
 
@@ -104,13 +100,10 @@ function ServersPage() {
         managed_mode: form.managed_mode,
         node_id: form.managed_mode === 'remote' ? form.node_id : null,
       }
-      const res = await fetch(editing ? `/api/servers/${editing.id}` : '/api/servers', {
+      return apiJson(editing ? `/api/servers/${editing.id}` : '/api/servers', {
         method: editing ? 'PATCH' : 'POST',
-        headers: { ...auth, 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body,
       })
-      if (!res.ok) throw new Error(editing ? 'Failed to update server' : 'Failed to create server')
-      return res.json()
     },
     onSuccess: () => {
       setShowAdd(false)
@@ -124,11 +117,7 @@ function ServersPage() {
 
   const removeMutation = useMutation({
     mutationFn: async (server: Server) => {
-      const res = await fetch(`/api/servers/${server.id}`, {
-        method: 'DELETE',
-        headers: auth,
-      })
-      if (!res.ok) throw new Error('Failed to delete server')
+      await apiJson(`/api/servers/${server.id}`, { method: 'DELETE' })
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['servers'] }),
     onError: (e: Error) => setError(e.message),
@@ -163,7 +152,7 @@ function ServersPage() {
   const openHostSetup = async (server: Server) => {
     setError('')
     try {
-      const res = await fetch(`/api/servers/${server.id}/host-config`, { headers: auth })
+      const res = await apiFetch(`/api/servers/${server.id}/host-config`)
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
         setError(err.error || 'Failed to load host config')

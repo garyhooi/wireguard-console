@@ -50,14 +50,28 @@ func main() {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RealIP)
-	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"https://*", "http://*"},
-		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
-		ExposedHeaders:   []string{"Link"},
-		AllowCredentials: true,
-		MaxAge:           300,
-	}))
+
+	// The SPA and the API are same-origin behind one Caddy in every TLS
+	// mode; the session credential travels as a cookie, so no cross-origin
+	// request needs to be served. Pin the CORS allow-list to the configured
+	// console origin only — a wildcard allow-list with credentials would
+	// let any origin ride the cookie jar.
+	consoleOrigin := os.Getenv("CONSOLE_ORIGIN")
+	if consoleOrigin == "" {
+		if d := os.Getenv("CONSOLE_DOMAIN"); d != "" {
+			consoleOrigin = "https://" + d
+		}
+	}
+	if consoleOrigin != "" {
+		r.Use(cors.Handler(cors.Options{
+			AllowedOrigins:   []string{consoleOrigin},
+			AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+			AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
+			ExposedHeaders:   []string{"Link"},
+			AllowCredentials: true,
+			MaxAge:           300,
+		}))
+	}
 
 	store := api.NewStore(conn.Pool())
 
@@ -121,6 +135,11 @@ func main() {
 		// Protected routes group
 		r.Group(func(r chi.Router) {
 			r.Use(api.AuthMiddleware(store))
+			// Session cookie auth rides along automatically on same-site
+			// requests, so every state-changing authed call must also carry
+			// the per-session CSRF token (see RequireCSRF). Reads pass
+			// through untouched.
+			r.Use(api.RequireCSRF(store))
 
 			r.Post("/auth/2fa/setup", api.Setup2FA(store))
 			r.Post("/auth/2fa/enable", api.Enable2FA(store))

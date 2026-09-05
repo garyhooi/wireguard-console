@@ -23,6 +23,7 @@ import {
   labelCls,
 } from '../../lib/ui'
 import { Confirm2FA } from '../../lib/Confirm2FA'
+import { apiJson } from '../../lib/api'
 
 interface Admin {
   id: string
@@ -43,22 +44,11 @@ export const Route = createFileRoute('/_authenticated/admins')({
   component: AdminsPage,
 })
 
-const auth = { Authorization: localStorage.getItem('token')! }
 
 const ROLE_LABELS: Record<string, string> = {
   super_admin: 'Super admin',
   admin: 'Admin',
   auditor: 'Auditor',
-}
-
-/** Parse a JSON error body, or fall back to the given default. */
-async function errMsg(res: Response, fallback: string): Promise<string> {
-  try {
-    const j = await res.json()
-    return (j as { error?: string }).error || fallback
-  } catch {
-    return fallback
-  }
 }
 
 /** A pending privileged action awaiting the admin's own 2FA code. */
@@ -84,34 +74,29 @@ function AdminsPage() {
   const { data: me } = useQuery<Me>({
     queryKey: ['me'],
     queryFn: async () => {
-      const res = await fetch('/api/admins/me', { headers: auth })
-      if (!res.ok) throw new Error('Failed to load profile')
-      return res.json()
+      return apiJson<Me>('/api/admins/me')
     },
   })
 
   const { data: admins, isLoading } = useQuery<Admin[]>({
     queryKey: ['admins'],
     queryFn: async () => {
-      const res = await fetch('/api/admins', { headers: auth })
-      if (!res.ok) {
-        if (res.status === 403) throw new Error('Only super_admins can view admin management')
+      try {
+        return await apiJson<Admin[]>('/api/admins')
+      } catch (e) {
+        const err = e as { status?: number }
+        if (err.status === 403) throw new Error('Only super_admins can view admin management')
         throw new Error('Failed to fetch admins')
       }
-      return res.json()
     },
   })
 
   const inviteMutation = useMutation({
     mutationFn: async () => {
-      const res = await fetch('/api/admins', {
-        method: 'POST',
-        headers: { ...auth, 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
-      })
-      if (!res.ok) {
-        const err = await errMsg(res, 'Failed to invite admin')
-        throw new Error(err)
+      try {
+        await apiJson('/api/admins', { method: 'POST', body: form })
+      } catch (e) {
+        throw new Error((e as Error).message || 'Failed to invite admin')
       }
     },
     onSuccess: () => {
@@ -129,15 +114,11 @@ function AdminsPage() {
   // ---- Privileged admin mutations (each requires the actor's own 2FA) ----
 
   const patchAdmin = async (id: string, body: Record<string, string>) => {
-    const res = await fetch(`/api/admins/${id}`, {
-      method: 'PATCH',
-      headers: { ...auth, 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-    if (!res.ok) {
-      throw new Error(await errMsg(res, 'Failed to update admin'))
+    try {
+      return await apiJson(`/api/admins/${id}`, { method: 'PATCH', body })
+    } catch (e) {
+      throw new Error((e as Error).message || 'Failed to update admin')
     }
-    return res.json()
   }
 
   const roleMutation = useMutation({
@@ -153,13 +134,14 @@ function AdminsPage() {
 
   const resetPwMutation = useMutation({
     mutationFn: async (a: { admin: Admin; code: string }) => {
-      const res = await fetch(`/api/admins/${a.admin.id}/reset-password`, {
-        method: 'POST',
-        headers: { ...auth, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: a.code }),
-      })
-      if (!res.ok) throw new Error(await errMsg(res, 'Failed to reset password'))
-      return res.json()
+      try {
+        return await apiJson(`/api/admins/${a.admin.id}/reset-password`, {
+          method: 'POST',
+          body: { code: a.code },
+        })
+      } catch (e) {
+        throw new Error((e as Error).message || 'Failed to reset password')
+      }
     },
     onSuccess: (data, vars) => {
       const pw = (data as { password?: string } | undefined)?.password
@@ -174,12 +156,14 @@ function AdminsPage() {
 
   const reset2FAMutation = useMutation({
     mutationFn: async (a: { admin: Admin; code: string }) => {
-      const res = await fetch(`/api/admins/${a.admin.id}/reset-2fa`, {
-        method: 'POST',
-        headers: { ...auth, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: a.code }),
-      })
-      if (!res.ok) throw new Error(await errMsg(res, 'Failed to reset 2FA'))
+      try {
+        await apiJson(`/api/admins/${a.admin.id}/reset-2fa`, {
+          method: 'POST',
+          body: { code: a.code },
+        })
+      } catch (e) {
+        throw new Error((e as Error).message || 'Failed to reset 2FA')
+      }
     },
     onSuccess: (_d, vars) => {
       setNotice(`2FA for ${vars.admin.email} has been reset — they can re-enroll from Profile.`)

@@ -11,6 +11,7 @@ import {
   tdCls,
   thCls,
 } from '../../lib/ui'
+import { apiFetch, apiJson } from '../../lib/api'
 
 interface AuditLog {
   id: number
@@ -32,8 +33,6 @@ export const Route = createFileRoute('/_authenticated/audit-log')({
   component: AuditLogPage,
 })
 
-const auth = { Authorization: localStorage.getItem('token')! }
-
 const PURGE_OPTIONS = [
   { days: 30, label: 'Older than 30 days' },
   { days: 90, label: 'Older than 90 days' },
@@ -47,21 +46,13 @@ function AuditLogPage() {
 
   const { data: logs, isLoading } = useQuery<AuditLog[]>({
     queryKey: ['audit-logs'],
-    queryFn: async () => {
-      const res = await fetch('/api/audit-logs', { headers: auth })
-      if (!res.ok) throw new Error('Failed to fetch audit logs')
-      return res.json()
-    },
+    queryFn: async () => apiJson<AuditLog[]>('/api/audit-logs'),
     refetchInterval: 30000,
   })
 
   const { data: me } = useQuery<Me>({
     queryKey: ['me'],
-    queryFn: async () => {
-      const res = await fetch('/api/admins/me', { headers: auth })
-      if (!res.ok) throw new Error('Failed to load profile')
-      return res.json()
-    },
+    queryFn: async () => apiJson<Me>('/api/admins/me'),
   })
 
   const isSuperAdmin = me?.role === 'super_admin'
@@ -69,12 +60,7 @@ function AuditLogPage() {
   const purgeMutation = useMutation({
     mutationFn: async (mode: { days?: number }) => {
       const qs = mode.days ? `?days=${mode.days}` : ''
-      const res = await fetch(`/api/audit-logs${qs}`, { method: 'DELETE', headers: auth })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.error || 'Failed to purge audit logs')
-      }
-      return res.json()
+      return apiJson<{ deleted: number; scope: string }>(`/api/audit-logs${qs}`, { method: 'DELETE' })
     },
     onSuccess: (data: { deleted: number; scope: string }) => {
       setActionMsg(

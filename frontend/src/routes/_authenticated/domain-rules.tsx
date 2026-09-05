@@ -2,6 +2,7 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { IconPlus, IconRefresh } from '@tabler/icons-react'
+import { apiJson } from '../../lib/api'
 import {
   Badge,
   EmptyState,
@@ -51,11 +52,7 @@ function DomainRulesPage() {
   const { data: rules, isLoading, refetch } = useQuery<DomainRule[]>({
     queryKey: ['domain-rules'],
     queryFn: async () => {
-      const res = await fetch('/api/domain-rules', {
-        headers: { Authorization: localStorage.getItem('token')! },
-      })
-      if (!res.ok) throw new Error('Failed to fetch domain rules')
-      return res.json()
+      return apiJson<DomainRule[]>('/api/domain-rules')
     },
   })
 
@@ -66,11 +63,7 @@ function DomainRulesPage() {
   } = useQuery<SyncStatus>({
     queryKey: ['domain-rules-status'],
     queryFn: async () => {
-      const res = await fetch('/api/domain-rules/status', {
-        headers: { Authorization: localStorage.getItem('token')! },
-      })
-      if (!res.ok) throw new Error('Failed to fetch AdGuard status')
-      return res.json()
+      return apiJson<SyncStatus>('/api/domain-rules/status')
     },
     refetchInterval: 30000,
   })
@@ -78,27 +71,14 @@ function DomainRulesPage() {
   const { data: users } = useQuery({
     queryKey: ['users'],
     queryFn: async () => {
-      const res = await fetch('/api/users', {
-        headers: { Authorization: localStorage.getItem('token')! },
-      })
-      if (!res.ok) throw new Error('Failed to fetch users')
-      return res.json() as Promise<Array<{ id: string; email: string; full_name: string }>>
+      return apiJson<Array<{ id: string; email: string; full_name: string }>>('/api/users')
     },
     enabled: scope === 'user',
   })
 
   const addMutation = useMutation({
     mutationFn: async (data: { scope: string; user_id?: string; domain: string }) => {
-      const res = await fetch('/api/domain-rules', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: localStorage.getItem('token')!,
-        },
-        body: JSON.stringify(data),
-      })
-      if (!res.ok) throw new Error('Failed to create domain rule')
-      return res.json()
+      return apiJson('/api/domain-rules', { method: 'POST', body: data })
     },
     onSuccess: () => {
       setShowAddModal(false)
@@ -111,12 +91,7 @@ function DomainRulesPage() {
 
   const deleteMutation = useMutation({
     mutationFn: async (id: string) => {
-      const res = await fetch(`/api/domain-rules/${id}`, {
-        method: 'DELETE',
-        headers: { Authorization: localStorage.getItem('token')! },
-      })
-      if (!res.ok) throw new Error('Failed to delete domain rule')
-      return res.json()
+      return apiJson(`/api/domain-rules/${id}`, { method: 'DELETE' })
     },
     onSuccess: () => {
       refetch()

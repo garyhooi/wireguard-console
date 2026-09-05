@@ -1,4 +1,4 @@
-import { createFileRoute, Link, Outlet } from '@tanstack/react-router'
+import { createFileRoute, Link, Outlet, redirect } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
@@ -19,6 +19,7 @@ import {
   IconWorld,
   IconX,
 } from '@tabler/icons-react'
+import { apiFetch, clearSessionCache, fetchSession } from '../lib/api'
 
 interface Stats {
   total_peers: number
@@ -31,9 +32,12 @@ interface Stats {
 export const Route = createFileRoute('/_authenticated')({
   component: AuthenticatedLayout,
   beforeLoad: async () => {
-    const token = localStorage.getItem('token')
-    if (!token) {
-      window.location.href = '/login'
+    // The session lives in an HttpOnly cookie; the only authoritative check
+    // is a server probe. fetchSession() caches the result and sets the
+    // in-memory CSRF token from /admins/me on this page load.
+    const session = await fetchSession()
+    if (!session) {
+      throw redirect({ to: '/login' })
     }
   },
 })
@@ -110,23 +114,23 @@ function AuthenticatedLayout() {
   const { data: stats } = useQuery<Stats>({
     queryKey: ['stats'],
     queryFn: async () => {
-      const res = await fetch('/api/stats/overview', {
-        headers: { Authorization: localStorage.getItem('token')! },
-      })
-      if (!res.ok) {
-        if (res.status === 401) {
-          localStorage.removeItem('token')
-          window.location.href = '/login'
-        }
-        throw new Error('Failed to fetch stats')
-      }
+      const res = await apiFetch('/api/stats/overview')
+      if (!res.ok) throw new Error('Failed to fetch stats')
       return res.json()
     },
     refetchInterval: 15000,
   })
 
-  const logout = () => {
-    localStorage.removeItem('token')
+  // Server-side logout: revoke the session row (kills the token everywhere)
+  // then clear the in-memory cache. The HttpOnly cookie is cleared by the
+  // server's response; no localStorage token exists to remove.
+  const logout = async () => {
+    try {
+      await apiFetch('/api/auth/logout', { method: 'POST' })
+    } catch {
+      // Even if the network call fails we must still leave the authed shell.
+    }
+    clearSessionCache()
     window.location.href = '/login'
   }
 

@@ -2,6 +2,7 @@ import { createFileRoute, Link } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
 import { IconArrowRight, IconCirclePlus } from '@tabler/icons-react'
 import { EmptyState, PageHeader, Panel, Skeleton, Stat, StatusBadge } from '../../lib/ui'
+import { apiJson } from '../../lib/api'
 
 interface Stats {
   total_peers: number
@@ -28,25 +29,13 @@ export const Route = createFileRoute('/_authenticated/dashboard')({
 export function DashboardPage() {
   const { data: stats, isLoading } = useQuery<Stats>({
     queryKey: ['stats'],
-    queryFn: async () => {
-      const res = await fetch('/api/stats/overview', {
-        headers: { Authorization: localStorage.getItem('token')! },
-      })
-      if (!res.ok) throw new Error('Failed to fetch stats')
-      return res.json()
-    },
+    queryFn: async () => apiJson<Stats>('/api/stats/overview'),
     refetchInterval: 15000,
   })
 
   const { data: peers } = useQuery<Peer[]>({
     queryKey: ['peers'],
-    queryFn: async () => {
-      const res = await fetch('/api/peers', {
-        headers: { Authorization: localStorage.getItem('token')! },
-      })
-      if (!res.ok) throw new Error('Failed to fetch peers')
-      return res.json()
-    },
+    queryFn: async () => apiJson<Peer[]>('/api/peers'),
     refetchInterval: 15000,
   })
 

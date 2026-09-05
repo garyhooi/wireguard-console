@@ -1,4 +1,5 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
+import { apiJson } from '../../lib/api'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { IconShieldLock } from '@tabler/icons-react'
@@ -25,7 +26,6 @@ export const Route = createFileRoute('/_authenticated/profile')({
   component: ProfilePage,
 })
 
-const auth = { Authorization: localStorage.getItem('token')! }
 
 function ProfilePage() {
   const queryClient = useQueryClient()
@@ -39,23 +39,16 @@ function ProfilePage() {
   const { data: me } = useQuery<Me>({
     queryKey: ['me'],
     queryFn: async () => {
-      const res = await fetch('/api/admins/me', { headers: auth })
-      if (!res.ok) throw new Error('Failed to load profile')
-      return res.json()
+      return apiJson<Me>('/api/admins/me')
     },
   })
 
   const passwordMutation = useMutation({
     mutationFn: async () => {
-      const res = await fetch('/api/admins/me/password', {
+      await apiJson('/api/admins/me/password', {
         method: 'POST',
-        headers: { ...auth, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ current_password: pw.current, new_password: pw.next }),
+        body: { current_password: pw.current, new_password: pw.next },
       })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.error || 'Failed to change password')
-      }
     },
     onSuccess: () => {
       setPwMsg('Password updated.')
@@ -70,15 +63,10 @@ function ProfilePage() {
 
   const disable2FAMutation = useMutation({
     mutationFn: async () => {
-      const res = await fetch('/api/auth/2fa/disable', {
+      await apiJson('/api/auth/2fa/disable', {
         method: 'POST',
-        headers: { ...auth, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: totpCode }),
+        body: { code: totpCode },
       })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.error || 'Failed to disable 2FA')
-      }
     },
     onSuccess: () => {
       setTotpMsg('2FA disabled.')

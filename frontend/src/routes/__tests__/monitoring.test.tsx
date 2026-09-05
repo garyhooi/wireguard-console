@@ -79,7 +79,6 @@ const localStatus = {
 
 describe('MonitoringPage', () => {
   beforeEach(() => {
-    localStorage.setItem('token', 'test-token')
   })
 
   function stubFetch(overrides: { local?: () => Promise<Response> } = {}) {

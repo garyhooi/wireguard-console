@@ -748,6 +748,19 @@ func UpdateAdmin(store *Store) http.HandlerFunc {
 		}
 		if len(meta) > 0 {
 			logAudit(ctx, store, actorID, "admin.update", "admin", adminID.String(), meta)
+
+			// Role/email/status changed: revoke the target admin's sessions
+			// so the new state applies immediately. When the actor edited
+			// themselves the current (2FA-confirmed) session survives.
+			if isSelf {
+				if err := revokeAdminSessionsExcept(ctx, store, adminID, currentSessionTokenHash(r)); err != nil {
+					log.Printf("Failed to revoke other sessions after self admin.update: admin_id=%s, err=%v", adminID, err)
+				}
+			} else {
+				if err := revokeAdminSessions(ctx, store, adminID); err != nil {
+					log.Printf("Failed to revoke sessions after admin.update: admin_id=%s, err=%v", adminID, err)
+				}
+			}
 		}
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
@@ -786,6 +799,12 @@ func ResetAdminPassword(store *Store) http.HandlerFunc {
 			return
 		}
 
+		// The target's credentials changed under them: revoke every session
+		// so they must sign in again with the new temporary password.
+		if err := revokeAdminSessions(ctx, store, adminID); err != nil {
+			log.Printf("Failed to revoke sessions after password reset: admin_id=%s, err=%v", adminID, err)
+		}
+
 		var adminEmail string
 		store.pool.QueryRow(ctx, `SELECT email FROM admins WHERE id = $1`, adminID).Scan(&adminEmail)
 
@@ -821,6 +840,11 @@ func DeleteAdmin(store *Store) http.HandlerFunc {
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to delete admin")
 			return
+		}
+
+		// Disabled admin: kill their live sessions so the state applies now.
+		if err := revokeAdminSessions(ctx, store, adminID); err != nil {
+			log.Printf("Failed to revoke sessions after admin delete: admin_id=%s, err=%v", adminID, err)
 		}
 
 		logAudit(ctx, store, actorID, "admin.delete", "admin", adminID.String(), nil)

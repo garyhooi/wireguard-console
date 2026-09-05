@@ -3,9 +3,10 @@ import { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { IconShieldLock } from '@tabler/icons-react'
 import { PrimaryButton, inputCls, labelCls } from '../lib/ui'
+import { apiFetch, setCsrfToken } from '../lib/api'
 
 interface LoginResponse {
-  token?: string
+  csrf_token?: string
   pending_2fa?: boolean
   admin?: {
     id: string
@@ -27,22 +28,24 @@ function LoginPage() {
 
   const loginMutation = useMutation({
     mutationFn: async (credentials: { email: string; password: string }) => {
-      const res = await fetch('/api/auth/login', {
+      const res = await apiFetch('/api/auth/login', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(credentials),
+        body: credentials,
+        skipCsrf: true,
       })
       if (!res.ok) {
-        throw new Error('Login failed')
+        const err = await res.json().catch(() => null)
+        throw new Error((err as { error?: string } | null)?.error || 'Login failed')
       }
       return res.json() as Promise<LoginResponse>
     },
     onSuccess: (data) => {
-      if (data.pending_2fa && data.token) {
-        localStorage.setItem('pending2fa_token', data.token)
+      if (data.pending_2fa) {
+        // The pending-2FA token rides in the wgc_pending2fa HttpOnly cookie
+        // set by the server — nothing to store client-side.
         window.location.href = '/2fa-verify'
-      } else if (data.token) {
-        localStorage.setItem('token', data.token)
+      } else {
+        setCsrfToken(data.csrf_token)
         window.location.href = '/dashboard'
       }
     },

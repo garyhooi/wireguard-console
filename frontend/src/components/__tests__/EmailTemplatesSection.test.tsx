@@ -36,7 +36,6 @@ const templates = [
 ]
 
 beforeEach(() => {
-  localStorage.setItem('token', 'test-token')
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url: string, init?: RequestInit) => {

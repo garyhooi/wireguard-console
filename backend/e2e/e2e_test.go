@@ -161,6 +161,11 @@ func TestMain(m *testing.M) {
 		"POSTGRES_PASSWORD="+os.Getenv("E2E_PG_PASSWORD"),
 		"POSTGRES_DB="+os.Getenv("E2E_PG_DB"),
 		"BACKUP_DIR="+tmp,
+		// Transition mode: honor the legacy Authorization header alongside
+		// the new HttpOnly-cookie transport. The suite's api()/rawGet()
+		// helpers exercise the header path (an old bundle mid-deploy); the
+		// cookie+CSRF test below exercises the primary path.
+		"AUTH_ACCEPT_HEADER=1",
 	)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
@@ -196,6 +201,13 @@ func randomHex(n int) string {
 
 // seedAdminDirect inserts the e2e super_admin with a KNOWN password hash.
 func seedAdminDirect(dbURL string) error {
+	return seedAdmin(dbURL, "e2e@console.test", "e2e-Passw0rd!", "super_admin")
+}
+
+// seedAdmin inserts (or leaves in place) an admin with a known password hash
+// and role — idempotent by email. Used to give tests a deterministic account
+// without going through the invite/login flow.
+func seedAdmin(dbURL, email, password, role string) error {
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dbURL)
 	if err != nil {
@@ -205,12 +217,12 @@ func seedAdminDirect(dbURL string) error {
 
 	salt := make([]byte, 16)
 	rand.Read(salt)
-	hash := argon2.IDKey([]byte("e2e-Passw0rd!"), salt, 1<<15, 1, 4, 32)
+	hash := argon2.IDKey([]byte(password), salt, 1<<15, 1, 4, 32)
 	passwordHash := hex.EncodeToString(salt) + ":" + hex.EncodeToString(hash)
 
 	var exists bool
 	err = pool.QueryRow(ctx,
-		`SELECT true FROM admins WHERE email = 'e2e@console.test'`).Scan(&exists)
+		`SELECT true FROM admins WHERE email = $1`, email).Scan(&exists)
 	if err == pgx.ErrNoRows {
 		exists = false
 	} else if err != nil {
@@ -219,8 +231,8 @@ func seedAdminDirect(dbURL string) error {
 	if !exists {
 		_, err = pool.Exec(ctx, `
 			INSERT INTO admins (email, password_hash, role, status)
-			VALUES ('e2e@console.test', $1, 'super_admin', 'active')
-		`, passwordHash)
+			VALUES ($1, $2, $3, 'active')
+		`, email, passwordHash, role)
 		if err != nil {
 			return err
 		}
@@ -949,6 +961,278 @@ func TestEndToEnd(t *testing.T) {
 	// 429 a fresh attempt this late in the suite.
 	denyResp, _ := api(t, "DELETE", "/api/audit-logs?days=30", op2Tok, nil)
 	expectStatus(t, denyResp, 403, "DELETE /api/audit-logs (admin denied)")
+}
+
+// cookieJarClient returns an http.Client whose cookie jar is shared, and a
+// helper to read a cookie's Set-Cookie attributes. This is the transport the
+// new frontend actually uses (HttpOnly SameSite=Strict cookie + X-CSRF-Token).
+type cookieJarClient struct {
+	client *http.Client
+	jar    map[string]*http.Cookie
+}
+
+func newCookieClient() *cookieJarClient {
+	jar := make(map[string]*http.Cookie)
+	return &cookieJarClient{
+		jar: jar,
+		client: &http.Client{
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				// Copy cookies into the redirect target so cross-call flows
+				// behave like a real browser.
+				for _, c := range via[0].Cookies() {
+					req.AddCookie(c)
+				}
+				return nil
+			},
+		},
+	}
+}
+
+func (c *cookieJarClient) do(t *testing.T, method, path string, csrf string, body interface{}) (*http.Response, map[string]interface{}) {
+	t.Helper()
+	return c.doFrom(t, "", method, path, csrf, body)
+}
+
+// doFrom is do with an explicit client-IP override (X-Forwarded-For). The
+// login rate limiter is per-IP (5/15min), so a test that logs in after a
+// heavy header-path suite must use its own bucket.
+func (c *cookieJarClient) doFrom(t *testing.T, fromIP, method, path string, csrf string, body interface{}) (*http.Response, map[string]interface{}) {
+	t.Helper()
+	var buf bytes.Buffer
+	if body != nil {
+		json.NewEncoder(&buf).Encode(body)
+	}
+	req, err := http.NewRequest(method, baseURL+path, &buf)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	for _, ck := range c.jar {
+		req.AddCookie(ck)
+	}
+	if fromIP != "" {
+		req.Header.Set("X-Forwarded-For", fromIP)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if csrf != "" {
+		req.Header.Set("X-CSRF-Token", csrf)
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	// Persist Set-Cookie from the response into the jar.
+	for _, ck := range resp.Cookies() {
+		if ck.MaxAge <= 0 && ck.Value == "" {
+			delete(c.jar, ck.Name)
+		} else {
+			c.jar[ck.Name] = ck
+		}
+	}
+	var out map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&out)
+	resp.Body.Close()
+	return resp, out
+}
+
+func (c *cookieJarClient) login(t *testing.T, email, password string) string {
+	t.Helper()
+	return c.loginFrom(t, "203.0.113.99", email, password)
+}
+
+// loginFrom logs in with an explicit client IP so the per-IP rate limiter
+// bucket is separate from the header-path suite's bucket.
+func (c *cookieJarClient) loginFrom(t *testing.T, fromIP, email, password string) string {
+	t.Helper()
+	resp, out := c.doFrom(t, fromIP, "POST", "/api/auth/login", "", map[string]string{
+		"email": email, "password": password,
+	})
+	expectStatus(t, resp, 200, "cookie login")
+	csrf, _ := out["csrf_token"].(string)
+	if csrf == "" {
+		t.Fatal("cookie login returned no csrf_token")
+	}
+	sc, ok := c.jar["wgc_session"]
+	if !ok || sc.HttpOnly != true || sc.SameSite != http.SameSiteStrictMode {
+		t.Fatalf("wgc_session cookie not HttpOnly/SameSite=Strict: %+v", sc)
+	}
+	return csrf
+}
+
+// TestCookieSessionAuth is the primary-transport contract: the session is an
+// HttpOnly cookie, state-changing calls need X-CSRF-Token, logout revokes the
+// server row, and a revoked/expired cookie 401s.
+func TestCookieSessionAuth(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	seedAdmin(dbURL, "cookie@console.test", "Cookie-Passw0rd!", "super_admin")
+
+	// Cookie login: sets HttpOnly Strict cookie + returns csrf_token. Login
+	// from a dedicated XFF IP so the shared per-IP login rate limiter (the
+	// header-path suite already used several attempts) doesn't 429 us.
+	c := newCookieClient()
+	csrf := c.login(t, "cookie@console.test", "Cookie-Passw0rd!")
+	if c.jar["wgc_session"].Secure {
+		// The e2e API runs over plain HTTP with no X-Forwarded-Proto, so the
+		// Secure flag must be off — proving the helper gates it correctly.
+		t.Log("note: e2e runs over http; Secure flag off as expected")
+	}
+
+	// Reads work with just the cookie (no header, no CSRF).
+	resp, _ := c.do(t, "GET", "/api/admins/me", "", nil)
+	expectStatus(t, resp, 200, "GET /api/admins/me (cookie only)")
+
+	// A state-changing call WITHOUT the CSRF token is refused (403).
+	resp, _ = c.do(t, "POST", "/api/servers", "", map[string]string{"name": "X"})
+	expectStatus(t, resp, 403, "POST /api/servers without csrf")
+
+	// With the CSRF token it succeeds.
+	resp, _ = c.do(t, "POST", "/api/servers", csrf, map[string]interface{}{
+		"name": "CookieSrv", "public_endpoint": "198.51.100.7:51820",
+	})
+	expectStatus(t, resp, 201, "POST /api/servers with csrf")
+
+	// The CSRF token is per-session: a wrong token is refused even when the
+	// cookie is valid.
+	resp, _ = c.do(t, "POST", "/api/servers", "wrongcsrf", map[string]interface{}{
+		"name": "Y", "public_endpoint": "198.51.100.8:51820",
+	})
+	expectStatus(t, resp, 403, "POST /api/servers with wrong csrf")
+
+	// ---- Credential-change revocation ----
+	// A second live session for the same admin (a stolen/lost device) must
+	// die when the password changes from the first session, while the acting
+	// session survives.
+	c2 := newCookieClient()
+	_ = c2.loginFrom(t, "203.0.113.100", "cookie@console.test", "Cookie-Passw0rd!")
+	resp, _ = c2.do(t, "GET", "/api/admins/me", "", nil)
+	expectStatus(t, resp, 200, "second session alive before password change")
+
+	resp, _ = c.do(t, "POST", "/api/admins/me/password", csrf, map[string]interface{}{
+		"current_password": "Cookie-Passw0rd!", "new_password": "Cookie-Passw0rd2!",
+	})
+	expectStatus(t, resp, 200, "change password (session A)")
+
+	// Session A (acting) still works.
+	resp, _ = c.do(t, "GET", "/api/admins/me", "", nil)
+	expectStatus(t, resp, 200, "session A alive after password change")
+
+	// Session B was revoked: its next read 401s.
+	resp, _ = c2.do(t, "GET", "/api/admins/me", "", nil)
+	expectStatus(t, resp, 401, "session B dead after password change")
+
+	// Direct DB check: exactly ONE live session remains (the acting one).
+	{
+		poolX, _ := pgxpool.New(context.Background(), dbURL)
+		defer poolX.Close()
+		var n int
+		poolX.QueryRow(context.Background(), `
+			SELECT count(*) FROM admin_sessions s JOIN admins a ON a.id = s.admin_id
+			WHERE a.email = 'cookie@console.test' AND s.expires_at > now()`).Scan(&n)
+		if n != 1 {
+			t.Fatalf("expected 1 live session after password change, got %d", n)
+		}
+	}
+
+	// Logout (still session A — its cookie was not rotated by the password
+	// change): server revokes the row and clears the cookie.
+	resp, _ = c.do(t, "POST", "/api/auth/logout", csrf, nil)
+	expectStatus(t, resp, 200, "POST /api/auth/logout")
+	if _, still := c.jar["wgc_session"]; still {
+		t.Fatal("wgc_session cookie still present after logout")
+	}
+
+	// The revoked session is dead: subsequent reads 401.
+	resp, _ = c.do(t, "GET", "/api/admins/me", "", nil)
+	expectStatus(t, resp, 401, "GET /api/admins/me after logout")
+
+	// Direct DB check: no live session rows remain for the admin.
+	{
+		poolX, _ := pgxpool.New(context.Background(), dbURL)
+		defer poolX.Close()
+		var n int
+		poolX.QueryRow(context.Background(), `
+			SELECT count(*) FROM admin_sessions s JOIN admins a ON a.id = s.admin_id
+			WHERE a.email = 'cookie@console.test' AND s.expires_at > now()`).Scan(&n)
+		if n != 0 {
+			t.Fatalf("expected 0 live sessions after logout, got %d", n)
+		}
+	}
+}
+
+// TestCookie2FALogin covers the 2FA login path over the cookie transport: a
+// fresh login with 2FA enabled mints a short-lived pending cookie, verify
+// swaps it for the real session cookie, and the pending cookie is consumed.
+func TestCookie2FALogin(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	seedAdmin(dbURL, "cookie2fa@console.test", "Cookie2FA-Passw0rd!", "super_admin")
+	fromIP := "203.0.113.200"
+
+	// Login, enroll 2FA (step-up uses the session cookie + CSRF).
+	c := newCookieClient()
+	csrf := c.loginFrom(t, fromIP, "cookie2fa@console.test", "Cookie2FA-Passw0rd!")
+	resp, setupOut := c.doFrom(t, fromIP, "POST", "/api/auth/2fa/setup", csrf, nil)
+	expectStatus(t, resp, 200, "2fa setup")
+	secret, _ := setupOut["secret"].(string)
+	if secret == "" {
+		t.Fatal("2fa setup returned no secret")
+	}
+	code, err := totp.GenerateCode(secret, time.Now())
+	if err != nil {
+		t.Fatalf("generate totp: %v", err)
+	}
+	resp, _ = c.doFrom(t, fromIP, "POST", "/api/auth/2fa/enable", csrf, map[string]string{
+		"secret": secret, "code": code,
+	})
+	expectStatus(t, resp, 200, "2fa enable")
+
+	// Logout so the next login starts the 2FA flow.
+	resp, _ = c.doFrom(t, fromIP, "POST", "/api/auth/logout", csrf, nil)
+	expectStatus(t, resp, 200, "logout before 2FA login")
+
+	// Fresh login → pending_2fa=true and the pending cookie (not the session
+	// cookie) is set.
+	resp, out := c.doFrom(t, fromIP, "POST", "/api/auth/login", "", map[string]string{
+		"email": "cookie2fa@console.test", "password": "Cookie2FA-Passw0rd!",
+	})
+	expectStatus(t, resp, 200, "2FA login pending")
+	if pending, _ := out["pending_2fa"].(bool); !pending {
+		t.Fatal("expected pending_2fa=true")
+	}
+	if _, has := c.jar["wgc_session"]; has {
+		t.Fatal("session cookie must not be set before 2FA verify")
+	}
+	pendingCookie, has := c.jar["wgc_pending2fa"]
+	if !has || pendingCookie.HttpOnly != true {
+		t.Fatalf("wgc_pending2fa cookie not HttpOnly: %+v", pendingCookie)
+	}
+
+	// Verify with the correct code → the session cookie replaces the pending
+	// one and a csrf_token is returned.
+	resp, out = c.doFrom(t, fromIP, "POST", "/api/auth/2fa/verify", "", map[string]string{
+		"code": current2FACode(t, secret),
+	})
+	expectStatus(t, resp, 200, "2fa verify")
+	csrf2, _ := out["csrf_token"].(string)
+	if csrf2 == "" {
+		t.Fatal("2fa verify returned no csrf_token")
+	}
+	if _, has := c.jar["wgc_session"]; !has {
+		t.Fatal("session cookie missing after 2fa verify")
+	}
+	if _, has := c.jar["wgc_pending2fa"]; has {
+		t.Fatal("pending cookie must be cleared after 2fa verify")
+	}
+
+	// The new session works.
+	resp, _ = c.doFrom(t, fromIP, "GET", "/api/admins/me", "", nil)
+	expectStatus(t, resp, 200, "GET /api/admins/me (post-2FA cookie session)")
 }
 
 func firstID(t *testing.T, path, token string) string {

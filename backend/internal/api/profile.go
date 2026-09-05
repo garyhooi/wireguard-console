@@ -3,13 +3,16 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"time"
 
 	"github.com/wireguard-console/backend/internal/auth"
 )
 
-// GetMe returns the signed-in admin's own profile.
+// GetMe returns the signed-in admin's own profile plus the session's CSRF
+// token (used by the SPA to stamp state-changing requests — the session
+// cookie itself is HttpOnly and invisible to JS).
 func GetMe(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		adminID := getAdminID(r)
@@ -31,6 +34,8 @@ func GetMe(store *Store) http.HandlerFunc {
 			return
 		}
 
+		csrfToken, _ := r.Context().Value(csrfTokenKey{}).(string)
+
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"id":           adminID.String(),
 			"email":        email,
@@ -38,6 +43,7 @@ func GetMe(store *Store) http.HandlerFunc {
 			"totp_enabled": totpEnabled,
 			"status":       status,
 			"created_at":   createdAt.UTC().Format(time.RFC3339),
+			"csrf_token":   csrfToken,
 		})
 	}
 }
@@ -77,6 +83,13 @@ func ChangePassword(store *Store) http.HandlerFunc {
 		`, hashPassword(req.NewPassword), adminID); err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to update password")
 			return
+		}
+
+		// Credentials changed: kill every other session so a stolen token
+		// stops working; the acting session survives (the password was just
+		// proven).
+		if err := revokeAdminSessionsExcept(ctx, store, adminID, currentSessionTokenHash(r)); err != nil {
+			log.Printf("Failed to revoke other sessions after password change: admin_id=%s, err=%v", adminID, err)
 		}
 
 		logAudit(ctx, store, adminID, "admin.password_change", "admin", adminID.String(), nil)
@@ -120,6 +133,13 @@ func Disable2FA(store *Store) http.HandlerFunc {
 		`, adminID); err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to disable 2FA")
 			return
+		}
+
+		// 2FA removal is a credential downgrade: kill every other session so
+		// sessions minted under the stronger policy don't outlive it. The
+		// acting session survives.
+		if err := revokeAdminSessionsExcept(ctx, store, adminID, currentSessionTokenHash(r)); err != nil {
+			log.Printf("Failed to revoke other sessions after 2FA disable: admin_id=%s, err=%v", adminID, err)
 		}
 
 		logAudit(ctx, store, adminID, "admin.2fa_disable", "admin", adminID.String(), nil)

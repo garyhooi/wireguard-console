@@ -52,7 +52,6 @@ describe('DashboardPage', () => {
         } as Response
       }),
     )
-    localStorage.setItem('token', 'test-token')
   })
 
   it('renders KPIs from the API', async () => {

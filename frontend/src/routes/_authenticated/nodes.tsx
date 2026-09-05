@@ -1,4 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
+import { apiJson } from '../../lib/api'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { IconCopy, IconPlus } from '@tabler/icons-react'
@@ -33,7 +34,6 @@ export const Route = createFileRoute('/_authenticated/nodes')({
   component: NodesPage,
 })
 
-const auth = { Authorization: localStorage.getItem('token')! }
 
 function NodesPage() {
   const queryClient = useQueryClient()
@@ -46,22 +46,14 @@ function NodesPage() {
   const { data: nodes, isLoading } = useQuery<Node[]>({
     queryKey: ['nodes'],
     queryFn: async () => {
-      const res = await fetch('/api/nodes', { headers: auth })
-      if (!res.ok) throw new Error('Failed to fetch nodes')
-      return res.json()
+      return apiJson<Node[]>('/api/nodes')
     },
     refetchInterval: 15000,
   })
 
   const createMutation = useMutation({
     mutationFn: async () => {
-      const res = await fetch('/api/nodes', {
-        method: 'POST',
-        headers: { ...auth, 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
-      })
-      if (!res.ok) throw new Error('Failed to create node')
-      return res.json()
+      return apiJson<{ join_command: string; token: string }>('/api/nodes', { method: 'POST', body: form })
     },
     onSuccess: (data: { join_command: string; token: string }) => {
       setForm({ name: '', location: '' })
@@ -74,8 +66,7 @@ function NodesPage() {
 
   const removeMutation = useMutation({
     mutationFn: async (node: Node) => {
-      const res = await fetch(`/api/nodes/${node.id}`, { method: 'DELETE', headers: auth })
-      if (!res.ok) throw new Error('Failed to delete node')
+      await apiJson(`/api/nodes/${node.id}`, { method: 'DELETE' })
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['nodes'] }),
     onError: (e: Error) => setError(e.message),

@@ -1,8 +1,9 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useState } from 'react'
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation } from '@tanstack/react-query'
 import QRCode from 'qrcode'
 import { PrimaryButton, inputCls, labelCls } from '../lib/ui'
+import { apiFetch } from '../lib/api'
 
 interface TOTPSetupResponse {
   secret: string
@@ -16,12 +17,6 @@ interface Enable2FAResponse {
 
 export const Route = createFileRoute('/2fa-setup')({
   component: Setup2FAPage,
-  beforeLoad: async () => {
-    const token = localStorage.getItem('token')
-    if (!token) {
-      window.location.href = '/login'
-    }
-  },
 })
 
 function Setup2FAPage() {
@@ -33,10 +28,7 @@ function Setup2FAPage() {
 
   const setupMutation = useMutation({
     mutationFn: async () => {
-      const res = await fetch('/api/auth/2fa/setup', {
-        method: 'POST',
-        headers: { Authorization: localStorage.getItem('token')! },
-      })
+      const res = await apiFetch('/api/auth/2fa/setup', { method: 'POST' })
       if (!res.ok) throw new Error('Failed to setup 2FA')
       return res.json() as Promise<TOTPSetupResponse>
     },
@@ -51,16 +43,12 @@ function Setup2FAPage() {
 
   const enableMutation = useMutation({
     mutationFn: async (code: string) => {
-      const res = await fetch('/api/auth/2fa/enable', {
+      const res = await apiFetch('/api/auth/2fa/enable', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: localStorage.getItem('token')!,
-        },
-        body: JSON.stringify({
+        body: {
           secret: totpData?.secret,
           code,
-        }),
+        },
       })
       if (!res.ok) throw new Error('Invalid code')
       return res.json() as Promise<Enable2FAResponse>

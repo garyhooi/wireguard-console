@@ -111,7 +111,6 @@ describe('StatisticsPage', () => {
         throw new Error(`unexpected fetch: ${url}`)
       }),
     )
-    localStorage.setItem('token', 'test-token')
   })
 
   // The peer-state table (above) has no tfoot; only the usage table does, so

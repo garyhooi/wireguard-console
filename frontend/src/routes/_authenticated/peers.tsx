@@ -1,4 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
+import { apiFetch, apiJson } from '../../lib/api'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import QRCode from 'qrcode'
@@ -50,7 +51,6 @@ export const Route = createFileRoute('/_authenticated/peers')({
   component: PeersPage,
 })
 
-const auth = { Authorization: localStorage.getItem('token')! }
 
 function PeersPage() {
   const queryClient = useQueryClient()
@@ -72,18 +72,14 @@ function PeersPage() {
   const { data: smtp } = useQuery<{ configured: boolean }>({
     queryKey: ['smtp-config'],
     queryFn: async () => {
-      const res = await fetch('/api/config/smtp', { headers: auth })
-      if (!res.ok) throw new Error('Failed to fetch SMTP config')
-      return res.json()
+      return apiJson<{ configured: boolean }>('/api/config/smtp')
     },
   })
 
   const { data: peers, isLoading } = useQuery<Peer[]>({
     queryKey: ['peers'],
     queryFn: async () => {
-      const res = await fetch('/api/peers', { headers: auth })
-      if (!res.ok) throw new Error('Failed to fetch peers')
-      return res.json()
+      return apiJson<Peer[]>('/api/peers')
     },
     refetchInterval: 15000,
   })
@@ -91,30 +87,20 @@ function PeersPage() {
   const { data: servers } = useQuery<Server[]>({
     queryKey: ['servers'],
     queryFn: async () => {
-      const res = await fetch('/api/servers', { headers: auth })
-      if (!res.ok) throw new Error('Failed to fetch servers')
-      return res.json()
+      return apiJson<Server[]>('/api/servers')
     },
   })
 
   const { data: users } = useQuery<User[]>({
     queryKey: ['users'],
     queryFn: async () => {
-      const res = await fetch('/api/users', { headers: auth })
-      if (!res.ok) throw new Error('Failed to fetch users')
-      return res.json()
+      return apiJson<User[]>('/api/users')
     },
   })
 
   const createMutation = useMutation({
     mutationFn: async () => {
-      const res = await fetch('/api/peers', {
-        method: 'POST',
-        headers: { ...auth, 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
-      })
-      if (!res.ok) throw new Error('Failed to create peer')
-      return res.json()
+      return apiJson<{ config_link?: string; allowed_ip?: string }>('/api/peers', { method: 'POST', body: form })
     },
     onSuccess: (data) => {
       if (data?.config_link) {
@@ -168,13 +154,10 @@ function PeersPage() {
   const updateMutation = useMutation({
     mutationFn: async () => {
       if (!editing) return
-      const res = await fetch(`/api/peers/${editing.id}`, {
+      return apiJson<{ allowed_ip?: string }>(`/api/peers/${editing.id}`, {
         method: 'PATCH',
-        headers: { ...auth, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: form.name }),
+        body: { name: form.name },
       })
-      if (!res.ok) throw new Error('Failed to update peer')
-      return res.json()
     },
     onSuccess: () => {
       setEditing(null)
@@ -186,11 +169,7 @@ function PeersPage() {
 
   const removeMutation = useMutation({
     mutationFn: async (peer: Peer) => {
-      const res = await fetch(`/api/peers/${peer.id}`, {
-        method: 'DELETE',
-        headers: auth,
-      })
-      if (!res.ok) throw new Error('Failed to remove peer')
+      await apiJson(`/api/peers/${peer.id}`, { method: 'DELETE' })
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['peers'] }),
     onError: (e: Error) => setError(e.message),
@@ -199,17 +178,7 @@ function PeersPage() {
   const resendMutation = useMutation({
     mutationFn: async (peer: Peer) => {
       setResendingId(peer.id)
-      const res = await fetch(`/api/peers/${peer.id}/resend-config-email`, {
-        method: 'POST',
-        headers: auth,
-      })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(
-          (err as { error?: string }).error || 'Failed to resend the config link email',
-        )
-      }
-      return res.json()
+      return apiJson<{ config_link?: string }>(`/api/peers/${peer.id}/resend-config-email`, { method: 'POST' })
     },
     onSuccess: (data, peer) => {
       setResent({ peerName: peer.name, link: data.config_link || '' })
@@ -237,7 +206,7 @@ function PeersPage() {
   }
 
   const fetchConfigText = async (peer: Peer): Promise<string | null> => {
-    const res = await fetch(`/api/peers/${peer.id}/config`, { headers: auth })
+    const res = await apiFetch(`/api/peers/${peer.id}/config`)
     if (!res.ok) {
       const err = await res.json().catch(() => ({}))
       setError(err.error || 'Failed to get config')

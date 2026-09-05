@@ -8,6 +8,7 @@ import {
   IconSettings,
 } from '@tabler/icons-react'
 import { PageHeader, PrimaryButton, GhostButton, inputCls, labelCls } from '../../lib/ui'
+import { apiJson } from '../../lib/api'
 import { EmailTemplatesSection } from '../../components/EmailTemplatesSection'
 
 interface SMTPConfig {
@@ -19,7 +20,6 @@ interface SMTPConfig {
   password_set: boolean
 }
 
-const authH = { Authorization: localStorage.getItem('token')! }
 
 export const Route = createFileRoute('/_authenticated/config')({
   component: ConfigPage,
@@ -83,11 +83,7 @@ function SmtpSettings() {
   const { data: smtp, isLoading } = useQuery<SMTPConfig>({
     queryKey: ['smtp-config'],
     queryFn: async () => {
-      const res = await fetch('/api/config/smtp', {
-        headers: { Authorization: localStorage.getItem('token')! },
-      })
-      if (!res.ok) throw new Error('Failed to fetch SMTP config')
-      return res.json()
+      return apiJson<SMTPConfig>('/api/config/smtp')
     },
   })
 
@@ -105,25 +101,16 @@ function SmtpSettings() {
 
   const saveMutation = useMutation({
     mutationFn: async () => {
-      const res = await fetch('/api/config/smtp', {
+      return apiJson('/api/config/smtp', {
         method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: localStorage.getItem('token')!,
-        },
-        body: JSON.stringify({
+        body: {
           host: form.host,
           port: Number(form.port),
           username: form.username,
           password: form.password,
           from: form.from,
-        }),
+        },
       })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.error || 'Failed to save SMTP config')
-      }
-      return res.json()
     },
     onSuccess: () => {
       setMessage('SMTP settings saved.')
@@ -139,19 +126,10 @@ function SmtpSettings() {
 
   const testMutation = useMutation({
     mutationFn: async () => {
-      const res = await fetch('/api/config/email/test', {
+      return apiJson('/api/config/email/test', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: localStorage.getItem('token')!,
-        },
-        body: JSON.stringify({ to: testTo }),
+        body: { to: testTo },
       })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.error || 'Failed to send test email')
-      }
-      return res.json()
     },
     onSuccess: () => {
       setMessage(`Test email sent to ${testTo}.`)

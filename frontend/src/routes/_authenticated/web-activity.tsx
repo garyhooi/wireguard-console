@@ -1,4 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
+import { apiJson } from '../../lib/api'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { IconChevronDown, IconChevronRight, IconDownload, IconSearch } from '@tabler/icons-react'
@@ -69,7 +70,6 @@ export const Route = createFileRoute('/_authenticated/web-activity')({
   component: WebActivityPage,
 })
 
-const auth = { Authorization: localStorage.getItem('token')! }
 
 const PURGE_OPTIONS = [
   { days: 7, label: 'Older than 7 days' },
@@ -114,9 +114,7 @@ export function WebActivityPage() {
   const { data: me } = useQuery<Me>({
     queryKey: ['me'],
     queryFn: async () => {
-      const res = await fetch('/api/admins/me', { headers: auth })
-      if (!res.ok) throw new Error('Failed to load profile')
-      return res.json()
+      return apiJson<Me>('/api/admins/me')
     },
   })
   const isSuperAdmin = me?.role === 'super_admin'
@@ -124,9 +122,7 @@ export function WebActivityPage() {
   const { data: users } = useQuery<Selectable[]>({
     queryKey: ['users'],
     queryFn: async () => {
-      const res = await fetch('/api/users', { headers: auth })
-      if (!res.ok) throw new Error('Failed to fetch users')
-      const rows = (await res.json()) as Array<{ id: string; email: string; full_name: string | null }>
+      const rows = await apiJson<Array<{ id: string; email: string; full_name: string | null }>>('/api/users')
       return rows.map((u) => ({ id: u.id, label: u.full_name || u.email }))
     },
   })
@@ -134,9 +130,7 @@ export function WebActivityPage() {
   const { data: peers } = useQuery<Selectable[]>({
     queryKey: ['peers'],
     queryFn: async () => {
-      const res = await fetch('/api/peers', { headers: auth })
-      if (!res.ok) throw new Error('Failed to fetch peers')
-      const rows = (await res.json()) as Array<{ id: string; name: string }>
+      const rows = await apiJson<Array<{ id: string; name: string }>>('/api/peers')
       return rows.map((p) => ({ id: p.id, label: p.name }))
     },
   })
@@ -145,9 +139,7 @@ export function WebActivityPage() {
     queryKey: ['web-activity-summary', scope, fromDate, toDate],
     queryFn: async () => {
       const qs = new URLSearchParams({ scope, from: fromDate, to: toDate })
-      const res = await fetch(`/api/web-activity/summary?${qs}`, { headers: auth })
-      if (!res.ok) throw new Error('Failed to load web activity summary')
-      return res.json()
+      return apiJson<SummaryResponse>(`/api/web-activity/summary?${qs}`)
     },
     refetchInterval: 30000,
   })
@@ -168,9 +160,7 @@ export function WebActivityPage() {
     queryFn: async () => {
       const p = { ...recordParams }
       if (detail) p[scope === 'user' ? 'user_id' : 'peer_id'] = detail.id
-      const res = await fetch(`/api/web-activity?${new URLSearchParams(p)}`, { headers: auth })
-      if (!res.ok) throw new Error('Failed to load records')
-      return res.json()
+      return apiJson<RecordsResponse>(`/api/web-activity?${new URLSearchParams(p)}`)
     },
     refetchInterval: 30000,
   })
@@ -178,12 +168,7 @@ export function WebActivityPage() {
   const purgeMutation = useMutation({
     mutationFn: async (days?: number) => {
       const qs = days ? `?days=${days}` : ''
-      const res = await fetch(`/api/web-activity${qs}`, { method: 'DELETE', headers: auth })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.error || 'Failed to purge web activity')
-      }
-      return res.json()
+      return apiJson<{ deleted: number; scope: string }>(`/api/web-activity${qs}`, { method: 'DELETE' })
     },
     onSuccess: (data: { deleted: number; scope: string }) => {
       setActionMsg(

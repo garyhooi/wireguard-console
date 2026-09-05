@@ -3,7 +3,7 @@
 // HTML source). Keeps a local draft per template and only hits the PATCH
 // endpoint when the admin explicitly saves.
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   IconAlertCircle,
@@ -16,6 +16,7 @@ import {
   IconUserShield,
 } from '@tabler/icons-react'
 import { GhostButton, inputCls, labelCls, PrimaryButton } from '../lib/ui'
+import { apiJson } from '../lib/api'
 import { RichTextEditor } from '../lib/RichTextEditor'
 
 interface EmailTemplate {
@@ -79,17 +80,11 @@ function formatUpdatedAt(iso: string): string {
 
 export function EmailTemplatesSection() {
   const queryClient = useQueryClient()
-  const authH = useMemo(
-    () => ({ Authorization: localStorage.getItem('token') || '' }),
-    [],
-  )
 
   const { data: templates, isLoading } = useQuery<EmailTemplate[]>({
     queryKey: ['email-templates'],
     queryFn: async () => {
-      const res = await fetch('/api/config/email-templates', { headers: authH })
-      if (!res.ok) throw new Error('Failed to load email templates')
-      return res.json()
+      return apiJson<EmailTemplate[]>('/api/config/email-templates')
     },
   })
 
@@ -130,16 +125,15 @@ export function EmailTemplatesSection() {
     mutationFn: async (key: string) => {
       const draft = drafts[key]
       if (!draft) throw new Error('Nothing to save')
-      const res = await fetch(`/api/config/email-templates/${key}`, {
-        method: 'PATCH',
-        headers: { ...authH, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subject: draft.subject, body: draft.body }),
-      })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.error || 'Failed to save template')
+      try {
+        await apiJson(`/api/config/email-templates/${key}`, {
+          method: 'PATCH',
+          body: { subject: draft.subject, body: draft.body },
+        })
+        return key
+      } catch (e) {
+        throw new Error((e as Error).message || 'Failed to save template')
       }
-      return key
     },
     onSuccess: (key) => {
       setSavedKeys((prev) => new Set(prev).add(key))

@@ -1,4 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
+import { apiFetch } from '../../lib/api'
 import { useQuery } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
 import { IconCpu, IconDeviceDesktop, IconRefresh } from '@tabler/icons-react'
@@ -56,10 +57,8 @@ interface LocalStatus {
   metrics_at?: string | null
 }
 
-const auth = { Authorization: localStorage.getItem('token')! }
-
 function fetchJSON<T>(url: string): Promise<T> {
-  return fetch(url, { headers: auth }).then((res) => {
+  return apiFetch(url).then((res) => {
     if (!res.ok) throw new Error(`Failed to fetch ${url} (${res.status})`)
     return res.json() as Promise<T>
   })
@@ -316,7 +315,7 @@ export function MonitoringPage() {
   const { data: local, isLoading: localLoading, refetch: refetchLocal } = useQuery<LocalStatus | null>({
     queryKey: ['local-status'],
     queryFn: async () => {
-      const res = await fetch('/api/nodes/local/status', { headers: auth })
+      const res = await apiFetch('/api/nodes/local/status')
       if (res.status === 503) return null
       if (!res.ok) throw new Error('Failed to fetch local status')
       return res.json()
