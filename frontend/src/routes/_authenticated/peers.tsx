@@ -64,6 +64,10 @@ function PeersPage() {
   const [resent, setResent] = useState<{ peerName: string; link: string } | null>(null)
   const [resentCopied, setResentCopied] = useState(false)
   const [resendingId, setResendingId] = useState('')
+  // Peer awaiting confirmation before the config-link email is actually
+  // sent — prevents an accidental click on "Email link" from emailing
+  // the user immediately.
+  const [confirmResendPeer, setConfirmResendPeer] = useState<Peer | null>(null)
 
   const { data: smtp } = useQuery<{ configured: boolean }>({
     queryKey: ['smtp-config'],
@@ -462,6 +466,53 @@ function PeersPage() {
         </div>
       </Modal>
 
+      {/* Confirm before emailing a config link — the row action only opens
+          this dialog, so an accidental click never sends an email. */}
+      <Modal
+        open={confirmResendPeer !== null}
+        onClose={() => setConfirmResendPeer(null)}
+        title="Email config link?"
+        className="max-w-md"
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-zinc-300">
+            This sends a fresh config link for{' '}
+            <span className="text-zinc-100">{confirmResendPeer?.name}</span> to{' '}
+            <span className="text-zinc-100">
+              {confirmResendPeer?.user_full_name || confirmResendPeer?.user_email || 'its user'}
+            </span>
+            .
+          </p>
+          {!smtp?.configured && (
+            <p className="text-sm text-amber-300">
+              SMTP is not configured, so no email will actually be sent — you'll only get a link to
+              share manually.
+            </p>
+          )}
+          <p className="text-xs text-zinc-500">
+            A new 72h link is minted (previous links stay valid). The email contains the link only —
+            never the config or private key.
+          </p>
+          <div className="flex justify-end gap-3 pt-1">
+            <GhostButton type="button" onClick={() => setConfirmResendPeer(null)}>
+              Cancel
+            </GhostButton>
+            <PrimaryButton
+              type="button"
+              disabled={resendingId === confirmResendPeer?.id}
+              onClick={() => {
+                if (confirmResendPeer) {
+                  setConfirmResendPeer(null)
+                  resendMutation.mutate(confirmResendPeer)
+                }
+              }}
+            >
+              {resendingId === confirmResendPeer?.id ? 'Sending…' : 'Resend email'}
+            </PrimaryButton>
+          </div>
+        </div>
+      </Modal>
+
       {/* Config-link email re-sent — the fresh link is offered for manual
           sharing too, in case SMTP delivery fails again. */}
       <Modal
@@ -577,11 +628,11 @@ function PeersPage() {
                         </ActionLink>
                         <ActionLink
                           onClick={() => {
-                            if (resendingId !== peer.id) resendMutation.mutate(peer)
+                            if (resendingId !== peer.id) setConfirmResendPeer(peer)
                           }}
                         >
                           <IconMailForward size={14} stroke={1.6} aria-hidden="true" />
-                          {resendingId === peer.id ? 'Emailing…' : 'Email link'}
+                          Email link
                         </ActionLink>
                         <ActionLink
                           tone="danger"
