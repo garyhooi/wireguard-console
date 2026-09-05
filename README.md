@@ -119,7 +119,17 @@ Repeat steps 2–6 for each location. Deleting a node is safe — its servers fa
 
 ## Upgrading
 
-Re-run the same install command — it updates the code and keeps all admins, peers, and data.
+Re-run the same install command — it updates the code and keeps all admins, peers, and data:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/garyhooi/wireguard-console/main/install.sh | sudo bash
+```
+
+**Back up first.** Open **System → Backups** and create one (or download one for an off-server copy) before re-running the installer on a production console.
+
+### Version & update hints
+
+The console's top bar shows the installed version and — via a short, cached lookup of this repo's [latest GitHub release](https://github.com/garyhooi/wireguard-console/releases) — flags when a newer release exists. Clicking the version (or the **Update available** chip) shows the exact commands: back up, then run the one-liner above. install.sh stamps `APP_VERSION` (from the repo-root `VERSION` file) into `.env` on every run, so an update is reflected in the top bar as soon as the stack is back up.
 
 ## Development
 

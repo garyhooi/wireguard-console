@@ -144,6 +144,11 @@ func main() {
 			// through untouched.
 			r.Use(api.RequireCSRF(store))
 
+			// Version + update check (any authenticated admin): compares the
+			// console's APP_VERSION against the newest GitHub release and
+			// serves the update one-liner. GET-only — no CSRF needed.
+			r.Get("/update/check", api.UpdateCheckHandler(store))
+
 			r.Post("/auth/2fa/setup", api.Setup2FA(store))
 			r.Post("/auth/2fa/enable", api.Enable2FA(store))
 

@@ -21,6 +21,7 @@ import {
 } from '@tabler/icons-react'
 import { apiFetch, clearSessionCache, fetchSession } from '../lib/api'
 import { ensureTimezone } from '../lib/timezone'
+import { ConsoleVersionControl } from '../components/ConsoleVersionControl'
 
 interface Stats {
   total_peers: number
@@ -221,6 +222,7 @@ function AuthenticatedLayout() {
             </div>
 
             <div className="flex items-center gap-3 shrink-0">
+              <ConsoleVersionControl />
               <span
                 className="hidden sm:inline-flex items-center gap-1.5 text-xs text-zinc-500"
                 title="API availability"
