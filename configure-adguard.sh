@@ -91,9 +91,13 @@ users:
   - name: {name}
     password: {pw_hash}
 dns:
+  # Bind 0.0.0.0 only. Adding the tunnel gateway 10.8.0.1 here made AGH
+  # FATAL-crash at boot ("bind: can't assign requested address") whenever the
+  # wg0 interface wasn't up yet — a fresh docker compose up starts adguardhome
+  # (host network) in parallel with wg-helper, so 10.8.0.1 usually doesn't
+  # exist when AGH binds :53. 0.0.0.0 already covers the tunnel's DNS traffic.
   bind_hosts:
     - "0.0.0.0"
-    - "10.8.0.1"
   port: 53
   upstream_dns:
     - https://dns10.quad9.net/dns-query
