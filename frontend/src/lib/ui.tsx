@@ -153,10 +153,11 @@ const STATUS_TONE: Record<string, PillTone> = {
   auditor: 'neutral',
 }
 
-export function StatusBadge({ status }: { status: string }) {
-  const tone = status === 'active' ? 'good' : STATUS_TONE[status] || 'neutral'
-  const display = status.replace(/_/g, ' ')
-  return <Badge tone={tone}>{display}</Badge>
+export function StatusBadge({ status }: { status?: string | null }) {
+  const value = status || ''
+  const tone = value === 'active' ? 'good' : STATUS_TONE[value] || 'neutral'
+  const display = value.replace(/_/g, ' ')
+  return <Badge tone={tone}>{display || '—'}</Badge>
 }
 
 // ---------------------------------------------------------------------------
