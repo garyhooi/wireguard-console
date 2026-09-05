@@ -70,9 +70,19 @@ Only **three inbound rules** matter on a console host:
 
 The installer does this automatically when ufw is active. On a cloud firewall (AWS/Azure/DigitalOcean security group), add the same three rules manually.
 
-**Leave closed (bound but internal — do not expose):**
+**DNS to the tunnel gateway (AdGuard) — required on VPN hosts.** Peers are pointed at the tunnel gateway (e.g. `10.8.0.1`), where AdGuard Home listens on the host network. A DNS query from a peer to that address arrives as *inbound* traffic to the host, so a default-deny firewall silently drops it — the VPN handshake succeeds but Apple devices have no internet until they're switched to a public resolver. The installer opens port 53 **only on the WireGuard interface(s)**, never on the public one, so AdGuard is reachable from the tunnel without turning the box into an open DNS resolver:
 
-- `53/udp+tcp` — AdGuard DNS. Tunnel peers reach it through the VPN gateway, never from the internet. Opening it makes your server an open DNS resolver.
+```bash
+# What the installer adds when ufw is active (interface name = your WG iface, e.g. wg0):
+sudo ufw allow in on wg0 to any port 53 proto udp comment 'WG peers -> AdGuard DNS (UDP)'
+sudo ufw allow in on wg0 to any port 53 proto tcp comment 'WG peers -> AdGuard DNS (TCP)'
+```
+
+If ufw is enabled *after* an install (or your WG interface isn't `wg0`), add those two rules yourself — without them, iOS/macOS clients on the VPN cannot resolve anything.
+
+**Leave closed (bound but internal — do not expose to the internet):**
+
+- `53/udp+tcp` on the **public** interface — AdGuard DNS. Tunnel peers reach it through the VPN gateway, never from the internet. Opening it to the internet makes your server an open DNS resolver.
 - `3000/tcp` — AdGuard admin UI. The console reaches it internally.
 
 ## Distributed nodes (one console, many regions)

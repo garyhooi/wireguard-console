@@ -9,9 +9,10 @@
 # frees port 53 from systemd-resolved (needed by the built-in DNS filter),
 # enables IP forwarding (required for WireGuard routing), clones/updates
 # this repo into /opt/wireguard-console, generates secrets on first
-# install, opens the firewall if ufw is active, and starts the stack with
-# Docker Compose. Re-running it later updates an existing install instead
-# of reinstalling.
+# install, opens the firewall if ufw is active (including the interface-
+# scoped DNS exception so tunnel peers can reach AdGuard on the gateway),
+# and starts the stack with Docker Compose. Re-running it later updates an
+# existing install instead of reinstalling.
 #
 # Read before piping this into root bash — that's the whole point of it
 # being a plain, commented script instead of a binary.
@@ -555,12 +556,34 @@ stamp_app_version .env "${CALLER_APP_VERSION:-}"
 
 # ---------------------------------------------------------------------------
 # 9. Firewall — only touch it if ufw is installed AND active, and only add
+#    missing rules (re-runs are idempotent).
+#    80/443 are the console (Caddy); WG_DEFAULT_PORT is the VPN.
+#
+#    DNS exception: peers are pointed at the tunnel gateway (e.g. 10.8.0.1),
+#    where AdGuard Home listens on the host network. A query from a peer to
+#    <gateway>:53 arrives as INPUT traffic (destination = the host itself),
+#    so ufw's default-deny incoming policy would drop it and every Apple
+#    device on the VPN would lose internet ("handshake OK, no DNS"). Allow
+#    port 53 ONLY on the WireGuard interface(s) — never on the public one —
+#    so AdGuard stays reachable from the tunnel without turning this box
+#    into an open DNS resolver.
 # ---------------------------------------------------------------------------
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
   info "ufw is active — opening 80/tcp, 443/tcp, ${WG_DEFAULT_PORT}/udp..."
   ufw allow 80/tcp   >/dev/null
   ufw allow 443/tcp  >/dev/null
   ufw allow "${WG_DEFAULT_PORT}/udp" >/dev/null
+
+  # Interfaces that exist right now (upgrades with a live tunnel), falling
+  # back to wg0 — the interface name the console creates for the first
+  # local server when the admin accepts the defaults.
+  WG_IFACES="$(ls -d /sys/class/net/wg* 2>/dev/null | xargs -n1 basename 2>/dev/null | sort -u || true)"
+  [[ -z "${WG_IFACES}" ]] && WG_IFACES="wg0"
+  for iface in ${WG_IFACES}; do
+    ufw allow in on "${iface}" to any port 53 proto udp comment 'WG peers -> AdGuard DNS (UDP)' >/dev/null
+    ufw allow in on "${iface}" to any port 53 proto tcp comment 'WG peers -> AdGuard DNS (TCP)' >/dev/null
+  done
+  info "Allowed DNS (53) from WireGuard peers to AdGuard on the tunnel gateway (interface-scoped: ${WG_IFACES}); port 53 stays closed to the internet."
 fi
 
 # ---------------------------------------------------------------------------
