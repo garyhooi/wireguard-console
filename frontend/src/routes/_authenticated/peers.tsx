@@ -227,7 +227,9 @@ function PeersPage() {
     )
   }
 
-  const activePeers = (peers || []).filter((p) => p.status !== 'removed')
+  // Drop malformed/partial entries (e.g. a row captured mid-refetch) so a
+  // missing id or key can never crash the table render.
+  const activePeers = (peers || []).filter((p) => p && p.id && p.status !== 'removed')
   // Removed users are stripped from the Add Peer dropdown — a peer can only
   // be attached to an active/invited/suspended user, never a removed one.
   const addableUsers = (users || []).filter((u) => u.status !== 'removed')
