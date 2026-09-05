@@ -38,10 +38,19 @@ var (
 // Fake wg-helper: a unix-socket HTTP server that records /apply and /remove
 // calls so the suite can assert the API actually pushes WireGuard state
 // (including the boot-time WG reconcile worker).
+//
+// It models a real kernel device lifecycle: an interface is "present" only
+// after /apply created it (and removed by /remove). /stats answers 200 with
+// the present interface's peers, or 500 when the interface does not exist —
+// matching wg-helper's real handleStats (client.Device errors → 500). The
+// reconcile worker probes /stats to decide whether a server needs re-applying,
+// so this statefulness is what exercises the probe-before-apply behaviour.
 var (
-	fakeHelperMu      sync.Mutex
-	fakeHelperApplies int
-	fakeHelperRemoves int
+	fakeHelperMu          sync.Mutex
+	fakeHelperApplies     int
+	fakeHelperRemoves     int
+	fakeHelperIfaces      = map[string]bool{} // interface_name -> present
+	fakeHelperPreseedBoot = false             // seed a present interface at startup (boot-reconcile test)
 )
 
 // startFakeWGHelper listens on the given unix socket and answers the
@@ -57,18 +66,45 @@ func startFakeWGHelper(sock string) func() {
 	apply := func(w http.ResponseWriter, r *http.Request) {
 		fakeHelperMu.Lock()
 		fakeHelperApplies++
+		var req struct {
+			InterfaceName string `json:"interface_name"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		if req.InterfaceName != "" {
+			fakeHelperIfaces[req.InterfaceName] = true
+		}
 		fakeHelperMu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"status":"ok","warnings":[]}`)
 	}
 	mux.HandleFunc("/apply", apply)
 	mux.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
+		fakeHelperMu.Lock()
+		defer fakeHelperMu.Unlock()
+		var req struct {
+			InterfaceName string `json:"interface_name"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		if !fakeHelperIfaces[req.InterfaceName] {
+			// Real wg-helper answers 500 when the device does not exist.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, `{"error":"Failed to get device: no such device"}`)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"peers":[]}`)
 	})
 	mux.HandleFunc("/remove", func(w http.ResponseWriter, r *http.Request) {
 		fakeHelperMu.Lock()
 		fakeHelperRemoves++
+		var req struct {
+			InterfaceName string `json:"interface_name"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		if req.InterfaceName != "" {
+			delete(fakeHelperIfaces, req.InterfaceName)
+		}
 		fakeHelperMu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"status":"removed","warnings":[]}`)
@@ -161,6 +197,9 @@ func TestMain(m *testing.M) {
 		"POSTGRES_PASSWORD="+os.Getenv("E2E_PG_PASSWORD"),
 		"POSTGRES_DB="+os.Getenv("E2E_PG_DB"),
 		"BACKUP_DIR="+tmp,
+		// Fast reconcile slow-tick so the suite can assert probe-before-apply:
+		// with the fix, a present interface is never re-applied on a tick.
+		"WG_RECONCILE_INTERVAL=3",
 	)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
@@ -440,6 +479,17 @@ func TestEndToEnd(t *testing.T) {
 		"default_allowed_ips": "0.0.0.0/0", "mtu": 1420, "persistent_keepalive": 25,
 	})
 	expectStatus(t, resp, 200, "PATCH /api/servers/{id}")
+
+	// Regression: the reconcile worker must NOT force-reapply a server whose
+	// kernel interface is already present (a re-apply would ReplacePeers and
+	// reset live counters/handshakes). The fake helper marks the interface
+	// present on /apply, so after the create+PATCH applies above the worker's
+	// periodic ticks must not add more /apply calls. Sleep past two 3s ticks.
+	appliesAfterEdit := fakeApplyCount()
+	time.Sleep(7 * time.Second)
+	if grew := fakeApplyCount(); grew != appliesAfterEdit {
+		t.Fatalf("reconcile re-applied a healthy interface: applies %d -> %d (want no growth)", appliesAfterEdit, grew)
+	}
 
 	// SMTP: save with password, encrypt, preserve on empty password
 	resp, _ = api(t, "PATCH", "/api/config/smtp", token, map[string]interface{}{

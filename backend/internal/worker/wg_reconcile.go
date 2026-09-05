@@ -3,6 +3,8 @@ package worker
 import (
 	"context"
 	"log"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -17,21 +19,33 @@ import (
 // pushes on server/peer create/edit/delete. A host reboot therefore loses
 // the kernel interface AND the iptables MASQUERADE rules, and nothing would
 // restore them until an admin touched a server or peer — silently killing
-// the VPN's connectivity. This worker re-applies the desired state after a
-// reboot (and periodically thereafter), so the tunnel self-heals.
+// the VPN's connectivity. This worker detects missing interfaces and
+// re-applies them, so the tunnel self-heals after a reboot.
 //
-// Boot behaviour: reconcile fast (every 10s) until at least one interface
-// has been applied successfully, so a fresh boot is repaired in seconds even
-// though wg-helper may still be starting. Once healthy (or after a short
-// grace period when wg-helper is absent, e.g. dev), it settles into the
-// configured slow interval. The apply is idempotent and atomic (wgctrl
-// ConfigureDevice replaces the whole peer set), so repeated passes are safe.
+// Boot behaviour: reconcile fast (every 10s) until every local interface is
+// confirmed present (wg-helper may still be starting right after boot), then
+// it settles into the configured slow interval. Each pass PROBES the kernel
+// interface first and only re-applies servers whose interface is missing —
+// a healthy running interface is never re-applied (a force re-apply would
+// ReplacePeers and reset live kernel counters/handshakes, corrupting traffic
+// statistics and dropping connected clients).
 type WGReconcileWorker struct {
 	pool     *pgxpool.Pool
 	interval time.Duration
 }
 
 func NewWGReconcileWorker(pool *pgxpool.Pool, interval time.Duration) *WGReconcileWorker {
+	if interval <= 0 {
+		interval = 2 * time.Minute
+	}
+	// WG_RECONCILE_INTERVAL (seconds) overrides the slow-tick interval — used
+	// by tests to exercise the probe-before-apply behaviour without waiting
+	// the real two minutes.
+	if v := os.Getenv("WG_RECONCILE_INTERVAL"); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+			interval = time.Duration(secs) * time.Second
+		}
+	}
 	return &WGReconcileWorker{pool: pool, interval: interval}
 }
 
@@ -76,8 +90,10 @@ func (w *WGReconcileWorker) Start(ctx context.Context) {
 	}
 }
 
-// reconcile re-applies every active local server's desired state to
-// wg-helper and reports whether at least one server applied cleanly.
+// reconcile probes every active local server's kernel interface and re-applies
+// only those that are missing (post-reboot). Reports true when every server's
+// interface is present — i.e. nothing is left to repair — so the caller can
+// settle out of the fast retry loop.
 func (w *WGReconcileWorker) reconcile(ctx context.Context) bool {
 	n, err := api.SyncAllLocalServersToKernel(w.pool)
 	if err != nil {
@@ -87,7 +103,7 @@ func (w *WGReconcileWorker) reconcile(ctx context.Context) bool {
 	if n > 0 {
 		log.Printf("WG reconcile worker: applied %d local server(s)", n)
 	}
-	// No locally-managed servers is a healthy state too — there is nothing
-	// to repair.
-	return err == nil
+	// n==0 means every local interface is already up (or none exist / no
+	// socket in dev) — a fully healthy state.
+	return err == nil && n == 0
 }
