@@ -1,7 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
-import { IconMailPlus, IconUserPlus } from '@tabler/icons-react'
+import { IconKey, IconMailPlus, IconShieldOff, IconUserPlus } from '@tabler/icons-react'
 import {
   Badge,
   EmptyState,
@@ -22,6 +22,7 @@ import {
   inputCls,
   labelCls,
 } from '../../lib/ui'
+import { Confirm2FA } from '../../lib/Confirm2FA'
 
 interface Admin {
   id: string
@@ -50,6 +51,22 @@ const ROLE_LABELS: Record<string, string> = {
   auditor: 'Auditor',
 }
 
+/** Parse a JSON error body, or fall back to the given default. */
+async function errMsg(res: Response, fallback: string): Promise<string> {
+  try {
+    const j = await res.json()
+    return (j as { error?: string }).error || fallback
+  } catch {
+    return fallback
+  }
+}
+
+/** A pending privileged action awaiting the admin's own 2FA code. */
+interface Pending2FA {
+  label: string
+  run: (code: string) => Promise<void>
+}
+
 function AdminsPage() {
   const queryClient = useQueryClient()
   const [showInvite, setShowInvite] = useState(false)
@@ -61,6 +78,8 @@ function AdminsPage() {
   // Inline email editing state: one editor open at a time.
   const [editingId, setEditingId] = useState('')
   const [draftEmail, setDraftEmail] = useState('')
+  // Step-up 2FA gate for privileged actions.
+  const [pending2FA, setPending2FA] = useState<Pending2FA | null>(null)
 
   const { data: me } = useQuery<Me>({
     queryKey: ['me'],
@@ -91,8 +110,8 @@ function AdminsPage() {
         body: JSON.stringify(form),
       })
       if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.error || 'Failed to invite admin')
+        const err = await errMsg(res, 'Failed to invite admin')
+        throw new Error(err)
       }
     },
     onSuccess: () => {
@@ -105,45 +124,73 @@ function AdminsPage() {
     onError: (e: Error) => setError(e.message),
   })
 
+  // ---- Privileged admin mutations (each requires the actor's own 2FA) ----
+
+  const patchAdmin = async (id: string, body: Record<string, string>) => {
+    const res = await fetch(`/api/admins/${id}`, {
+      method: 'PATCH',
+      headers: { ...auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (!res.ok) {
+      throw new Error(await errMsg(res, 'Failed to update admin'))
+    }
+    return res.json()
+  }
+
   const roleMutation = useMutation({
-    mutationFn: async (a: { id: string; role: string }) => {
-      const res = await fetch(`/api/admins/${a.id}`, {
-        method: 'PATCH',
-        headers: { ...auth, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role: a.role }),
-      })
-      if (!res.ok) throw new Error('Failed to update role')
+    mutationFn: async (a: { id: string; role: string; code: string }) =>
+      patchAdmin(a.id, { role: a.role, code: a.code }),
+    onSuccess: () => {
+      setNotice('Role updated.')
+      setError('')
+      queryClient.invalidateQueries({ queryKey: ['admins'] })
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['admins'] }),
     onError: (e: Error) => setError(e.message),
   })
 
   const resetPwMutation = useMutation({
-    mutationFn: async (a: Admin) => {
-      const res = await fetch(`/api/admins/${a.id}/reset-password`, { method: 'POST', headers: auth })
-      if (!res.ok) throw new Error('Failed to reset password')
+    mutationFn: async (a: { admin: Admin; code: string }) => {
+      const res = await fetch(`/api/admins/${a.admin.id}/reset-password`, {
+        method: 'POST',
+        headers: { ...auth, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: a.code }),
+      })
+      if (!res.ok) throw new Error(await errMsg(res, 'Failed to reset password'))
       return res.json()
     },
-    onSuccess: (data: { password: string }, a: Admin) => {
-      setNotice(`Temporary password for ${a.email}: ${data.password}  (emailed if SMTP is configured)`)
+    onSuccess: (data, vars) => {
+      const pw = (data as { password?: string } | undefined)?.password
+      setNotice(
+        `Temporary password for ${vars.admin.email}: ${pw}  (emailed if SMTP is configured)`,
+      )
       setError('')
+      queryClient.invalidateQueries({ queryKey: ['admins'] })
+    },
+    onError: (e: Error) => setError(e.message),
+  })
+
+  const reset2FAMutation = useMutation({
+    mutationFn: async (a: { admin: Admin; code: string }) => {
+      const res = await fetch(`/api/admins/${a.admin.id}/reset-2fa`, {
+        method: 'POST',
+        headers: { ...auth, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: a.code }),
+      })
+      if (!res.ok) throw new Error(await errMsg(res, 'Failed to reset 2FA'))
+    },
+    onSuccess: (_d, vars) => {
+      setNotice(`2FA for ${vars.admin.email} has been reset — they can re-enroll from Profile.`)
+      setError('')
+      queryClient.invalidateQueries({ queryKey: ['admins'] })
     },
     onError: (e: Error) => setError(e.message),
   })
 
   const emailMutation = useMutation({
-    mutationFn: async (a: { id: string; email: string }) => {
-      const res = await fetch(`/api/admins/${a.id}`, {
-        method: 'PATCH',
-        headers: { ...auth, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: a.email }),
-      })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.error || 'Failed to update email')
-      }
-    },
-    onSuccess: (_d, a: { id: string; email: string }) => {
+    mutationFn: async (a: { id: string; email: string; code: string }) =>
+      patchAdmin(a.id, { email: a.email, code: a.code }),
+    onSuccess: (_d, a) => {
       const isSelf = me?.id === a.id
       setEditingId('')
       setNotice(
@@ -159,17 +206,71 @@ function AdminsPage() {
   })
 
   const statusMutation = useMutation({
-    mutationFn: async (a: Admin) => {
-      const res = await fetch(`/api/admins/${a.id}`, {
-        method: 'PATCH',
-        headers: { ...auth, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role: a.role, status: a.status === 'active' ? 'disabled' : 'active' }),
-      })
-      if (!res.ok) throw new Error('Failed to update admin status')
+    mutationFn: async (a: { admin: Admin; code: string }) =>
+      patchAdmin(a.admin.id, {
+        role: a.admin.role,
+        status: a.admin.status === 'active' ? 'disabled' : 'active',
+        code: a.code,
+      }),
+    onSuccess: () => {
+      setNotice('Admin status updated.')
+      setError('')
+      queryClient.invalidateQueries({ queryKey: ['admins'] })
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['admins'] }),
     onError: (e: Error) => setError(e.message),
   })
+
+  // ---- 2FA step-up wrappers: open the modal, run on confirm ----
+
+  const confirmResetPassword = (admin: Admin) => {
+    setPending2FA({
+      label: `reset the password for ${admin.email}`,
+      run: (code) => resetPwMutation.mutateAsync({ admin, code }).then(() => undefined),
+    })
+  }
+
+  const confirmReset2FA = (admin: Admin) => {
+    setPending2FA({
+      label: `reset 2FA for ${admin.email}`,
+      run: (code) => reset2FAMutation.mutateAsync({ admin, code }).then(() => undefined),
+    })
+  }
+
+  const confirmRoleChange = (admin: Admin, role: string) => {
+    if (admin.role === role) return
+    setPending2FA({
+      label: `change ${admin.email}'s role to ${ROLE_LABELS[role] || role}`,
+      run: (code) =>
+        roleMutation.mutateAsync({ id: admin.id, role, code }).then(() => undefined),
+    })
+  }
+
+  const confirmStatusToggle = (admin: Admin) => {
+    const next = admin.status === 'active' ? 'disable' : 'enable'
+    setPending2FA({
+      label: `${next} admin ${admin.email}`,
+      run: (code) =>
+        statusMutation.mutateAsync({ admin, code }).then(() => undefined),
+    })
+  }
+
+  const beginEmailEdit = (admin: Admin) => {
+    setEditingId(admin.id)
+    setDraftEmail(admin.email)
+  }
+
+  const commitEmailEdit = (admin: Admin) => {
+    const email = draftEmail.trim()
+    if (!email || email === admin.email) {
+      setEditingId('')
+      return
+    }
+    setPending2FA({
+      label: `change ${admin.email}'s email to ${email}`,
+      run: (code) => emailMutation.mutateAsync({ id: admin.id, email, code }).then(() => undefined),
+    })
+    setEditingId('')
+  }
 
   const filtered = (admins || []).filter((a) => {
     if (statusFilter !== 'all' && a.status !== statusFilter) return false
@@ -305,7 +406,7 @@ function AdminsPage() {
                             onChange={(e) => setDraftEmail(e.target.value)}
                             onKeyDown={(e) => {
                               if (e.key === 'Enter' && draftEmail.trim()) {
-                                emailMutation.mutate({ id: a.id, email: draftEmail.trim() })
+                                commitEmailEdit(a)
                               } else if (e.key === 'Escape') {
                                 setEditingId('')
                                 setDraftEmail('')
@@ -313,7 +414,7 @@ function AdminsPage() {
                             }}
                           />
                           <button
-                            onClick={() => emailMutation.mutate({ id: a.id, email: draftEmail.trim() })}
+                            onClick={() => commitEmailEdit(a)}
                             disabled={!draftEmail.trim() || emailMutation.isPending}
                             className="text-teal-400 hover:text-teal-300 disabled:opacity-40"
                             aria-label="Save email"
@@ -341,10 +442,7 @@ function AdminsPage() {
                           )}
                           {a.status === 'active' && (
                             <button
-                              onClick={() => {
-                                setEditingId(a.id)
-                                setDraftEmail(a.email)
-                              }}
+                              onClick={() => beginEmailEdit(a)}
                               className="text-zinc-600 hover:text-teal-400 transition-colors"
                               aria-label={`Edit email for ${a.email}`}
                             >
@@ -359,7 +457,7 @@ function AdminsPage() {
                         className="bg-zinc-800/60 border border-zinc-700 rounded-md px-2 py-1 text-xs text-zinc-200 disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-teal-500"
                         value={a.role}
                         disabled={me?.id === a.id}
-                        onChange={(e) => a.status === 'active' && roleMutation.mutate({ id: a.id, role: e.target.value })}
+                        onChange={(e) => a.status === 'active' && confirmRoleChange(a, e.target.value)}
                       >
                         <option value="admin">Admin</option>
                         <option value="super_admin">Super admin</option>
@@ -381,16 +479,30 @@ function AdminsPage() {
                           <>
                             <button
                               onClick={() => {
-                                if (confirm(`Reset password for "${a.email}"?`)) resetPwMutation.mutate(a)
+                                if (confirm(`Reset the password for "${a.email}"? A temporary password will be generated and shown once.`))
+                                  confirmResetPassword(a)
                               }}
-                              className="inline-flex items-center text-sm rounded-md px-2 py-1 text-teal-400 hover:text-teal-300 hover:bg-teal-500/10 transition-colors"
+                              className="inline-flex items-center gap-1 text-sm rounded-md px-2 py-1 text-teal-400 hover:text-teal-300 hover:bg-teal-500/10 transition-colors"
                             >
+                              <IconKey size={13} stroke={1.6} aria-hidden="true" />
                               Reset password
                             </button>
+                            {me?.id !== a.id && a.totp_enabled && (
+                              <button
+                                onClick={() => {
+                                  if (confirm(`Reset 2FA for "${a.email}"? They will be able to re-enroll from Profile on next login.`))
+                                    confirmReset2FA(a)
+                                }}
+                                className="inline-flex items-center gap-1 text-sm rounded-md px-2 py-1 text-amber-400 hover:text-amber-300 hover:bg-amber-500/10 transition-colors"
+                              >
+                                <IconShieldOff size={13} stroke={1.6} aria-hidden="true" />
+                                Reset 2FA
+                              </button>
+                            )}
                             {me?.id !== a.id && (
                               <button
                                 onClick={() => {
-                                  if (confirm(`Disable admin "${a.email}"?`)) statusMutation.mutate(a)
+                                  if (confirm(`Disable admin "${a.email}"?`)) confirmStatusToggle(a)
                                 }}
                                 className="inline-flex items-center text-sm rounded-md px-2 py-1 text-red-400 hover:text-red-300 hover:bg-red-500/10 transition-colors"
                               >
@@ -400,7 +512,7 @@ function AdminsPage() {
                           </>
                         ) : (
                           <button
-                            onClick={() => statusMutation.mutate(a)}
+                            onClick={() => confirmStatusToggle(a)}
                             className="inline-flex items-center text-sm rounded-md px-2 py-1 text-teal-400 hover:text-teal-300 hover:bg-teal-500/10 transition-colors"
                           >
                             Enable
@@ -415,6 +527,19 @@ function AdminsPage() {
           </div>
         )}
       </div>
+
+      {/* Step-up 2FA gate for privileged admin actions */}
+      <Confirm2FA
+        open={pending2FA !== null}
+        onClose={() => setPending2FA(null)}
+        title="Confirm with 2FA"
+        description={
+          pending2FA
+            ? `Enter your own authenticator code to ${pending2FA.label}. This extra confirmation protects the console from unauthorized account changes.`
+            : undefined
+        }
+        onSubmit={pending2FA ? pending2FA.run : null}
+      />
     </div>
   )
 }
