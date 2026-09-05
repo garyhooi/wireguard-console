@@ -2,6 +2,31 @@
 
 A self-hosted web console for issuing, monitoring, and revoking company WireGuard VPN access — one console, many VPN exit servers across regions.
 
+## Screens
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/demo/dashboard.png" alt="Dashboard" width="100%" />
+      <br /><em>Dashboard — live KPIs and recent peers</em>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/demo/statistics.png" alt="Statistics" width="100%" />
+      <br /><em>Statistics — traffic chart, top peers and usage report</em>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/demo/peers.png" alt="Peers" width="100%" />
+      <br /><em>Peers — active/suspended devices, config &amp; QR actions</em>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/demo/users.png" alt="VPN Users" width="100%" />
+      <br /><em>VPN Users — status tabs, search and invite</em>
+    </td>
+  </tr>
+</table>
+
 ## What you get
 
 - **Admins** (invited, mandatory 2FA) manage everything from the web UI
