@@ -573,8 +573,16 @@ else
   FIRST_ADMIN_BLOCK=" Existing install updated — admins and data are kept."
 fi
 
-DOMAIN_SHOWN="$(grep '^CONSOLE_DOMAIN=' .env | cut -d= -f2-)"
+# Display values come from .env (the source of truth — shell variables can be
+# stale after a self-heal sed -i above). The `|| true` guards are essential:
+# under `set -euo pipefail`, an unguarded non-matching `grep` would abort the
+# script silently right here — after the stack is up — and swallow the
+# credentials summary. Fall back to the shell variables, which were validated
+# above, when a key is absent.
+DOMAIN_SHOWN="$(grep '^CONSOLE_DOMAIN=' .env | cut -d= -f2- || true)"
 TLS_MODE_SHOWN="$(grep '^WGCONSOLE_TLS=' .env | cut -d= -f2- || true)"
+DOMAIN_SHOWN="${DOMAIN_SHOWN:-${CONSOLE_DOMAIN:-}}"
+TLS_MODE_SHOWN="${TLS_MODE_SHOWN:-${WGCONSOLE_TLS:-}}"
 if [[ "${TLS_MODE_SHOWN}" == "external-proxy" ]]; then
   REACH_NOTE=" ${DOMAIN_SHOWN} is fronted by Cloudflare (or another proxy) in Flexible /
   Automatic SSL mode — Cloudflare terminates HTTPS and reaches this server
