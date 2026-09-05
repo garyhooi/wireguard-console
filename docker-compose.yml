@@ -9,10 +9,15 @@ services:
       - "443:443"
     environment:
       CONSOLE_DOMAIN: ${CONSOLE_DOMAIN}
-      # Any non-empty value ("internal") selects IP-only mode: Caddy's
-      # entrypoint picks the Caddyfile variant (internal CA, single :443
-      # listener with the console route + block-page catch-all route).
-      # Empty/absent = domain mode with public ACME certs.
+      # TLS mode. Empty/absent = domain mode with public ACME certs.
+      # "internal" = IP-only mode: Caddy's entrypoint picks the IP
+      # Caddyfile variant (internal CA, single :443 listener with the
+      # console route + block-page catch-all route).
+      # "external-proxy" = Cloudflare reverse-proxy mode: the site is
+      # fronted by Cloudflare in Flexible/Automatic SSL mode (Cloudflare
+      # terminates TLS and reaches this origin over plain HTTP). Caddy
+      # terminates no TLS and disables the automatic HTTP→HTTPS redirect,
+      # so port 80 serves the app and there is no redirect loop.
       WGCONSOLE_TLS: ${WGCONSOLE_TLS:-}
     volumes:
       - caddy-data:/data

@@ -566,15 +566,16 @@ What the script does, in order, and why each step exists:
 | Open `80/tcp`, `443/tcp`, `51820/udp` if `ufw` is active | Only touches the firewall if you're already using one, and only adds rules, never resets existing ones |
 | `docker compose up -d --build` | Everything else is containerized — see below |
 
-The compose file is refined slightly from the earlier sketch in this section: the standalone `caddy` service and a separate static-frontend service are merged into one `console` service — a multi-stage build where Bun builds the Vite app and the final stage is Caddy serving the built files and reverse-proxying `/api/*` — which is one less moving container:
+The compose file is refined slightly from the earlier sketch in this section: the standalone `caddy` service and a separate static-frontend service are merged into one `console` service — a multi-stage build where Bun builds the Vite app and the final stage is Caddy serving the built files and reverse-proxying `/api/*` — which is one less moving container. The Caddyfile is chosen at container start by the entrypoint wrapper based on `WGCONSOLE_TLS` (see "TLS modes" below):
 
 ```yaml
 services:
   console:      # Caddy + built frontend — TLS, static hosting, /api/* proxy
     build: ./frontend
-    ports: ["80:80", "443:443"]
+    ports: ["80:80", "443:443"]   # external-proxy mode: publish 80 only
     environment:
       CONSOLE_DOMAIN: ${CONSOLE_DOMAIN}
+      WGCONSOLE_TLS: ${WGCONSOLE_TLS:-}
     volumes: [caddy-data:/data, caddy-config:/config]
     depends_on: [api]
 
@@ -603,6 +604,14 @@ services:
 ```
 
 (Full version with all env vars and volumes is in the companion `docker-compose.yml`.)
+
+**TLS modes (`WGCONSOLE_TLS`)**. Caddy terminates TLS for the console in most deployments, but the deployment shape determines *how*:
+
+- **Empty (default) — domain mode.** `CONSOLE_DOMAIN=vpn.example.com`, DNS points at the server, and Caddy obtains a public ACME certificate automatically. Caddy also auto-redirects `http://` → `https://`. This is what the README quick start uses.
+- **`internal` — IP-only mode.** `CONSOLE_DOMAIN` is a bare public IP, so public CAs can't issue; Caddy uses its internal CA (one-time self-signed browser warning). Installer sets this automatically when the domain is an IP.
+- **`external-proxy` — behind Cloudflare (Flexible/Automatic SSL).** Cloudflare terminates HTTPS at its edge and reaches this server over **plain HTTP on :80**. Caddy must then serve HTTP only and **must not redirect HTTP→HTTPS** — Caddy's automatic redirect is exactly what makes browsers loop: Cloudflare fetches origin :80 → Caddy answers `308 → https://same-URL` → Cloudflare forwards it → the browser retries → repeat, ending in `ERR_TOO_MANY_REDIRECTS`. This mode therefore disables Caddy's automatic HTTPS entirely (`auto_https off`) and serves the console on an `http://{CONSOLE_DOMAIN}` site plus the block-page catch-all on `:80`. A separate `:443` listener serves only the branded block page for *direct* HTTPS clients (AdGuard resolves blocked domains to this server's public IP, and those clients bypass Cloudflare) — the console itself is deliberately not served on :443, only via Cloudflare. Cloudflare's edge IP ranges are in the reverse-proxy `trusted_proxies` list so the original `X-Forwarded-Proto: https` and client IP reach the API unchanged, while spoofed proxy headers from direct clients are dropped. Use the empty value instead if Cloudflare can reach an HTTPS origin (SSL/TLS mode **Full**).
+
+**Cloudflare + AdGuard block page note:** with `external-proxy`, all hosts (including domains AdGuard resolves here to block) arrive on the same :80 listener from Cloudflare. Caddy matches by Host: the console domain serves the app, every other host serves the branded block page — the same behavior the :443 catch-all gives in the other two modes.
 
 **On containerizing `wg-helper`**: the earlier draft of this section left native-systemd-service as the more conservative alternative to containerizing it. Given the goal is now specifically a one-command, fully-automated install, containerizing it (`cap_add: NET_ADMIN, SYS_MODULE` + host networking — the same pattern wg-easy uses in production) is the pragmatic choice: it's what actually fits inside a single `docker compose up`, and it's proven precedent rather than a novel risk. The native-systemd-unit path is still worth documenting later as a "hardened deployment" option for anyone who wants one fewer layer between that process and the kernel — just not the default the installer takes.
 

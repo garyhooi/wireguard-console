@@ -11,9 +11,10 @@ RUN bun run build
 
 FROM caddy:2-alpine
 COPY --from=build /app/dist /srv
-# Two Caddyfile variants (domain mode / IP-only mode) plus an entrypoint
-# wrapper that picks one at startup based on the WGCONSOLE_TLS env var —
-# no Caddyfile env interpolation, immune to image-cache staleness.
-COPY Caddyfile.domain Caddyfile.ip entrypoint.sh /etc/caddy/
+# Three Caddyfile variants (domain mode / IP-only mode / Cloudflare
+# reverse-proxy mode) plus an entrypoint wrapper that picks one at startup
+# based on the WGCONSOLE_TLS env var — no Caddyfile env interpolation,
+# immune to image-cache staleness.
+COPY Caddyfile.domain Caddyfile.ip Caddyfile.cloudflare entrypoint.sh /etc/caddy/
 RUN chmod +x /etc/caddy/entrypoint.sh
 ENTRYPOINT ["/etc/caddy/entrypoint.sh"]

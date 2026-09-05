@@ -1,0 +1,116 @@
+# Cloudflare reverse-proxy mode (WGCONSOLE_TLS=external-proxy): the console
+# sits behind Cloudflare in "Flexible"/"Automatic SSL/TLS" mode, where
+# Cloudflare terminates TLS at its edge and talks PLAIN HTTP to this server
+# on port 80. The proxy is in the middle of the browser↔origin TLS — so it
+# never forwards an HTTPS *connection* to us, only HTTP. Caddy therefore
+# must NOT terminate TLS here, and must NOT try to redirect HTTP→HTTPS
+# (the automatic redirect is exactly what made the browser loop:
+# Cloudflare fetches origin over HTTP → Caddy answers 308 → https://same
+# URL → Cloudflare forwards it → repeat forever, ERR_TOO_MANY_REDIRECTS).
+#
+# Origin encryption is provided end-to-end by Cloudflare (edge↔browser TLS).
+# To verify it is really "Flexible", check the SSL/TLS tab in the Cloudflare
+# dashboard — it must show "Flexible" (or "Automatic SSL/TLS" resolving to
+# it). If you can switch the origin to serve HTTPS (Cloudflare "Full"), use
+# the normal domain mode instead (empty WGCONSOLE_TLS).
+{
+	auto_https off
+	# Caddy's automatic HTTPS + HTTP→HTTPS redirect are fully disabled.
+	# Only the explicit plain-HTTP console site and the block-page
+	# listeners below exist:
+	#   - :80  → the console domain serves the app; every other host
+	#            serves the branded block page (DNS-filtered domains).
+	#   - :443 → block page ONLY, for clients that reach this server's
+	#            public IP directly over HTTPS (AdGuard resolves blocked
+	#            domains to this box; those clients don't go through
+	#            Cloudflare). The console is intentionally NOT served on
+	#            :443 — in this mode it is only reachable via Cloudflare's
+	#            plain-HTTP origin fetch.
+}
+
+# Console site: exactly the public hostname Cloudflare forwards. Host
+# matching (not the port alone) picks this over the block-page catch-all,
+# so requests for the console domain are served the app while every other
+# hostname that resolves here shows the block page — including the case
+# where the console domain itself is being blocked.
+http://{$CONSOLE_DOMAIN} {
+	encode gzip
+
+	# Backend API — everything under /api/ goes to the Go service.
+	handle /api/* {
+		reverse_proxy api:8080 {
+			# Cloudflare terminates TLS, so this origin sees plain HTTP.
+			# Cloudflare already sends X-Forwarded-Proto: https on every
+			# request (that is how the Go backend can tell the browser
+			# connection is really HTTPS), and Caddy's default pass-through
+			# forwards it as-is — no header_up needed.
+			#
+			# Only trust X-Forwarded-* headers from Cloudflare's own edge
+			# IP ranges (plus Docker's private network, so the proxy's own
+			# hops are trusted). A client reaching Caddy directly from any
+			# other IP gets its spoofed X-Forwarded-Proto/X-Forwarded-For
+			# dropped by Caddy before it reaches the backend.
+			trusted_proxies private_ranges
+			trusted_proxies 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22
+		}
+	}
+
+	# Everything else is the React SPA. try_files falls back to index.html
+	# so client-side routes (TanStack Router) survive a hard refresh.
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+	}
+}
+
+# Catch-all: any OTHER host that resolves here (a domain blocked by
+# AdGuard) shows the branded block page. HTTP only — see the note at the
+# top of this file.
+http://:80 {
+	root * /srv
+	handle {
+		rewrite * /blocked.html
+		file_server
+	}
+	header {
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+	}
+}
+
+# HTTPS block page for DIRECT clients. Cloudflare itself only ever fetches
+# this origin over plain HTTP (Flexible mode), but AdGuard's DNS blocking
+# resolves blocked domains to this server's public IP, so a client trying
+# https://blocked.example reaches this box directly (not through
+# Cloudflare) — answer it with the block page over TLS, exactly like
+# domain mode does. On-demand TLS issues an internal (self-signed)
+# certificate the first time a blocked domain is requested, then the
+# branded block page is served. The browser shows a one-time certificate
+# warning, then renders the page. HSTS-preloaded domains (google.com etc.)
+# may refuse to proceed past the warning — the DNS block still stops the
+# connection.
+#
+# Note this is an HTTPS-only listener with NO HTTP→HTTPS redirect attached,
+# so it never interferes with the Cloudflare plain-HTTP traffic on :80.
+:443 {
+	tls {
+		on_demand
+		issuer internal
+	}
+	root * /srv
+	handle {
+		rewrite * /blocked.html
+		file_server
+	}
+	header {
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+	}
+}

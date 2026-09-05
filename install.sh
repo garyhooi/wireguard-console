@@ -154,6 +154,11 @@ if [[ "${UPGRADE}" == true ]] \
     warn "IP console address with empty WGCONSOLE_TLS in .env — enabling internal TLS mode."
     sed -i "s|^WGCONSOLE_TLS=.*|WGCONSOLE_TLS=internal|" .env
   fi
+
+  # Reject a nonsense combination instead of silently mis-deploying.
+  if [[ "${WGCONSOLE_TLS:-}" == "external-proxy" ]] && [[ "${CONSOLE_DOMAIN:-}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+    error "WGCONSOLE_TLS=external-proxy needs a real domain (Cloudflare fronts a hostname, not a raw IP). CONSOLE_DOMAIN=${CONSOLE_DOMAIN}"
+  fi
 else
   [[ "${UPGRADE}" == true ]] && warn "Existing .env is missing or incomplete — generating a fresh configuration."
 
@@ -198,17 +203,33 @@ else
   # WG_PUBLIC_ENDPOINT=host:port if your tunnel endpoint differs.
   WG_PUBLIC_ENDPOINT="${WG_PUBLIC_ENDPOINT:-${CONSOLE_DOMAIN}:${WG_DEFAULT_PORT}}"
 
-  # IP-only deployments get Caddy's internal CA — public certificate
-  # authorities can't issue certificates for bare IP addresses. For a
-  # fully trusted certificate without owning a domain, use an sslip.io
-  # address instead, e.g. 203.0.113.5.sslip.io (works exactly like a domain).
-  # The .env value is the single token "internal" (source-safe, no quotes);
-  # compose turns any non-empty value into "tls internal" for Caddy.
-  WGCONSOLE_TLS=""
-  if [[ "${CONSOLE_DOMAIN}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+  # TLS mode selection. Priority:
+  #   1. WGCONSOLE_TLS pre-set by the caller (e.g.
+  #      "external-proxy" for a Cloudflare-fronted console) — respected.
+  #   2. A bare IPv4 CONSOLE_DOMAIN → "internal": IP-only deployments get
+  #      Caddy's internal CA — public certificate authorities can't issue
+  #      certificates for bare IP addresses. For a fully trusted
+  #      certificate without owning a domain, use an sslip.io address
+  #      instead, e.g. 203.0.113.5.sslip.io (works exactly like a domain).
+  #   3. Otherwise empty → domain mode (public ACME certificates).
+  #
+  #   "external-proxy" is for when the console sits behind Cloudflare in
+  #   Flexible / "Automatic SSL/TLS" mode: Cloudflare terminates TLS and
+  #   reaches this server over plain HTTP on :80. Caddy must then serve
+  #   HTTP only and never redirect to HTTPS — the automatic redirect is
+  #   what makes browsers loop with ERR_TOO_MANY_REDIRECTS (Cloudflare
+  #   fetches :80 → Caddy 308s to https → repeat).
+  if [[ -z "${WGCONSOLE_TLS:-}" ]] && [[ "${CONSOLE_DOMAIN}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
     WGCONSOLE_TLS="internal"
     info "IPv4 address detected — HTTPS will use Caddy's internal CA (browsers will show a self-signed certificate warning)."
   fi
+  if [[ "${WGCONSOLE_TLS:-}" == "external-proxy" ]]; then
+    if [[ "${CONSOLE_DOMAIN}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+      error "WGCONSOLE_TLS=external-proxy needs a real domain — Cloudflare fronts a hostname, not a raw IP. CONSOLE_DOMAIN=${CONSOLE_DOMAIN}"
+    fi
+    info "Cloudflare reverse-proxy mode (WGCONSOLE_TLS=external-proxy): Cloudflare terminates TLS; Caddy serves plain HTTP on :80 with no redirects. No HTTPS listener is started — make sure Cloudflare's SSL/TLS mode is Flexible or 'Automatic SSL/TLS'."
+  fi
+  WGCONSOLE_TLS="${WGCONSOLE_TLS:-}"
 
   # First super_admin bootstrap credentials. The API auto-creates the
   # account only when the admins table is empty (a brand-new database),
@@ -239,7 +260,8 @@ else
 CONSOLE_DOMAIN=${CONSOLE_DOMAIN}
 WG_PUBLIC_ENDPOINT=${WG_PUBLIC_ENDPOINT}
 # Empty for domain mode (public ACME certificates); "internal" for
-# IP-only mode — any non-empty value makes Caddy use its internal CA.
+# IP-only mode; "external-proxy" for a Cloudflare (Flexible/Automatic
+# SSL) reverse proxy that reaches the origin over plain HTTP.
 WGCONSOLE_TLS=${WGCONSOLE_TLS}
 APP_ENCRYPTION_KEY=$(openssl rand -hex 32)
 SESSION_SIGNING_KEY=$(openssl rand -hex 32)
@@ -333,7 +355,15 @@ else
 fi
 
 DOMAIN_SHOWN="$(grep '^CONSOLE_DOMAIN=' .env | cut -d= -f2-)"
-if [[ "${DOMAIN_SHOWN}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+TLS_MODE_SHOWN="$(grep '^WGCONSOLE_TLS=' .env | cut -d= -f2- || true)"
+if [[ "${TLS_MODE_SHOWN}" == "external-proxy" ]]; then
+  REACH_NOTE=" ${DOMAIN_SHOWN} is fronted by Cloudflare (or another proxy) in Flexible /
+  Automatic SSL mode — Cloudflare terminates HTTPS and reaches this server
+  over plain HTTP. Caddy serves HTTP only, with no HTTPS redirect, so make
+  sure only port 80 is published to the proxy.
+  Invite links use https://${DOMAIN_SHOWN}/claim/... and WireGuard peers
+  use ${DOMAIN_SHOWN}:${WG_DEFAULT_PORT} as their endpoint automatically."
+elif [[ "${DOMAIN_SHOWN}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
   REACH_NOTE=" ${DOMAIN_SHOWN} is an IP address, so HTTPS uses Caddy's internal CA:
   your browser will warn about a self-signed certificate on first visit —
   proceed past the warning (the connection is still fully encrypted).
