@@ -60,30 +60,14 @@ To add more operators: **System → Admins → Invite Admin**. Add VPN users und
 
 ## Firewall — which ports to open
 
-Only **three inbound rules** matter on a console host:
-
 | Port | Purpose | Open? |
 |---|---|---|
 | `80/tcp` | Caddy: HTTPS certificate issuance + block page | ✅ |
 | `443/tcp` | Console web UI + API | ✅ |
+| `53/udp+tcp` | AdGuard DNS for VPN peers (WireGuard interface only) | ✅ on VPN hosts |
 | `51820/udp` | WireGuard (use your custom port if you changed it) | ✅ only if this machine also runs a VPN server |
 
-The installer does this automatically when ufw is active. On a cloud firewall (AWS/Azure/DigitalOcean security group), add the same three rules manually.
-
-**DNS to the tunnel gateway (AdGuard) — required on VPN hosts.** Peers are pointed at the tunnel gateway (e.g. `10.8.0.1`), where AdGuard Home listens on the host network. A DNS query from a peer to that address arrives as *inbound* traffic to the host, so a default-deny firewall silently drops it — the VPN handshake succeeds but Apple devices have no internet until they're switched to a public resolver. The installer opens port 53 **only on the WireGuard interface(s)**, never on the public one, so AdGuard is reachable from the tunnel without turning the box into an open DNS resolver:
-
-```bash
-# What the installer adds when ufw is active (interface name = your WG iface, e.g. wg0):
-sudo ufw allow in on wg0 to any port 53 proto udp comment 'WG peers -> AdGuard DNS (UDP)'
-sudo ufw allow in on wg0 to any port 53 proto tcp comment 'WG peers -> AdGuard DNS (TCP)'
-```
-
-If ufw is enabled *after* an install (or your WG interface isn't `wg0`), add those two rules yourself — without them, iOS/macOS clients on the VPN cannot resolve anything.
-
-**Leave closed (bound but internal — do not expose to the internet):**
-
-- `53/udp+tcp` on the **public** interface — AdGuard DNS. Tunnel peers reach it through the VPN gateway, never from the internet. Opening it to the internet makes your server an open DNS resolver.
-- `3000/tcp` — AdGuard admin UI. The console reaches it internally.
+The installer opens these automatically when ufw is active — port 53 is scoped to the WireGuard interface, so tunnel peers reach AdGuard on the gateway while it stays closed to the internet. On a cloud firewall (AWS/Azure/DigitalOcean security group), open 80/443 (and 51820 on VPN hosts) manually.
 
 ## Distributed nodes (one console, many regions)
 

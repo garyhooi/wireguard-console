@@ -162,7 +162,6 @@ export function ConsoleVersionControl() {
             ? `Update available: ${currentV} → ${latestV}`
             : `WireGuard Console ${currentV || '…'}`
         }
-        description="Updates run on the server, not from this page. The console does not touch the server's files — an admin runs two commands over SSH."
       >
         {data && (
           <div className="space-y-4">
