@@ -481,6 +481,27 @@ EOF
 
   chmod 600 .env
   info "Secrets generated; domain set to ${CONSOLE_DOMAIN}"
+
+  # Show the one-time super_admin credentials NOW, before the multi-minute
+  # image build scrolls them out of the terminal. The end-of-install summary
+  # repeats them, but a long docker build (or a truncated scrollback/SSH
+  # capture) can otherwise hide the only time they are ever printed. The
+  # account is only created on the API's first boot (empty admins table).
+  if [[ "${FRESH_DB}" == true ]]; then
+    cat <<CRED
+
+==================================================================
+ ⚠  SAVE THESE NOW — the super_admin password is shown only once.
+    Email:    ${FIRST_ADMIN_EMAIL}
+    Password: ${FIRST_ADMIN_PASSWORD}
+
+    Log in at https://${CONSOLE_DOMAIN} after the stack starts, then
+    change this password in Profile and enroll 2FA immediately.
+    (Recovery: the same values are in ${INSTALL_DIR}/.env as
+    ADMIN_EMAIL / ADMIN_PASSWORD.)
+==================================================================
+CRED
+  fi
 fi
 
 # ---------------------------------------------------------------------------
