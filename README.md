@@ -137,6 +137,13 @@ interfaces locally and reports stats back — no inbound ports or SSH needed.
 Then create servers with **Managed by: [node]** and everything happens
 automatically on that node.
 
+**Reboots self-heal.** The console host re-applies every locally-managed
+WireGuard interface to the kernel at API startup and periodically afterwards
+(after a reboot the kernel interface and NAT rules are gone, and wg-helper is
+passive until pushed state). Domain rules are likewise re-synced to AdGuard on
+startup and every 5 minutes. If you reboot the host, give the stack ~2 minutes
+to restore the tunnel before troubleshooting.
+
 ### Domain blocking & the block page
 
 DNS filtering runs through the built-in **AdGuard Home** and is set up
