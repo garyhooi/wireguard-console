@@ -12,6 +12,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"os/exec"
@@ -22,6 +24,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pquerna/otp/totp"
 	"golang.org/x/crypto/argon2"
 )
 
@@ -76,6 +79,7 @@ func TestMain(m *testing.M) {
 		"MIGRATIONS_DIR="+filepath.Join(repoRoot, "migrations"),
 		"PGHOST=localhost",
 		"POSTGRES_USER="+os.Getenv("E2E_PG_USER"),
+		"POSTGRES_PASSWORD="+os.Getenv("E2E_PG_PASSWORD"),
 		"POSTGRES_DB="+os.Getenv("E2E_PG_DB"),
 		"BACKUP_DIR="+tmp,
 	)
@@ -182,6 +186,40 @@ func login(t *testing.T, email, password string) string {
 		t.Fatal("login returned no token")
 	}
 	return token
+}
+
+// enable2FAFor enrolls 2FA on the logged-in admin and returns the TOTP
+// secret so the test can mint codes for step-up checks.
+func enable2FAFor(t *testing.T, token string) string {
+	t.Helper()
+	resp, setupOut := api(t, "POST", "/api/auth/2fa/setup", token, nil)
+	expectStatus(t, resp, 200, "POST /api/auth/2fa/setup")
+	secret, _ := setupOut["secret"].(string)
+	if secret == "" {
+		t.Fatal("2fa setup returned no secret")
+	}
+	code, err := totp.GenerateCode(secret, time.Now())
+	if err != nil {
+		t.Fatalf("generate totp: %v", err)
+	}
+	resp, enableOut := api(t, "POST", "/api/auth/2fa/enable", token, map[string]string{
+		"secret": secret, "code": code,
+	})
+	expectStatus(t, resp, 200, "POST /api/auth/2fa/enable")
+	if codes, _ := enableOut["backup_codes"].([]interface{}); len(codes) != 10 {
+		t.Fatalf("expected 10 backup codes, got %d", len(codes))
+	}
+	return secret
+}
+
+// current2FACode returns a valid TOTP code for the secret at this instant.
+func current2FACode(t *testing.T, secret string) string {
+	t.Helper()
+	code, err := totp.GenerateCode(secret, time.Now())
+	if err != nil {
+		t.Fatalf("generate totp: %v", err)
+	}
+	return code
 }
 
 func expectStatus(t *testing.T, resp *http.Response, want int, path string) {
@@ -362,6 +400,13 @@ func TestEndToEnd(t *testing.T) {
 	expectStatus(t, resp, 401, "old password rejected after change")
 	token = login(t, "e2e@console.test", "e2e-NewPassw0rd!")
 
+	// ---- 2FA enrollment (step-up model) ----
+	// From here the actor has 2FA on, so every privileged admin/backup action
+	// must carry a current TOTP code. This also mirrors production policy:
+	// super_admins must have 2FA enabled to perform helpdesk actions.
+	actorSecret := enable2FAFor(t, token)
+	actorCode := func() string { return current2FACode(t, actorSecret) }
+
 	// ---- Claim: invite link end-to-end ----
 	// (fresh invite so the token is one-time and unused)
 	invResp, claimInvOut := api(t, "POST", "/api/users", token, map[string]string{
@@ -413,16 +458,23 @@ func TestEndToEnd(t *testing.T) {
 	if op2ID == "" {
 		t.Fatal("invited admin not in list")
 	}
-	resp, resetOut := api(t, "POST", "/api/admins/"+op2ID+"/reset-password", token, nil)
+	resp, resetOut := api(t, "POST", "/api/admins/"+op2ID+"/reset-password", token, map[string]string{
+		"code": actorCode(),
+	})
 	expectStatus(t, resp, 200, "POST /api/admins/{id}/reset-password")
 	if pw, _ := resetOut["password"].(string); len(pw) < 8 {
 		t.Fatal("reset password not returned")
 	}
+	// Without a valid 2FA code the reset must be refused.
+	denyReset, _ := api(t, "POST", "/api/admins/"+op2ID+"/reset-password", token, map[string]string{
+		"code": "000000",
+	})
+	expectStatus(t, denyReset, 401, "POST /api/admins/{id}/reset-password (bad code)")
 
 	// ---- Admins: disable then enable ----
 	// (op2 was created earlier; toggle disabled -> active -> disabled)
 	statusResp, _ := api(t, "PATCH", "/api/admins/"+op2ID, token, map[string]interface{}{
-		"role": "admin", "status": "disabled",
+		"role": "admin", "status": "disabled", "code": actorCode(),
 	})
 	expectStatus(t, statusResp, 200, "PATCH /api/admins/{id} (disable)")
 	adminList3 := rawGet(t, baseURL+"/api/admins", token)
@@ -436,13 +488,13 @@ func TestEndToEnd(t *testing.T) {
 		}
 	}
 	statusResp, _ = api(t, "PATCH", "/api/admins/"+op2ID, token, map[string]interface{}{
-		"role": "admin", "status": "active",
+		"role": "admin", "status": "active", "code": actorCode(),
 	})
 	expectStatus(t, statusResp, 200, "PATCH /api/admins/{id} (enable)")
 
 	// ---- Admins: edit email (super_admin edits another admin, then self) ----
 	emailResp, _ := api(t, "PATCH", "/api/admins/"+op2ID, token, map[string]interface{}{
-		"email": "op2-renamed@console.test",
+		"email": "op2-renamed@console.test", "code": actorCode(),
 	})
 	expectStatus(t, emailResp, 200, "PATCH /api/admins/{id} (email)")
 	adminList4 := rawGet(t, baseURL+"/api/admins", token)
@@ -462,25 +514,55 @@ func TestEndToEnd(t *testing.T) {
 	}
 	// Duplicate email must be rejected.
 	dupResp, _ := api(t, "PATCH", "/api/admins/"+op2ID, token, map[string]interface{}{
-		"email": "e2e@console.test",
+		"email": "e2e@console.test", "code": actorCode(),
 	})
 	expectStatus(t, dupResp, 409, "PATCH /api/admins/{id} (duplicate email)")
 	// Editing the self email is allowed (current session is id-based).
 	meID, _ := meOut["id"].(string)
 	selfEmailResp, _ := api(t, "PATCH", "/api/admins/"+meID, token, map[string]interface{}{
-		"email": "e2e-renamed@console.test",
+		"email": "e2e-renamed@console.test", "code": actorCode(),
 	})
 	expectStatus(t, selfEmailResp, 200, "PATCH /api/admins/{id} (self email)")
 	// Demoting the last active super_admin is rejected.
 	demoteResp, _ := api(t, "PATCH", "/api/admins/"+meID, token, map[string]interface{}{
-		"role": "admin",
+		"role": "admin", "code": actorCode(),
 	})
 	expectStatus(t, demoteResp, 400, "PATCH /api/admins/{id} (self demote blocked)")
 	// Restore the seeded email so the rest of the suite keeps passing.
 	restoreResp, _ := api(t, "PATCH", "/api/admins/"+meID, token, map[string]interface{}{
-		"email": "e2e@console.test",
+		"email": "e2e@console.test", "code": actorCode(),
 	})
 	expectStatus(t, restoreResp, 200, "PATCH /api/admins/{id} (self email restore)")
+
+	// ---- Admins: super_admin resets another admin's 2FA ----
+	// Enable 2FA on op2 first, then verify the actor can clear it with their
+	// own code (and that a bad code is refused).
+	op2pw, _ := resetOut["password"].(string)
+	op2Tok := login(t, "op2-renamed@console.test", op2pw)
+	op2Secret := enable2FAFor(t, op2Tok)
+	_ = op2Secret // enrollment itself proves the flow; reset uses the actor
+
+	// op2 now has 2FA; the e2e super_admin (actor) resets it.
+	resp, _ = api(t, "POST", "/api/admins/"+op2ID+"/reset-2fa", token, map[string]string{
+		"code": actorCode(),
+	})
+	expectStatus(t, resp, 200, "POST /api/admins/{id}/reset-2fa (actor code)")
+	// A bad actor code must be refused.
+	badReset2FA, _ := api(t, "POST", "/api/admins/"+op2ID+"/reset-2fa", token, map[string]string{
+		"code": "111111",
+	})
+	expectStatus(t, badReset2FA, 401, "POST /api/admins/{id}/reset-2fa (bad actor code)")
+	// op2's 2FA is now cleared.
+	var op2Enabled bool
+	{
+		poolX, _ := pgxpool.New(context.Background(), dbURL)
+		defer poolX.Close()
+		poolX.QueryRow(context.Background(),
+			`SELECT totp_enabled FROM admins WHERE id = $1`, op2ID).Scan(&op2Enabled)
+	}
+	if op2Enabled {
+		t.Fatal("op2 2FA still enabled after reset")
+	}
 
 	// ---- Peers carry their owner ----
 	peerJSON := rawGet(t, baseURL+"/api/peers", token)
@@ -608,6 +690,58 @@ func TestEndToEnd(t *testing.T) {
 	resp, _ = api(t, "DELETE", "/api/servers/"+serverID, token, nil)
 	expectStatus(t, resp, 200, "DELETE /api/servers/{id}")
 
+	// ---- Backups: create / download / restore require the actor's 2FA ----
+	// Create a backup (no gate — making one is safe), then list it.
+	createResp, _ := api(t, "POST", "/api/backup/create", token, nil)
+	expectStatus(t, createResp, 200, "POST /api/backup/create")
+	listRaw := rawGet(t, baseURL+"/api/backup/list", token)
+	var bkList map[string]interface{}
+	json.Unmarshal([]byte(listRaw), &bkList)
+	bkArr, _ := bkList["backups"].([]interface{})
+	if len(bkArr) == 0 {
+		t.Fatalf("no backups after create: %s", listRaw)
+	}
+	bkName, _ := bkArr[0].(string)
+
+	// Download with a bad code is refused.
+	badDL := rawPost(t, baseURL+"/api/backup/download", token, map[string]string{
+		"filename": bkName, "code": "999999",
+	})
+	if badDL.status != 401 {
+		t.Fatalf("download bad code: status %d, want 401", badDL.status)
+	}
+	// Download with the actor's code streams the gz file.
+	dl := rawPost(t, baseURL+"/api/backup/download", token, map[string]string{
+		"filename": bkName, "code": actorCode(),
+	})
+	if dl.status != 200 {
+		t.Fatalf("download: status %d, want 200", dl.status)
+	}
+	if !strings.HasPrefix(dl.ctype, "application/gzip") || len(dl.body) < 100 {
+		t.Fatalf("download body/type wrong: type=%q len=%d", dl.ctype, len(dl.body))
+	}
+
+	// Restore with a bad code is refused; with a good code it succeeds.
+	badRestore, _ := api(t, "POST", "/api/backup/restore", token, map[string]string{
+		"filename": bkName, "code": "999999",
+	})
+	expectStatus(t, badRestore, 401, "POST /api/backup/restore (bad code)")
+	goodRestore, _ := api(t, "POST", "/api/backup/restore", token, map[string]string{
+		"filename": bkName, "code": actorCode(),
+	})
+	expectStatus(t, goodRestore, 200, "POST /api/backup/restore (good code)")
+
+	// Restore-from-upload with a bad code is refused.
+	badUpload := rawUpload(t, "/api/backup/restore-upload", token, bkName, dl.body, "999999")
+	if badUpload.status != 401 {
+		t.Fatalf("restore-upload bad code: status %d, want 401", badUpload.status)
+	}
+	// And with a good code it restores.
+	goodUpload := rawUpload(t, "/api/backup/restore-upload", token, "uploaded_"+bkName, dl.body, actorCode())
+	if goodUpload.status != 200 {
+		t.Fatalf("restore-upload: status %d, want 200 (body %s)", goodUpload.status, goodUpload.body)
+	}
+
 	// ---- Audit-log housekeeping (super_admin only) ----
 	// Many actions above logged audit rows. A purge with a huge cutoff
 	// deletes nothing recent, returns 200, and the purge itself is logged.
@@ -620,7 +754,6 @@ func TestEndToEnd(t *testing.T) {
 	badResp, _ := api(t, "DELETE", "/api/audit-logs?days=abc", token, nil)
 	expectStatus(t, badResp, 400, "DELETE /api/audit-logs?days=abc")
 	// An admin (not super_admin) must be denied (403).
-	op2pw, _ := resetOut["password"].(string)
 	adminTok := login(t, "op2-renamed@console.test", op2pw)
 	denyResp, _ := api(t, "DELETE", "/api/audit-logs?days=30", adminTok, nil)
 	expectStatus(t, denyResp, 403, "DELETE /api/audit-logs (admin denied)")
@@ -656,6 +789,61 @@ func rawGet(t *testing.T, url, token string) string {
 	buf := new(bytes.Buffer)
 	buf.ReadFrom(resp.Body)
 	return buf.String()
+}
+
+type rawResp struct {
+	status int
+	ctype  string
+	body   []byte
+}
+
+// rawPost posts JSON and returns the raw response without JSON-decoding it
+// (used for binary/gzip download checks).
+func rawPost(t *testing.T, url, token string, body map[string]string) rawResp {
+	t.Helper()
+	var buf bytes.Buffer
+	json.NewEncoder(&buf).Encode(body)
+	req, err := http.NewRequest("POST", url, &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return rawResp{status: resp.StatusCode, ctype: resp.Header.Get("Content-Type"), body: b}
+}
+
+// rawUpload multipart-posts a .sql.gz file plus a 2FA code.
+func rawUpload(t *testing.T, path, token, filename string, content []byte, code string) rawResp {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, err := mw.CreateFormFile("file", filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fw.Write(content)
+	mw.WriteField("code", code)
+	mw.Close()
+
+	req, err := http.NewRequest("POST", baseURL+path, &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", token)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", path, err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return rawResp{status: resp.StatusCode, body: b}
 }
 
 // wipeDB drops and recreates the public schema.
