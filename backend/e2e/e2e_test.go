@@ -684,6 +684,49 @@ func TestEndToEnd(t *testing.T) {
 	op2Secret := enable2FAFor(t, op2Tok)
 	_ = op2Secret // enrollment itself proves the flow; reset uses the actor
 
+	// ---- Login with 2FA enabled (regression) ----
+	// op2 now has 2FA on. A FRESH login must return pending_2fa + a token
+	// that Verify2FA can resolve — Login persists it in admin_sessions with
+	// a short expiry. Before the fix the pending token was never stored, so
+	// verification always answered "Invalid or expired token".
+	loginResp, loginOut := api(t, "POST", "/api/auth/login", "", map[string]string{
+		"email": "op2-renamed@console.test", "password": op2pw,
+	})
+	expectStatus(t, loginResp, 200, "POST /api/auth/login (2FA pending)")
+	if pending, _ := loginOut["pending_2fa"].(bool); !pending {
+		t.Fatal("expected pending_2fa=true on login for a 2FA-enabled admin")
+	}
+	pendingTok, _ := loginOut["token"].(string)
+	if pendingTok == "" {
+		t.Fatal("login with 2FA returned no pending token")
+	}
+
+	// Wrong code: 400, and the pending token survives for a retry. Note the
+	// Authorization header is the RAW token (no "Bearer ") — Verify2FA hashes
+	// the whole header, matching how the frontend sends it.
+	badCodeResp, _ := api(t, "POST", "/api/auth/2fa/verify", pendingTok, map[string]string{
+		"code": "000000",
+	})
+	expectStatus(t, badCodeResp, 400, "POST /api/auth/2fa/verify (wrong code)")
+
+	// Correct code: real session token that authenticates.
+	goodResp, verifyOut := api(t, "POST", "/api/auth/2fa/verify", pendingTok, map[string]string{
+		"code": current2FACode(t, op2Secret),
+	})
+	expectStatus(t, goodResp, 200, "POST /api/auth/2fa/verify (valid code)")
+	sessionTok, _ := verifyOut["token"].(string)
+	if sessionTok == "" {
+		t.Fatal("2fa verify returned no session token")
+	}
+	meResp, _ := api(t, "GET", "/api/admins/me", sessionTok, nil)
+	expectStatus(t, meResp, 200, "GET /api/admins/me (post-2FA session)")
+
+	// The pending token is single-use: a second verify must fail.
+	tfaReuseResp, _ := api(t, "POST", "/api/auth/2fa/verify", pendingTok, map[string]string{
+		"code": current2FACode(t, op2Secret),
+	})
+	expectStatus(t, tfaReuseResp, 401, "POST /api/auth/2fa/verify (pending token reused)")
+
 	// op2 now has 2FA; the e2e super_admin (actor) resets it.
 	resp, _ = api(t, "POST", "/api/admins/"+op2ID+"/reset-2fa", token, map[string]string{
 		"code": actorCode(),
@@ -895,9 +938,10 @@ func TestEndToEnd(t *testing.T) {
 	// Invalid days must be rejected.
 	badResp, _ := api(t, "DELETE", "/api/audit-logs?days=abc", token, nil)
 	expectStatus(t, badResp, 400, "DELETE /api/audit-logs?days=abc")
-	// An admin (not super_admin) must be denied (403).
-	adminTok := login(t, "op2-renamed@console.test", op2pw)
-	denyResp, _ := api(t, "DELETE", "/api/audit-logs?days=30", adminTok, nil)
+	// An admin (not super_admin) must be denied (403). Reuse op2Tok rather
+	// than logging in again — the login rate limiter (5/15min per IP) would
+	// 429 a fresh attempt this late in the suite.
+	denyResp, _ := api(t, "DELETE", "/api/audit-logs?days=30", op2Tok, nil)
 	expectStatus(t, denyResp, 403, "DELETE /api/audit-logs (admin denied)")
 }
 

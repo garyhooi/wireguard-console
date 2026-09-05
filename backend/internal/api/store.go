@@ -269,6 +269,28 @@ func Login(store *Store) http.HandlerFunc {
 				writeError(w, http.StatusInternalServerError, "Failed to generate token")
 				return
 			}
+
+			// The pending token is persisted as a short-lived session row so
+			// Verify2FA can resolve it back to this admin. It is NOT yet a
+			// usable session: Verify2FA checks TOTP and only then swaps it
+			// for a full 24h session token. Keep it short (10 min) so an
+			// abandoned login attempt expires on its own.
+			tokenHash := hashToken(token)
+			expiresAt := time.Now().Add(10 * time.Minute)
+			ip := r.RemoteAddr
+			if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+				ip = host
+			}
+			_, err = store.pool.Exec(ctx, `
+				INSERT INTO admin_sessions (admin_id, token_hash, ip_address, user_agent, expires_at)
+				VALUES ($1, $2, $3, $4, $5)
+			`, admin.ID, tokenHash, ip, r.UserAgent(), expiresAt)
+			if err != nil {
+				log.Printf("Failed to create pending 2FA session: admin_id=%s, err=%v", admin.ID, err)
+				writeError(w, http.StatusInternalServerError, "Failed to start 2FA verification")
+				return
+			}
+
 			resp.Pending2FA = true
 			resp.Token = token
 		} else {
@@ -321,15 +343,20 @@ func Verify2FA(store *Store) http.HandlerFunc {
 			writeError(w, http.StatusUnauthorized, "Missing authorization token")
 			return
 		}
+		pendingHash := hashToken(token)
 
 		ctx := context.Background()
 
+		// Resolve the pending token to its admin. It lives in admin_sessions
+		// with a short expiry (see Login). Consume it on ANY terminal outcome
+		// (success, wrong code, account disabled) so a pending token can
+		// never be replayed or verified twice.
 		var admin db.Admin
 		err := store.pool.QueryRow(ctx, `
 			SELECT id, email, password_hash, role, totp_enabled, status, totp_secret_encrypted
 			FROM admins
 			WHERE id = (SELECT admin_id FROM admin_sessions WHERE token_hash = $1 AND expires_at > now())
-		`, hashToken(token)).Scan(
+		`, pendingHash).Scan(
 			&admin.ID, &admin.Email, &admin.PasswordHash, &admin.Role,
 			&admin.TOTPEnabled, &admin.Status, &admin.TOTPSecretEncrypted,
 		)
@@ -343,6 +370,10 @@ func Verify2FA(store *Store) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "2FA is not enabled for this account")
 			return
 		}
+		if admin.Status != "active" {
+			writeError(w, http.StatusForbidden, "Account is disabled")
+			return
+		}
 
 		decryptedSecret, err := auth.DecryptTOTPSecret(ctx, admin.TOTPSecretEncrypted)
 		if err != nil {
@@ -351,9 +382,17 @@ func Verify2FA(store *Store) http.HandlerFunc {
 		}
 
 		if !auth.VerifyTOTP(decryptedSecret, req.Code) {
+			// Wrong code: keep the pending row so the user can retry with
+			// the same login token (the login rate limiter guards brute
+			// force). The 10-minute expiry still bounds the window.
 			writeError(w, http.StatusBadRequest, "Invalid verification code")
 			return
 		}
+
+		// Code accepted — this pending login attempt is spent; swap it for
+		// a real session. Deleting first means a concurrent double-submit
+		// can't mint two sessions from one pending token.
+		store.pool.Exec(ctx, `DELETE FROM admin_sessions WHERE token_hash = $1`, pendingHash)
 
 		sessionToken, err := generateToken()
 		if err != nil {
@@ -364,10 +403,17 @@ func Verify2FA(store *Store) http.HandlerFunc {
 		tokenHash := hashToken(sessionToken)
 		expiresAt := time.Now().Add(24 * time.Hour)
 
+		// admin_sessions.ip_address is INET — store the bare IP, not the
+		// host:port from RemoteAddr (Postgres would reject the latter).
+		ip := r.RemoteAddr
+		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+			ip = host
+		}
+
 		_, err = store.pool.Exec(ctx, `
 			INSERT INTO admin_sessions (admin_id, token_hash, ip_address, user_agent, expires_at)
 			VALUES ($1, $2, $3, $4, $5)
-		`, admin.ID, tokenHash, r.RemoteAddr, r.UserAgent(), expiresAt)
+		`, admin.ID, tokenHash, ip, r.UserAgent(), expiresAt)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to create session")
 			return
