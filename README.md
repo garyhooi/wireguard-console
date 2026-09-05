@@ -7,7 +7,10 @@ A self-hosted, production-grade web console for issuing, monitoring, and revokin
 - **Two account types, clearly separated**: *Admins* (console operators —
   super_admin / admin / auditor, invited with emailed credentials) and
   *VPN Users* (people who receive tunnel access via a self-service claim link)
-- **Mandatory 2FA** for all admin accounts (enroll/disable from Profile)
+- **Mandatory 2FA** for all admin accounts (enroll/disable from Profile);
+  a super admin can **reset a lost 2FA** for another admin, and privileged
+  helpdesk actions (password/email/role changes, 2FA resets) require the
+  acting admin's own 2FA code
 - **Peer management** — create, suspend, resume, remove; each peer shows its
   owning VPN user; optional e-mail of the ready `wg-quick` config
 - **Profile page** — change password, manage 2FA, see your role
@@ -26,7 +29,8 @@ A self-hosted, production-grade web console for issuing, monitoring, and revokin
   with CSV export (Statistics → Usage report)
 - **Filters everywhere** — status tabs + search on VPN Users and Admins
 - **Audit logging** — immutable log of all admin actions
-- **Backup & restore** — one-click database backups via the admin API
+- **Backup & restore** — one-click database backups via the admin API; download
+  backups off-server and restore from an uploaded file (2FA-gated)
 - **Automated tests** — backend unit + real E2E against Postgres 18,
   frontend component tests, CI workflow (`scripts/test.sh`)
 
@@ -337,6 +341,7 @@ file requires a GitHub token with the `workflow` scope.)
 - All secrets encrypted at rest with AES-256-GCM
 - Argon2id password hashing
 - TOTP-based 2FA for admin accounts
+- **2FA step-up on privileged actions** — changing an admin's email/role/status, resetting an admin's password or 2FA, and downloading/restoring/deleting a backup all require the *acting* admin's current 2FA code (a stolen session alone is not enough)
 - `wg-helper` runs with minimal capabilities (`CAP_NET_ADMIN` + `SYS_MODULE` only)
 - PostgreSQL role has restricted permissions (no DROP/TRUNCATE)
 - Audit logs are append-only
@@ -350,12 +355,12 @@ file requires a GitHub token with the `workflow` scope.)
 
 Backups are created inside the `api` container (which includes `pg_dump`) and stored on a persistent Docker volume at `/var/backups/wgconsole`.
 
-**From the console UI:** open **System → Backups** to list saved backups, create a new one with one click, or restore any listed backup (the UI asks for confirmation first — restoring replaces the current database). Admins with the `admin` or `super_admin` role can use it.
+**From the console UI:** open **System → Backups** to list saved backups, create a new one with one click, **download** any backup (to keep an off-server copy), **restore** a listed backup, or **restore from an uploaded `.sql.gz` file**. Every destructive/off-server action (download, restore, delete, upload-restore) asks for your own 2FA code first — restoring replaces the current database.
 
-The same operations are available over the API (useful for scripting / off-server backup copies). Authenticate with your admin session token (the one the UI stores in `localStorage` after login — see *First admin account*):
+The same operations are available over the API (useful for scripting / off-server backup copies). Authenticate with your admin session token (the one the UI stores in `localStorage` after login — see *First admin account*). Actions that read or replace data require a current 2FA code in the body (`code`):
 
 ```bash
-# Create backup
+# Create backup (no 2FA needed — making a backup is safe)
 curl -X POST https://your-domain/api/backup/create \
   -H "Authorization: <admin-session-token>"
 
@@ -363,18 +368,25 @@ curl -X POST https://your-domain/api/backup/create \
 curl https://your-domain/api/backup/list \
   -H "Authorization: <admin-session-token>"
 
-# Restore a backup
+# Download a backup (needs 2FA)
+curl -X POST https://your-domain/api/backup/download \
+  -H "Authorization: <admin-session-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"filename": "wgconsole_backup_20260903_120000.sql.gz", "code": "<your-2fa-code>"}' \
+  -o backup.sql.gz
+
+# Restore a backup (needs 2FA)
 curl -X POST https://your-domain/api/backup/restore \
   -H "Authorization: <admin-session-token>" \
   -H "Content-Type: application/json" \
-  -d '{"filename": "wgconsole_backup_20260903_120000.sql.gz"}'
+  -d '{"filename": "wgconsole_backup_20260903_120000.sql.gz", "code": "<your-2fa-code>"}'
 
 # Or restore manually (shell on the server)
 gunzip -c wgconsole_backup_*.sql.gz | \
   docker exec -i wireguard-console-postgres-1 psql -U wgconsole -d wgconsole
 ```
 
-Backups only live on the console's Docker volume — copy them off the server regularly for disaster recovery.
+Backups only live on the console's Docker volume — copy them off the server regularly for disaster recovery (use the Download button or the API above).
 
 ## License
 
