@@ -44,7 +44,7 @@ Requires: Ubuntu 22.04+, Docker (installed automatically), and either a **domain
 curl -fsSL https://raw.githubusercontent.com/garyhooi/wireguard-console/main/install.sh | sudo bash
 ```
 
-This installs Docker, WireGuard tools and the stack, provisions AdGuard Home, opens the firewall (ufw), and **prints your first `super_admin` email + password at the end** — save them, log in, change the password and enroll 2FA.
+This installs Docker, WireGuard tools and the stack, provisions AdGuard Home, opens the firewall (ufw), and **asks you for your first `super_admin` email, then prints the auto-generated password at the end** — save them, log in, change the password and enroll 2FA. (A fresh database is detected from the Postgres data volume, so re-running after a reset that wiped Docker data prompts for the email again and prints new credentials instead of silently reusing stale ones.)
 
 **No domain?** Enter the server's public IP when prompted. HTTPS then uses Caddy's internal CA — your browser shows a one-time self-signed warning (the connection is still encrypted). For a trusted certificate without buying a domain, use `CONSOLE_DOMAIN=<your-ip>.sslip.io bash install.sh`.
 

@@ -92,6 +92,55 @@ domain_is_cloudflare_proxied() {
   return "$found"
 }
 
+# Collect the first super-admin credentials (email prompted on a terminal,
+# password always generated). Sets FIRST_ADMIN_EMAIL / FIRST_ADMIN_PASSWORD.
+# Honors ADMIN_EMAIL / ADMIN_PASSWORD env overrides. The password is never
+# prompted for — it is generated so it always satisfies the strength policy
+# and can be printed exactly once in the install summary.
+collect_first_admin_credentials() {
+  FIRST_ADMIN_EMAIL="${ADMIN_EMAIL:-}"
+  if [[ -z "${FIRST_ADMIN_EMAIL:-}" ]] && true 2>/dev/null < /dev/tty; then
+    read -rp "First super-admin email (Enter for admin@company.com): " FIRST_ADMIN_EMAIL < /dev/tty || true
+  fi
+  FIRST_ADMIN_EMAIL="${FIRST_ADMIN_EMAIL:-admin@company.com}"
+  if [[ -n "${ADMIN_PASSWORD:-}" ]]; then
+    FIRST_ADMIN_PASSWORD="${ADMIN_PASSWORD}"
+  else
+    # Guaranteed to satisfy the password policy (>= 12 chars, upper +
+    # lower case, a digit and a special character): "Wg" (upper+lower) +
+    # 14 hex chars + "1!" (digit + special) = 18 chars.
+    FIRST_ADMIN_PASSWORD="Wg$(openssl rand -hex 7)1!"
+  fi
+
+  # .env values are single-quoted below (so spaces, '#' and other shell
+  # characters survive both `source .env` and compose's env_file parser).
+  # A literal single quote cannot be represented in that format, so reject
+  # it up front with a clear message rather than corrupting the .env.
+  if [[ "${FIRST_ADMIN_EMAIL}" == *"'"* ]] || [[ "${FIRST_ADMIN_PASSWORD}" == *"'"* ]]; then
+    error "ADMIN_EMAIL / ADMIN_PASSWORD must not contain a single quote (') — the .env format cannot represent it. Re-run with a different value."
+  fi
+}
+
+# usage: write_admin_env_to <file> — replace/append the ADMIN_EMAIL and
+# ADMIN_PASSWORD lines in a .env file with the freshly collected values.
+# Values are single-quoted for compose's env_file parser (collect_* already
+# rejects embedded single quotes). awk reads the values from its environment
+# so no quoting/escaping of the values ever reaches the shell or awk source;
+# works on GNU and BSD systems alike.
+write_admin_env_to() {
+  local file="$1"
+  if grep -q '^ADMIN_EMAIL=' "$file"; then
+    ADMIN_EMAIL_VAL="${FIRST_ADMIN_EMAIL}" ADMIN_PASSWORD_VAL="${FIRST_ADMIN_PASSWORD}" awk '
+      BEGIN { q = sprintf("%c", 39) }
+      /^ADMIN_EMAIL=/     { print "ADMIN_EMAIL=" q ENVIRON["ADMIN_EMAIL_VAL"] q; next }
+      /^ADMIN_PASSWORD=/  { print "ADMIN_PASSWORD=" q ENVIRON["ADMIN_PASSWORD_VAL"] q; next }
+      { print }
+    ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+  else
+    printf "\nADMIN_EMAIL='%s'\nADMIN_PASSWORD='%s'\n" "${FIRST_ADMIN_EMAIL}" "${FIRST_ADMIN_PASSWORD}" >> "$file"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # 1. Must be root (needs apt, systemd, Docker, firewall access)
 # ---------------------------------------------------------------------------
@@ -190,6 +239,26 @@ fi
 cd "${INSTALL_DIR}"
 
 # ---------------------------------------------------------------------------
+# 7b. Fresh-database detection.
+#    The signal for "first install" is NOT the UPGRADE flag (the repo dir at
+#    ${INSTALL_DIR} can survive a reset — wiping Docker data/volumes or the
+#    whole server except this folder leaves .git behind and makes UPGRADE
+#    true). The authoritative signal is whether the Postgres data volume
+#    exists: when it is missing the database will be created empty, and the
+#    API's BootstrapAdmin then seeds the first super_admin from
+#    ADMIN_EMAIL/ADMIN_PASSWORD in .env. In that case install.sh must
+#    (re)generate those credentials and print them — never silently keep a
+#    stale pair from an old .env.
+# ---------------------------------------------------------------------------
+PROJECT_NAME="$(basename "${INSTALL_DIR}")"
+PG_VOLUME="${PROJECT_NAME}_pg-data"
+FRESH_DB=false
+if ! docker volume inspect "${PG_VOLUME}" >/dev/null 2>&1; then
+  FRESH_DB=true
+  info "No existing Postgres data volume (${PG_VOLUME}) — first run with a fresh database."
+fi
+
+# ---------------------------------------------------------------------------
 # 8. Configuration — generate secrets on first install, prompt for the two
 #    values that can't be generated. All of these can be pre-set as env
 #    vars to run this non-interactively.
@@ -202,6 +271,11 @@ if [[ "${UPGRADE}" == true ]] \
    && grep -q '^CONSOLE_DOMAIN=.\+' .env \
    && grep -q '^POSTGRES_PASSWORD=.\+' .env; then
   info "Existing .env kept as-is."
+  # Snapshot the caller's own env (if any) BEFORE sourcing .env, so a
+  # fresh-DB re-seed below can tell "operator pre-set ADMIN_EMAIL" apart
+  # from the stale value stored in the old .env file.
+  CALLER_ADMIN_EMAIL="${ADMIN_EMAIL:-}"
+  CALLER_ADMIN_PASSWORD="${ADMIN_PASSWORD:-}"
   # shellcheck disable=SC1091
   source .env
 
@@ -238,6 +312,23 @@ if [[ "${UPGRADE}" == true ]] \
       warn "If Cloudflare is set to 'Full' (HTTPS origin), set WGCONSOLE_TLS= in .env and re-run this installer."
       sed -i "s|^WGCONSOLE_TLS=.*|WGCONSOLE_TLS=external-proxy|" .env
     fi
+  fi
+
+  # Fresh-DB self-heal: the .env above was kept from a previous install,
+  # but the Postgres data volume is gone (a reset that wiped Docker volumes
+  # while leaving ${INSTALL_DIR} behind). The API's BootstrapAdmin will then
+  # seed a brand-new super_admin from ADMIN_EMAIL/ADMIN_PASSWORD in .env —
+  # re-ask for the email and rotate the password so the printed credentials
+  # in the summary are real and current, instead of silently reusing a stale
+  # pair the operator may never have seen.
+  if [[ "${FRESH_DB}" == true ]]; then
+    warn "The Postgres data volume (${PG_VOLUME}) is gone — a fresh super_admin will be created."
+    # Override the stale values just sourced from .env with the caller's own
+    # env (usually empty), so the interactive prompt actually re-asks.
+    ADMIN_EMAIL="${CALLER_ADMIN_EMAIL:-}"
+    ADMIN_PASSWORD="${CALLER_ADMIN_PASSWORD:-}"
+    collect_first_admin_credentials
+    write_admin_env_to .env
   fi
 
   # Reject a nonsense combination instead of silently mis-deploying.
@@ -340,22 +431,22 @@ else
   # the final summary so no `docker logs` is needed on first install.
   # Pre-set ADMIN_EMAIL/ADMIN_PASSWORD when running this script to choose
   # the credentials yourself instead of having them generated.
-  FIRST_ADMIN_EMAIL="${ADMIN_EMAIL:-admin@company.com}"
-  if [[ -n "${ADMIN_PASSWORD:-}" ]]; then
-    FIRST_ADMIN_PASSWORD="${ADMIN_PASSWORD}"
+  #
+  # Ask for the admin email on an interactive terminal (defaults to
+  # admin@company.com on Enter) — the password is always generated, never
+  # prompted, so it can satisfy the strength policy and be shown once.
+  # .env always receives real values; the summary decides whether to show
+  # them based on FRESH_DB.
+  if [[ "${FRESH_DB}" == true ]]; then
+    collect_first_admin_credentials
   else
-    # Guaranteed to satisfy the password policy (>= 12 chars, upper +
-    # lower case, a digit and a special character): "Wg" (upper+lower) +
-    # 14 hex chars + "1!" (digit + special) = 18 chars.
-    FIRST_ADMIN_PASSWORD="Wg$(openssl rand -hex 7)1!"
-  fi
-
-  # .env values are single-quoted below (so spaces, '#' and other shell
-  # characters survive both `source .env` and compose's env_file parser).
-  # A literal single quote cannot be represented in that format, so reject
-  # it up front with a clear message rather than corrupting the .env.
-  if [[ "${FIRST_ADMIN_EMAIL}" == *"'"* ]] || [[ "${FIRST_ADMIN_PASSWORD}" == *"'"* ]]; then
-    error "ADMIN_EMAIL / ADMIN_PASSWORD must not contain a single quote (') — the .env format cannot represent it. Re-run with a different value."
+    # Not fresh (an old volume keeps its admins): BootstrapAdmin will not
+    # run, so don't prompt for a login that won't exist — write inert values
+    # and let the summary say admins are kept.
+    warn "An existing Postgres data volume was found — keeping the current admins."
+    warn "If you intended a fresh install, remove the volume first: docker compose down -v"
+    FIRST_ADMIN_EMAIL="${ADMIN_EMAIL:-admin@company.com}"
+    FIRST_ADMIN_PASSWORD="${ADMIN_PASSWORD:-Wg$(openssl rand -hex 7)1!}"
   fi
 
   cat > .env <<EOF
@@ -435,18 +526,43 @@ if [[ -n "${UNHEALTHY}" ]]; then
   warn "Logs: docker compose -f ${INSTALL_DIR}/docker-compose.yml logs -f"
 fi
 
+# Authoritative fresh-DB confirmation. The API's BootstrapAdmin seeds the
+# first super_admin on the very first boot after an empty database is
+# migrated, so by the time the stack is up the admins table either already
+# has that row (this run created it) or had rows from before (real upgrade).
+# Poll briefly — the api container may still be mid-bootstrap on a slow
+# first start. If we cannot confirm zero→one transition, fall back to the
+# volume-based FRESH_DB guess rather than misreporting.
+ADMIN_COUNT=""
+if [[ "${FRESH_DB}" == true ]]; then
+  for _ in $(seq 1 15); do
+    ADMIN_COUNT="$(docker compose exec -T postgres psql -U wgconsole -d wgconsole -tAc 'SELECT count(*) FROM admins' 2>/dev/null | tr -d '[:space:]' || true)"
+    [[ "${ADMIN_COUNT}" =~ ^[0-9]+$ ]] && break
+    sleep 2
+  done
+  if [[ "${ADMIN_COUNT}" =~ ^[0-9]+$ ]] && [[ "${ADMIN_COUNT}" -gt 0 ]]; then
+    info "Confirmed: super_admin bootstrap completed (${ADMIN_COUNT} admin(s) in the fresh database)."
+  else
+    warn "Could not confirm the super_admin bootstrap in the database yet."
+    warn "If the API is still starting, the account will appear on its first completed boot."
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # 11. Summary
 # ---------------------------------------------------------------------------
-# Fresh installs print the bootstrapped first-admin credentials right here;
-# upgrades (admins already exist) get a short note instead. Values come from
-# the .env that was just generated (or pre-set env vars), matching what the
-# api container will use to create the account on its first boot.
+# A fresh database prints the bootstrapped first-admin credentials right
+# here; an existing database (real upgrade) gets a short note instead.
+# "Fresh" is decided by the Postgres data volume (FRESH_DB), not by the
+# UPGRADE flag — a reset that wipes Docker volumes but leaves ${INSTALL_DIR}
+# re-seeds the admin, and those credentials must be shown. Values come from
+# the .env that was just written (or pre-set env vars), matching what the
+# api container uses to create the account on its first boot.
 FIRST_ADMIN_BLOCK=""
-if [[ "${UPGRADE}" == false ]]; then
+if [[ "${FRESH_DB}" == true ]]; then
   # Display straight from the variables used to generate .env — no need to
   # re-parse the file (and no quoting pitfalls for special characters).
-  FIRST_ADMIN_BLOCK=" First super_admin account (auto-created on first boot):
+  FIRST_ADMIN_BLOCK=" First super_admin account (created on first boot):
     Email:    ${FIRST_ADMIN_EMAIL}
     Password: ${FIRST_ADMIN_PASSWORD}
 
@@ -493,6 +609,7 @@ cat <<SUMMARY
 ${REACH_NOTE}
 
 ${FIRST_ADMIN_BLOCK}
- Re-running the installer on an existing install keeps your admins.
+ Re-running the installer later updates the stack without touching your
+ admins or data (only a wiped database volume re-creates the super_admin).
 ==================================================================
 SUMMARY
