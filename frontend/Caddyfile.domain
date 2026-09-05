@@ -16,9 +16,17 @@
 	}
 
 	header {
+		# Consolidated security headers for the console SPA + API.
+		# The Vite bundle ships external scripts/stylesheets (no inline
+		# script), so script-src stays strict; React renders inline style
+		# attributes (gauges/bars) → style-src 'unsafe-inline'; the TOTP QR
+		# is a data: URL → img-src data:. API is same-origin only.
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Frame-Options "DENY"
 		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
 	}
 }
 
@@ -34,6 +42,10 @@ http://:80 {
 		file_server
 	}
 	header {
+		# The block page has no user content and its only script is the
+		# external /blocked-hostname.js, so keep it strict. It carries an
+		# inline <style> → style-src 'unsafe-inline'.
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 		X-Frame-Options "DENY"
 		X-Content-Type-Options "nosniff"
 	}
@@ -56,6 +68,10 @@ http://:80 {
 		file_server
 	}
 	header {
+		# The block page has no user content and its only script is the
+		# external /blocked-hostname.js, so keep it strict. It carries an
+		# inline <style> → style-src 'unsafe-inline'.
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 		X-Frame-Options "DENY"
 		X-Content-Type-Options "nosniff"
 	}
