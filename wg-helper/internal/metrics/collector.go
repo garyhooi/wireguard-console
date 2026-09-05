@@ -2,15 +2,22 @@
 // disk, load, uptime, network) for the console's server-monitoring page.
 //
 // The wg-helper agent runs inside a container with --network host but not
-// host PID/mount namespaces. Kernel-global proc files (/proc/stat,
-// /proc/meminfo, /proc/loadavg, /proc/uptime) are visible host-wide from
-// inside the container, so CPU/memory/load/uptime need no special setup.
+// host PID/mount namespaces.
+//
+// CPU/memory/load/uptime/net come from /proc files that are kernel-global
+// (not namespaced): /proc/stat, /proc/meminfo, /proc/loadavg,
+// /proc/uptime and (with --network host) /proc/net/dev report HOST values
+// even from inside the container. They are therefore always read from the
+// process's NATIVE /proc (ProcRoot is empty in production) — no bind mount
+// is needed or wanted for them.
+//
 // Disk usage is the exception: statfs(2) resolves paths in the container's
-// own mount namespace, so the installer bind-mounts the host root read-only
-// at /host (-v /:/host:ro,rslave). With slave propagation the host's proc
-// and mounts appear under /host, so every path is read through a root
-// prefix (Root): "/" for bare local mode, "/host" inside docker. statfs
-// then sees the host's real filesystems via the bind mount.
+// own mount namespace, so reading the container's overlay would be wrong.
+// The installer bind-mounts the host root read-only at /host
+// (-v /:/host:ro,rslave). The host's real filesystems then appear inside
+// the container as /host (and any submounts under /host/...), which the
+// collector statfs'es directly. HostRoot is "" on a bare host (local
+// mode) and "/host" in the agent container.
 package metrics
 
 import (
@@ -37,9 +44,17 @@ var Version = "dev"
 // compute CPU percent. A package var so tests can shorten it.
 var sampleWindow = 500 * time.Millisecond
 
-// Collector reads one host snapshot. Root prefixes every proc/mount path.
+// Collector reads one host snapshot.
 type Collector struct {
-	Root string
+	// ProcRoot prefixes /proc reads. Empty in production: the native /proc
+	// inside a --network host container already reflects the host kernel.
+	// Tests point it at a fixture tree.
+	ProcRoot string
+
+	// HostRoot is the host filesystem root as visible to this process:
+	// "" for a bare host (local mode, statfs native paths), "/host" when
+	// the host root is bind-mounted into the agent container.
+	HostRoot string
 
 	mu      sync.Mutex
 	netPrev map[string]netCounters // previous poll's per-interface counters
@@ -94,8 +109,8 @@ type Snapshot struct {
 	CollectedAt time.Time  `json:"collected_at"`
 }
 
-func NewCollector(root string) *Collector {
-	return &Collector{Root: root, netPrev: map[string]netCounters{}}
+func NewCollector(procRoot, hostRoot string) *Collector {
+	return &Collector{ProcRoot: procRoot, HostRoot: hostRoot, netPrev: map[string]netCounters{}}
 }
 
 // Collect returns one host snapshot. Individual subsystems degrade to zero
@@ -113,9 +128,33 @@ func (c *Collector) Collect() Snapshot {
 	return s
 }
 
-// readFile returns the trimmed contents of Root-relative path p.
-func (c *Collector) readFile(p string) (string, error) {
-	b, err := os.ReadFile(c.Root + p)
+// procFile returns the native proc path for p (/proc/...), prefixed with
+// ProcRoot when set (tests only). Proc reads MUST NOT go through HostRoot:
+// the host /proc is not reachable via a root bind mount.
+func (c *Collector) procFile(p string) string {
+	return c.ProcRoot + p
+}
+
+// hostFile returns the host-filesystem path for p, prefixed with HostRoot
+// ("/host/etc/os-release" inside the agent container, "/etc/os-release" on
+// a bare host). Only used for statfs targets and host identity files that
+// the bind mount actually exposes.
+func (c *Collector) hostFile(p string) string {
+	return c.HostRoot + p
+}
+
+// readProc returns the trimmed contents of a native proc file.
+func (c *Collector) readProc(p string) (string, error) {
+	b, err := os.ReadFile(c.procFile(p))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
+// readHost returns the trimmed contents of a host-filesystem file.
+func (c *Collector) readHost(p string) (string, error) {
+	b, err := os.ReadFile(c.hostFile(p))
 	if err != nil {
 		return "", err
 	}
@@ -186,7 +225,7 @@ func readCPUSample(path string) (cpuSample, bool) {
 }
 
 func (c *Collector) fillCPU(s *Snapshot) {
-	path := c.Root + "/proc/stat"
+	path := c.procFile("/proc/stat")
 	first, ok := readCPUSample(path)
 	if !ok {
 		return
@@ -231,7 +270,7 @@ func cpuPercent(first, second cpuSample) float64 {
 // ---- Load / uptime ----
 
 func (c *Collector) fillLoad(s *Snapshot) {
-	raw, err := c.readFile("/proc/loadavg")
+	raw, err := c.readProc("/proc/loadavg")
 	if err != nil {
 		return
 	}
@@ -249,7 +288,7 @@ func (c *Collector) fillLoad(s *Snapshot) {
 }
 
 func (c *Collector) fillUptime(s *Snapshot) {
-	raw, err := c.readFile("/proc/uptime")
+	raw, err := c.readProc("/proc/uptime")
 	if err != nil {
 		return
 	}
@@ -266,7 +305,7 @@ func (c *Collector) fillUptime(s *Snapshot) {
 
 func (c *Collector) fillMem(s *Snapshot) {
 	kv := map[string]uint64{}
-	raw, err := c.readFile("/proc/meminfo")
+	raw, err := c.readProc("/proc/meminfo")
 	if err != nil {
 		return
 	}
@@ -319,24 +358,27 @@ var skipFS = map[string]bool{
 	"hugetlbfs": true, "ramfs": true, "squashfs": true, "iso9660": true,
 }
 
-// fillDisk parses the host mount table and statfs'es each real filesystem.
-// Which table is read depends on Root:
+// mountCandidate is one host filesystem discovered from the mount table.
+type mountCandidate struct {
+	dev, path, fs string // path = in-container path to statfs
+	label         string // path shown in the UI (host path)
+}
+
+// parseMountCandidates reads a /proc/mounts body and returns the real
+// filesystems the collector should statfs, deduped by device.
 //
-//   - Root "/" (bare local mode): /proc/mounts is the host's own table and
-//     statfs paths resolve directly.
-//   - Root "/host" (agent container): /host/proc/mounts is the host's table
-//     (slave propagation) and each host path is statfs'ed via the /host
-//     prefix, which resolves to the host's real filesystem through the bind.
+// hostRoot is the host filesystem root as visible to this process:
 //
-// statfs failures (unreachable mounts) are skipped silently.
-func (c *Collector) fillDisk(s *Snapshot) {
-	raw, err := c.readFile("/proc/mounts")
-	if err != nil {
-		return
-	}
-	type mount struct{ dev, path, fs string }
-	var mounts []mount
-	seen := map[string]bool{} // dedupe by device so bind mounts don't double-count
+//   - "" (bare host): keep every non-pseudo mount; path == label.
+//   - "/host" (agent container): the container's own /proc/mounts lists the
+//     /host bind and any propagated host submounts (/host/boot, ...) plus
+//     container-local mounts (overlay "/", /proc, /sys, tmpfs ...). Only
+//     /host-prefixed entries are kept, labeled with the stripped host path
+//     ("/", "/boot") for display.
+func parseMountCandidates(raw, hostRoot string) []mountCandidate {
+	type line struct{ dev, path, fs string }
+	var lines []line
+	seen := map[string]bool{} // dedupe by device so binds don't double-count
 	sc := bufio.NewScanner(strings.NewReader(raw))
 	for sc.Scan() {
 		fields := strings.Fields(sc.Text())
@@ -352,24 +394,50 @@ func (c *Collector) fillDisk(s *Snapshot) {
 			continue
 		}
 		seen[dev] = true
-		mounts = append(mounts, mount{dev: dev, path: path, fs: fs})
+		lines = append(lines, line{dev: dev, path: path, fs: fs})
 	}
 
-	sort.Slice(mounts, func(i, j int) bool {
-		di, dj := strings.Count(mounts[i].path, "/"), strings.Count(mounts[j].path, "/")
+	cands := make([]mountCandidate, 0, len(lines))
+	for _, ln := range lines {
+		label := ln.path
+		if hostRoot != "" && hostRoot != "/" {
+			if ln.path != hostRoot && !strings.HasPrefix(ln.path, hostRoot+"/") {
+				continue // container-local mount, not a host filesystem
+			}
+			label = strings.TrimPrefix(ln.path, hostRoot)
+			if label == "" {
+				label = "/"
+			}
+		}
+		cands = append(cands, mountCandidate{dev: ln.dev, path: ln.path, fs: ln.fs, label: label})
+	}
+
+	sort.Slice(cands, func(i, j int) bool {
+		di, dj := strings.Count(cands[i].path, "/"), strings.Count(cands[j].path, "/")
 		if di != dj {
 			return di < dj // shallow mounts ("/") first
 		}
-		return mounts[i].path < mounts[j].path
+		return cands[i].path < cands[j].path
 	})
+	return cands
+}
 
-	for _, m := range mounts {
+// fillDisk statfs'es the host's real filesystems and fills s.Disk.
+//
+// The mount table is read from the process's NATIVE /proc/mounts: on a bare
+// host that is the host's own table; in the agent container it lists the
+// /host bind (HostRoot "/host"), which is exactly the set of host
+// filesystems visible to the container. Each candidate is statfs'ed at its
+// in-container path (/host, /host/boot, ...), which resolves to the host's
+// real filesystem through the bind.
+func (c *Collector) fillDisk(s *Snapshot) {
+	raw, err := c.readProc("/proc/mounts")
+	if err != nil {
+		return
+	}
+	for _, m := range parseMountCandidates(raw, c.HostRoot) {
 		var st syscall.Statfs_t
-		statPath := m.path
-		if c.Root != "" && c.Root != "/" {
-			statPath = c.Root + m.path
-		}
-		if err := syscall.Statfs(statPath, &st); err != nil {
+		if err := syscall.Statfs(m.path, &st); err != nil {
 			continue
 		}
 		total := st.Blocks * uint64(st.Bsize)
@@ -382,7 +450,7 @@ func (c *Collector) fillDisk(s *Snapshot) {
 			used = total
 		}
 		s.Disk = append(s.Disk, DiskInfo{
-			Mount: m.path, Device: m.dev, FS: m.fs,
+			Mount: m.label, Device: m.dev, FS: m.fs,
 			Total: total, Used: used, Percent: pct(used, total),
 		})
 	}
@@ -406,7 +474,7 @@ func unescapeMountPath(p string) string {
 // fillNet reports per-interface byte rates using the delta since the
 // previous Collect call. The first call yields no entries (no baseline yet).
 func (c *Collector) fillNet(s *Snapshot) {
-	raw, err := c.readFile("/proc/net/dev")
+	raw, err := c.readProc("/proc/net/dev")
 	if err != nil {
 		return
 	}
@@ -472,13 +540,18 @@ func (c *Collector) fillHost(s *Snapshot) {
 		Arch:         runtime.GOARCH,
 		AgentVersion: Version,
 	}
-	if hn, err := os.Hostname(); err == nil {
+	// Hostname: inside the container /etc/hostname is the container's own,
+	// so prefer the host's when the bind is present, else fall back.
+	if hn, err := c.readHost("/etc/hostname"); err == nil && hn != "" {
+		h.Hostname = hn
+	} else if hn, err := os.Hostname(); err == nil {
 		h.Hostname = hn
 	}
-	if raw, err := c.readFile("/proc/sys/kernel/osrelease"); err == nil {
+	// Kernel is kernel-global — native proc is correct and always present.
+	if raw, err := c.readProc("/proc/sys/kernel/osrelease"); err == nil {
 		h.Kernel = raw
 	}
-	if b, err := os.ReadFile(c.Root + "/etc/os-release"); err == nil {
+	if b, err := os.ReadFile(c.hostFile("/etc/os-release")); err == nil {
 		for _, line := range strings.Split(string(b), "\n") {
 			if strings.HasPrefix(line, "PRETTY_NAME=") {
 				h.OS = strings.Trim(strings.TrimPrefix(line, "PRETTY_NAME="), `"`)

@@ -93,7 +93,7 @@ func TestCPUPercent(t *testing.T) {
 }
 
 func TestCollectMemoryLoadUptime(t *testing.T) {
-	c := NewCollector(fixtureRoot(t))
+	c := NewCollector(fixtureRoot(t), "")
 	s := c.Collect()
 
 	if s.Mem.Total != 16384000*1024 {
@@ -121,7 +121,7 @@ func TestCollectMemoryLoadUptime(t *testing.T) {
 func TestCollectEmptyRootDegrades(t *testing.T) {
 	// A collector whose proc files are missing must return a zero-ish
 	// snapshot, not panic or hang.
-	c := NewCollector(t.TempDir())
+	c := NewCollector(t.TempDir(), "")
 	s := c.Collect()
 	if s.Host.AgentVersion == "" {
 		t.Error("agent version empty")
@@ -129,40 +129,32 @@ func TestCollectEmptyRootDegrades(t *testing.T) {
 	_ = s
 }
 
-func TestFillDiskFromFixture(t *testing.T) {
+func TestFillDiskBareHost(t *testing.T) {
 	root := fixtureRoot(t)
-	// Create two real dirs the fixture mount table points at.
-	os.MkdirAll(filepath.Join(root, "a"), 0o755)
-	os.MkdirAll(filepath.Join(root, "b"), 0o755)
+	// Bare host: native proc mount table (fixture) + real statfs targets.
+	// The mount table lists absolute paths; point them at temp dirs so
+	// statfs actually resolves.
+	dirA := filepath.Join(root, "a")
+	dirB := filepath.Join(root, "b")
+	os.MkdirAll(dirA, 0o755)
+	os.MkdirAll(dirB, 0o755)
 	writeFile(t, filepath.Join(root, "proc", "mounts"), `
 /dev/sda1 / ext4 rw 0 0
-/dev/sda2 /a ext4 rw 0 0
-/dev/sdb1 /b xfs rw 0 0
+/dev/sda2 `+dirA+` ext4 rw 0 0
+/dev/sdb1 `+dirB+` xfs rw 0 0
 proc /proc proc rw 0 0
 tmpfs /dev/shm tmpfs rw 0 0
 /dev/loop0 /snap squashfs ro 0 0
 none /cgroup cgroup2 rw 0 0
 `)
-	// Root != "/" → fillDisk statfs'es via Root+path.
-	c := NewCollector(root)
-	c.Root = root + "/host" // emulate the container's /host prefix…
-	// …but the mount table lives under Root/proc. Rebuild fixture under /host.
-	hostRoot := filepath.Join(root, "host")
-	writeFile(t, filepath.Join(hostRoot, "proc", "mounts"), `
-/dev/sda1 / ext4 rw 0 0
-/dev/sda2 /a ext4 rw 0 0
-/dev/sdb1 /b xfs rw 0 0
-proc /proc proc rw 0 0
-`)
-	os.MkdirAll(filepath.Join(hostRoot, "a"), 0o755)
-	os.MkdirAll(filepath.Join(hostRoot, "b"), 0o755)
+	c := NewCollector(root, "")
 
 	var s Snapshot
 	c.fillDisk(&s)
-	if len(s.Disk) != 3 {
-		t.Fatalf("disk entries = %d (%+v), want 3", len(s.Disk), s.Disk)
+	// "/" statfs is the real root — always present. dirA/dirB resolve too.
+	if len(s.Disk) < 1 {
+		t.Fatalf("disk entries = %d, want >= 1 (%+v)", len(s.Disk), s.Disk)
 	}
-	// Biggest first sorting is by statfs size; assert the set of mounts.
 	got := map[string]bool{}
 	for _, d := range s.Disk {
 		got[d.Mount] = true
@@ -173,9 +165,93 @@ proc /proc proc rw 0 0
 			t.Errorf("disk percent out of range: %+v", d)
 		}
 	}
-	for _, m := range []string{"/", "/a", "/b"} {
+	for _, m := range []string{dirA, dirB} {
 		if !got[m] {
 			t.Errorf("missing mount %q in %v", m, s.Disk)
+		}
+	}
+}
+
+// TestParseMountCandidatesContainer is the regression test for the actual
+// bug: inside the agent container the NATIVE proc mount table lists the
+// /host bind plus container-local mounts; only /host-prefixed entries may
+// survive, labeled with the stripped host path.
+func TestParseMountCandidatesContainer(t *testing.T) {
+	raw := `
+overlay / overlay rw 0 0
+proc /proc proc rw 0 0
+tmpfs /dev/shm tmpfs rw 0 0
+/dev/sda1 /host ext4 rw 0 0
+/dev/sda2 /host/boot ext4 rw 0 0
+/dev/sdb1 /host/data ext4 rw 0 0
+`
+	cands := parseMountCandidates(raw, "/host")
+	labels := map[string]bool{}
+	for _, c := range cands {
+		labels[c.label] = true
+	}
+	if len(cands) != 3 {
+		t.Fatalf("candidates = %d (%+v), want 3 (only /host mounts)", len(cands), cands)
+	}
+	// Container-local mounts (overlay /, proc, tmpfs) must not leak — the
+	// only "/"-labeled entry is the /host bind (dev /dev/sda1).
+	for _, c := range cands {
+		switch c.dev {
+		case "overlay", "proc":
+			t.Errorf("container-local mount leaked: %+v", c)
+		case "tmpfs":
+			if c.path == "/dev/shm" {
+				t.Errorf("container-local mount leaked: %+v", c)
+			}
+		}
+	}
+	// The /host bind labels as "/", submounts as their host path.
+	if _, ok := labels["/"]; !ok {
+		t.Errorf("missing /host bind labeled as / : %+v", cands)
+	}
+	for _, m := range []string{"/boot", "/data"} {
+		if _, ok := labels[m]; !ok {
+			t.Errorf("missing host submount %q: %+v", m, cands)
+		}
+	}
+	// Paths kept must be the in-container /host paths (what statfs uses).
+	for _, want := range []string{"/host", "/host/boot", "/host/data"} {
+		found := false
+		for _, c := range cands {
+			if c.path == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing statfs path %q in %+v", want, cands)
+		}
+	}
+}
+
+func TestParseMountCandidatesBareHost(t *testing.T) {
+	raw := `
+/dev/sda1 / ext4 rw 0 0
+/dev/sda2 /boot ext4 rw 0 0
+proc /proc proc rw 0 0
+tmpfs /dev/shm tmpfs rw 0 0
+/dev/loop0 /snap squashfs ro 0 0
+`
+	cands := parseMountCandidates(raw, "")
+	if len(cands) != 2 {
+		t.Fatalf("candidates = %d (%+v), want 2", len(cands), cands)
+	}
+	// Bare host keeps native paths as labels.
+	for _, want := range []string{"/", "/boot"} {
+		found := false
+		for _, c := range cands {
+			if c.label == want && c.path == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing bare-host mount %q in %+v", want, cands)
 		}
 	}
 }
@@ -189,7 +265,7 @@ tmpfs /dev/shm tmpfs rw 0 0
 cgroup /sys/fs/cgroup cgroup2 rw 0 0
 /dev/loop0 /snap squashfs ro 0 0
 `)
-	c := NewCollector(root)
+	c := NewCollector(root, "")
 	var s Snapshot
 	c.fillDisk(&s)
 	if len(s.Disk) != 0 {
@@ -206,7 +282,7 @@ Inter-|   Receive                                                |  Transmit
   eth0: 1000    10    0    0    0     0          0         0     1000    10    0    0    0     0       0          0
   wg0:  500     5    0    0    0     0          0         0      500     5    0    0    0     0       0          0
 `)
-	c := NewCollector(root)
+	c := NewCollector(root, "")
 
 	// First fillNet: baseline only → no entries.
 	var s Snapshot

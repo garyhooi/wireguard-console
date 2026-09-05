@@ -24,13 +24,15 @@ type Handler struct {
 }
 
 func NewHandler(client *wgctrl.Client) *Handler {
-	root := os.Getenv("WG_HOST_ROOT")
-	if root == "" {
-		root = "/"
-	}
+	// WG_HOST_ROOT: where the HOST filesystem is visible to this process.
+	// Empty/bare host (local mode, unix socket) → statfs host paths
+	// directly. "/host" (agent container, -v /:/host:ro,rslave) → the
+	// container's native /proc is still used for CPU/mem/load/net (they are
+	// kernel-global), while disk statfs targets are the /host bind.
+	hostRoot := os.Getenv("WG_HOST_ROOT") // "" in local mode
 	return &Handler{
 		client:    client,
-		collector: metrics.NewCollector(root),
+		collector: metrics.NewCollector("", hostRoot),
 	}
 }
 
