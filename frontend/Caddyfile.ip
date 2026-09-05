@@ -1,6 +1,8 @@
 # IP-only mode: no domain, so public CAs can't issue a certificate.
-# Caddy uses its internal CA instead, and binds all interfaces because
-# the site's IP address is the host's, not the container's.
+# Caddy uses its internal CA instead. The console site is defined on a bare
+# :443 listener (not the public-IP site address), which binds all interfaces
+# inside the container — the console IP itself only ever appears as a Host
+# matcher, so it doesn't need to exist on a container interface.
 #
 # Clients do NOT send SNI when connecting to a raw IP, so Caddy would
 # match by the connection's destination IP (which inside the container is
@@ -11,60 +13,63 @@
 	default_sni {$CONSOLE_DOMAIN}
 }
 
-{$CONSOLE_DOMAIN} {
-	tls internal
-	bind 0.0.0.0
-
-	encode gzip
-
-	# Backend API — everything under /api/ goes to the Go service.
-	handle /api/* {
-		reverse_proxy api:8080
-	}
-
-	# Everything else is the React SPA. try_files falls back to index.html
-	# so client-side routes (TanStack Router) survive a hard refresh.
-	handle {
-		root * /srv
-		try_files {path} /index.html
-		file_server
-	}
-
-	header {
-		Strict-Transport-Security "max-age=31536000; includeSubDomains"
-		X-Frame-Options "DENY"
-		X-Content-Type-Options "nosniff"
-	}
-}
-
-# Catch-all: any host that is not the console domain (e.g. a blocked
-# domain resolved by AdGuard to this server) shows the branded block page.
+# Single HTTPS server: ONE :443 listener carrying both the console site and
+# the block-page catch-all as ordered routes. Do NOT split these into two
+# site blocks — a second listener on :443 makes the kernel hand each
+# incoming connection to either server arbitrarily (SO_REUSEPORT), so the
+# console's own IP intermittently lands on the catch-all and shows
+# "Access blocked" instead of the console. (Observed ~50/50 live.)
 #
-# Plain HTTP first — browsers hitting a blocked site that isn't forced to
-# HTTPS get the page directly.
-http://:80 {
-	root * /srv
-	handle {
-		rewrite * /blocked.html
-		file_server
-	}
-	header {
-		X-Frame-Options "DENY"
-		X-Content-Type-Options "nosniff"
-	}
-}
-
-# HTTPS: browsers force HTTPS for most blocked domains, so also answer :443
-# for any hostname. On-demand TLS issues an internal (self-signed)
-# certificate the first time a blocked domain is requested, then the branded
-# block page is served. The browser shows a one-time certificate warning,
-# then renders the page. HSTS-preloaded domains (google.com etc.) may refuse
-# to proceed past the warning — the DNS block still stops the connection.
+# Route order matters: @console (host == console IP) is handled first; every
+# other hostname that resolves here (a blocked domain) falls through to the
+# block page. On-demand TLS with the internal issuer serves a self-signed
+# certificate for whatever name arrives; the browser shows a one-time
+# certificate warning, then renders the page. HSTS-preloaded domains
+# (google.com etc.) may refuse to proceed past the warning — the DNS block
+# still stops the connection.
 :443 {
+	root * /srv
 	tls {
 		on_demand
 		issuer internal
 	}
+
+	# Console site: exactly the console address (the public IP).
+	@console host {$CONSOLE_DOMAIN}
+	handle @console {
+		encode gzip
+
+		# Backend API — everything under /api/ goes to the Go service.
+		handle /api/* {
+			reverse_proxy api:8080
+		}
+
+		# Everything else is the React SPA. try_files falls back to
+		# index.html so client-side routes (TanStack Router) survive a hard
+		# refresh.
+		handle {
+			try_files {path} /index.html
+			file_server
+		}
+
+		header {
+			Strict-Transport-Security "max-age=31536000; includeSubDomains"
+			X-Frame-Options "DENY"
+			X-Content-Type-Options "nosniff"
+		}
+	}
+
+	# Everything else: a blocked domain that AdGuard resolved to this
+	# server — show the branded block page.
+	handle {
+		rewrite * /blocked.html
+		file_server
+	}
+}
+
+# Plain HTTP catch-all: browsers hitting a blocked site that isn't forced
+# to HTTPS get the block page directly.
+http://:80 {
 	root * /srv
 	handle {
 		rewrite * /blocked.html

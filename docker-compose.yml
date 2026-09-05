@@ -10,8 +10,9 @@ services:
     environment:
       CONSOLE_DOMAIN: ${CONSOLE_DOMAIN}
       # Any non-empty value ("internal") selects IP-only mode: Caddy's
-      # entrypoint picks the Caddyfile variant (internal CA + bind all
-      # interfaces). Empty/absent = domain mode with public ACME certs.
+      # entrypoint picks the Caddyfile variant (internal CA, single :443
+      # listener with the console route + block-page catch-all route).
+      # Empty/absent = domain mode with public ACME certs.
       WGCONSOLE_TLS: ${WGCONSOLE_TLS:-}
     volumes:
       - caddy-data:/data
