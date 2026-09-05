@@ -2,7 +2,7 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import QRCode from 'qrcode'
-import { IconCopy, IconDownload, IconPlus, IconQrcode } from '@tabler/icons-react'
+import { IconCopy, IconDownload, IconMailForward, IconPlus, IconQrcode } from '@tabler/icons-react'
 import {
   ActionLink,
   Badge,
@@ -61,6 +61,9 @@ function PeersPage() {
   const [form, setForm] = useState({ name: '', server_id: '', user_id: '', send_email: false })
   const [createdLink, setCreatedLink] = useState('')
   const [copied, setCopied] = useState(false)
+  const [resent, setResent] = useState<{ peerName: string; link: string } | null>(null)
+  const [resentCopied, setResentCopied] = useState(false)
+  const [resendingId, setResendingId] = useState('')
 
   const { data: smtp } = useQuery<{ configured: boolean }>({
     queryKey: ['smtp-config'],
@@ -188,6 +191,46 @@ function PeersPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['peers'] }),
     onError: (e: Error) => setError(e.message),
   })
+
+  const resendMutation = useMutation({
+    mutationFn: async (peer: Peer) => {
+      setResendingId(peer.id)
+      const res = await fetch(`/api/peers/${peer.id}/resend-config-email`, {
+        method: 'POST',
+        headers: auth,
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(
+          (err as { error?: string }).error || 'Failed to resend the config link email',
+        )
+      }
+      return res.json()
+    },
+    onSuccess: (data, peer) => {
+      setResent({ peerName: peer.name, link: data.config_link || '' })
+      setResentCopied(false)
+      setError('')
+    },
+    onError: (e: Error) => setError(e.message),
+    onSettled: () => setResendingId(''),
+  })
+
+  const copyResentLink = async () => {
+    if (!resent?.link) return
+    try {
+      await navigator.clipboard.writeText(resent.link)
+      setResentCopied(true)
+    } catch {
+      const el = document.createElement('textarea')
+      el.value = resent.link
+      document.body.appendChild(el)
+      el.select()
+      document.execCommand('copy')
+      document.body.removeChild(el)
+      setResentCopied(true)
+    }
+  }
 
   const fetchConfigText = async (peer: Peer): Promise<string | null> => {
     const res = await fetch(`/api/peers/${peer.id}/config`, { headers: auth })
@@ -419,6 +462,52 @@ function PeersPage() {
         </div>
       </Modal>
 
+      {/* Config-link email re-sent — the fresh link is offered for manual
+          sharing too, in case SMTP delivery fails again. */}
+      <Modal
+        open={resent !== null}
+        onClose={() => setResent(null)}
+        title="Config link email re-sent"
+        className="max-w-md"
+      >
+        <div className="space-y-3">
+          <p className="text-sm text-zinc-300">
+            A fresh config link for <span className="text-zinc-100">{resent?.peerName}</span> was
+            emailed to its user.
+            {smtp?.configured ? (
+              <span className="text-zinc-400"> Share it directly too if you like:</span>
+            ) : (
+              <span className="text-amber-300">
+                {' '}
+                SMTP is not configured, so no email is actually sent — share this link manually:
+              </span>
+            )}
+          </p>
+          {resent?.link && (
+            <div className="flex items-center gap-2">
+              <input
+                readOnly
+                value={resent.link}
+                onFocus={(e) => e.target.select()}
+                className={`${inputCls} font-mono text-sm`}
+              />
+              <GhostButton type="button" onClick={copyResentLink} className="shrink-0">
+                <IconCopy size={15} stroke={1.6} aria-hidden="true" />
+                {resentCopied ? 'Copied' : 'Copy'}
+              </GhostButton>
+            </div>
+          )}
+          <p className="text-xs text-zinc-500">
+            The link expires automatically (72h) and only serves this peer's config.
+          </p>
+          <div className="flex justify-end pt-1">
+            <PrimaryButton type="button" onClick={() => setResent(null)}>
+              Done
+            </PrimaryButton>
+          </div>
+        </div>
+      </Modal>
+
       {activePeers.length === 0 ? (
         <EmptyState
           title="No peers yet"
@@ -485,6 +574,14 @@ function PeersPage() {
                         <ActionLink onClick={() => showQR(peer)}>
                           <IconQrcode size={14} stroke={1.6} aria-hidden="true" />
                           QR
+                        </ActionLink>
+                        <ActionLink
+                          onClick={() => {
+                            if (resendingId !== peer.id) resendMutation.mutate(peer)
+                          }}
+                        >
+                          <IconMailForward size={14} stroke={1.6} aria-hidden="true" />
+                          {resendingId === peer.id ? 'Emailing…' : 'Email link'}
                         </ActionLink>
                         <ActionLink
                           tone="danger"

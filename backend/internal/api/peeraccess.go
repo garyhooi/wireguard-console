@@ -3,13 +3,13 @@ package api
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/wireguard-console/backend/internal/auth"
 	"github.com/wireguard-console/backend/internal/db"
 )
@@ -26,6 +26,47 @@ func configLinkURL(token string) string {
 	return "https://" + domain + "/peer/" + token
 }
 
+// issuePeerAccessLink mints a fresh 72h access link for a peer and returns
+// the public URL. The peer must exist, be active, and have a stored
+// (generated) private key — that is what lets the link page serve a real
+// client config. Repeated calls are fine: each returns a new token and old
+// ones stay valid until they expire.
+func issuePeerAccessLink(ctx context.Context, pool *pgxpool.Pool, peerID uuid.UUID) (string, error) {
+	var privEnc string
+	var status string
+	err := pool.QueryRow(ctx,
+		`SELECT private_key_encrypted, status FROM peers WHERE id = $1`, peerID).
+		Scan(&privEnc, &status)
+	if err != nil {
+		return "", err
+	}
+	if status != "active" {
+		return "", errPeerNotActive
+	}
+	if privEnc == "" {
+		return "", errNoPrivateKey
+	}
+
+	token, err := generateToken()
+	if err != nil {
+		return "", err
+	}
+
+	expiresAt := time.Now().Add(peerAccessLinkTTL)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO peer_access_tokens (token_hash, peer_id, expires_at)
+		VALUES ($1, $2, $3)
+	`, hashToken(token), peerID, expiresAt); err != nil {
+		return "", err
+	}
+	return configLinkURL(token), nil
+}
+
+var (
+	errPeerNotActive = fmt.Errorf("peer is not active")
+	errNoPrivateKey  = fmt.Errorf("no private key stored for this peer (it was created with an external key)")
+)
+
 // CreatePeerAccessLink issues a fresh access link for a peer. Only peers
 // that have a stored (generated) private key can produce a client config,
 // so that is required. Repeated calls are fine — each returns a new token
@@ -41,45 +82,22 @@ func CreatePeerAccessLink(store *Store) http.HandlerFunc {
 		ctx := context.Background()
 		adminID := getAdminID(r)
 
-		// The peer must exist and have a private key stored.
-		var privEnc string
-		var status string
-		err = store.pool.QueryRow(ctx,
-			`SELECT private_key_encrypted, status FROM peers WHERE id = $1`, peerID).
-			Scan(&privEnc, &status)
+		configLink, err := issuePeerAccessLink(ctx, store.pool, peerID)
 		if err != nil {
-			writeError(w, http.StatusNotFound, "Peer not found")
-			return
-		}
-		if status != "active" {
-			writeError(w, http.StatusConflict, "Peer is not active")
-			return
-		}
-		if privEnc == "" {
-			writeError(w, http.StatusConflict, "No private key stored for this peer (it was created with an external key)")
-			return
-		}
-
-		token, err := generateToken()
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to generate token")
-			return
-		}
-
-		expiresAt := time.Now().Add(peerAccessLinkTTL)
-		if _, err := store.pool.Exec(ctx, `
-			INSERT INTO peer_access_tokens (token_hash, peer_id, expires_at)
-			VALUES ($1, $2, $3)
-		`, hashToken(token), peerID, expiresAt); err != nil {
-			log.Printf("Failed to store peer access token: %v", err)
-			writeError(w, http.StatusInternalServerError, "Failed to create access link")
+			if err == errPeerNotActive {
+				writeError(w, http.StatusConflict, errPeerNotActive.Error())
+			} else if err == errNoPrivateKey {
+				writeError(w, http.StatusConflict, errNoPrivateKey.Error())
+			} else {
+				writeError(w, http.StatusNotFound, "Peer not found")
+			}
 			return
 		}
 
 		logAudit(ctx, store, adminID, "peer.access_link.create", "peer", peerID.String(), nil)
 
 		writeJSON(w, http.StatusCreated, map[string]interface{}{
-			"config_link":      configLinkURL(token),
+			"config_link":      configLink,
 			"expires_in_hours": int(peerAccessLinkTTL.Hours()),
 		})
 	}

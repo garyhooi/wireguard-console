@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/wireguard-console/backend/internal/db"
 	"github.com/wireguard-console/backend/internal/email"
 )
@@ -126,38 +127,11 @@ func CreateUser(store *Store) http.HandlerFunc {
 			return
 		}
 
-		// Generate invite token and enqueue email
-		token, err := generateToken()
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to generate token")
-			return
-		}
-
-		tokenHash := hashToken(token)
-		expiresAt := now.Add(72 * time.Hour)
-
-		_, err = store.pool.Exec(ctx, `
-			INSERT INTO invites (user_id, token_hash, expires_at)
-			VALUES ((SELECT id FROM users WHERE email = $1), $2, $3)
-		`, req.Email, tokenHash, expiresAt)
-
+		// Generate invite token + queue the claim email (fresh 72h link).
+		inviteLink, err := issueUserInvite(ctx, store.pool, req.Email, req.FullName)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to create invite")
 			return
-		}
-
-		// Enqueue email job. CONSOLE_DOMAIN may be a domain or a public IP;
-		// tolerate a scheme already being present, and always emit https.
-		domain := os.Getenv("CONSOLE_DOMAIN")
-		domain = strings.TrimPrefix(strings.TrimPrefix(domain, "https://"), "http://")
-		inviteLink := "https://" + domain + "/claim/" + token
-		subject, body := loadEmailTemplate(ctx, store.pool, "user_invite",
-			"You've been invited to join WireGuard Console", "Hello {{full_name}}, click {{invite_link}} to claim your account.")
-		subject = renderTemplate(subject, map[string]string{"full_name": req.FullName})
-		body = renderTemplate(body, map[string]string{"full_name": req.FullName, "invite_link": inviteLink})
-		queue := email.NewQueue(store.pool, nil)
-		if err := queue.EnqueueRenderedEmail(ctx, req.Email, subject, body); err != nil {
-			log.Printf("Failed to enqueue invite email: %v", err)
 		}
 
 		logAudit(ctx, store, adminID, "user.create", "user", "", nil)
@@ -167,6 +141,82 @@ func CreateUser(store *Store) http.HandlerFunc {
 		// share it directly (or if the mail worker is still catching up).
 		writeJSON(w, http.StatusCreated, map[string]string{
 			"status":      "created",
+			"invite_link": inviteLink,
+		})
+	}
+}
+
+// issueUserInvite mints a fresh claim invite for the user and queues the
+// invite email (best-effort — SMTP may not be configured yet; the mail
+// worker keeps the job until it is). Returns the public claim link so the
+// admin can share it manually when delivery fails.
+func issueUserInvite(ctx context.Context, pool *pgxpool.Pool, to, fullName string) (string, error) {
+	token, err := generateToken()
+	if err != nil {
+		return "", err
+	}
+	tokenHash := hashToken(token)
+	expiresAt := time.Now().Add(72 * time.Hour)
+
+	_, err = pool.Exec(ctx, `
+		INSERT INTO invites (user_id, token_hash, expires_at)
+		VALUES ((SELECT id FROM users WHERE email = $1), $2, $3)
+	`, to, tokenHash, expiresAt)
+	if err != nil {
+		return "", err
+	}
+
+	// Enqueue email job. CONSOLE_DOMAIN may be a domain or a public IP;
+	// tolerate a scheme already being present, and always emit https.
+	domain := strings.TrimPrefix(strings.TrimPrefix(os.Getenv("CONSOLE_DOMAIN"), "https://"), "http://")
+	inviteLink := "https://" + domain + "/claim/" + token
+	subject, body := loadEmailTemplate(ctx, pool, "user_invite",
+		"You've been invited to join WireGuard Console", "Hello {{full_name}}, click {{invite_link}} to claim your account.")
+	subject = renderTemplate(subject, map[string]string{"full_name": fullName})
+	body = renderTemplate(body, map[string]string{"full_name": fullName, "invite_link": inviteLink})
+	queue := email.NewQueue(pool, nil)
+	if err := queue.EnqueueRenderedEmail(ctx, to, subject, body); err != nil {
+		log.Printf("Failed to enqueue invite email: %v", err)
+	}
+
+	return inviteLink, nil
+}
+
+// ResendUserInvite re-issues the claim email for a user who has not claimed
+// yet (status 'invited'). An SMTP failure on the original send, a lost
+// email, or an expired invite link can all be fixed by resending — a fresh
+// 72h link is minted each time and the old ones stay valid until they
+// expire. Users who already claimed (active/suspended) get a conflict: they
+// no longer need a claim link.
+func ResendUserInvite(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, err := parseUUID(r.PathValue("id"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "Invalid user ID")
+			return
+		}
+		ctx := context.Background()
+		adminID := getAdminID(r)
+
+		var to, fullName string
+		if err := store.pool.QueryRow(ctx, `
+			SELECT email, COALESCE(full_name, '') FROM users
+			WHERE id = $1 AND status = 'invited'
+		`, userID).Scan(&to, &fullName); err != nil {
+			writeError(w, http.StatusConflict, "Only users with a pending invitation can be re-invited")
+			return
+		}
+
+		inviteLink, err := issueUserInvite(ctx, store.pool, to, fullName)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to create invite")
+			return
+		}
+
+		logAudit(ctx, store, adminID, "user.invite.resend", "user", userID.String(), nil)
+
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":      "resent",
 			"invite_link": inviteLink,
 		})
 	}

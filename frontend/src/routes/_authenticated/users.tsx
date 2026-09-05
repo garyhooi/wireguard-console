@@ -1,7 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { IconCopy, IconMailPlus } from '@tabler/icons-react'
+import { useState } from 'react'
+import { IconCopy, IconMailForward, IconMailPlus } from '@tabler/icons-react'
 import {
   Badge,
   EmptyState,
@@ -50,9 +50,12 @@ function UsersPage() {
   const [inviteEmail, setInviteEmail] = useState('')
   const [inviteName, setInviteName] = useState('')
   const [inviteLink, setInviteLink] = useState('')
+  const [resendLink, setResendLink] = useState('')
+  const [resendTarget, setResendTarget] = useState('')
   const [statusFilter, setStatusFilter] = useState('all')
   const [search, setSearch] = useState('')
   const [copied, setCopied] = useState(false)
+  const [resendCopied, setResendCopied] = useState(false)
 
   const { data: smtp } = useQuery<{ configured: boolean }>({
     queryKey: ['smtp-config'],
@@ -97,6 +100,47 @@ function UsersPage() {
       refetch()
     },
   })
+
+  const resendMutation = useMutation({
+    mutationFn: async (u: User) => {
+      const res = await fetch(`/api/users/${u.id}/resend-invite`, {
+        method: 'POST',
+        headers: authH,
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error((err as { error?: string }).error || 'Failed to resend invite email')
+      }
+      return res.json()
+    },
+    onSuccess: (data, u) => {
+      // Keep the row's link visible so an SMTP hiccup never strands the
+      // invite — the admin can copy/share it manually either way.
+      setResendLink(data.invite_link || '')
+      setResendTarget(u.email)
+      setResendCopied(false)
+      refetch()
+    },
+    onError: (e: Error) => {
+      alert(`Resend failed: ${e.message}`)
+    },
+  })
+
+  const copyResendLink = async () => {
+    if (!resendLink) return
+    try {
+      await navigator.clipboard.writeText(resendLink)
+      setResendCopied(true)
+    } catch {
+      const el = document.createElement('textarea')
+      el.value = resendLink
+      document.body.appendChild(el)
+      el.select()
+      document.execCommand('copy')
+      document.body.removeChild(el)
+      setResendCopied(true)
+    }
+  }
 
   const suspendMutation = useMutation({
     mutationFn: async (u: User) => {
@@ -255,6 +299,48 @@ function UsersPage() {
         )}
       </Modal>
 
+      {/* Resend result — a fresh invite link is always available to copy,
+          even when SMTP is down, so the invitation is never stranded. */}
+      <Modal
+        open={resendLink !== ''}
+        onClose={() => setResendLink('')}
+        title="Invite email re-sent"
+        className="max-w-md"
+      >
+        <div className="space-y-3">
+          <p className="text-sm text-zinc-300">
+            A fresh claim email was queued for <span className="text-zinc-100">{resendTarget}</span>.
+            {smtp?.configured ? (
+              <span className="text-zinc-400"> The link below is also available if they still don't receive it:</span>
+            ) : (
+              <span className="text-amber-300">
+                {' '}
+                SMTP is not configured, so no email is actually sent — share this invite link
+                manually:
+              </span>
+            )}
+          </p>
+          <div className="flex items-center gap-2">
+            <input
+              readOnly
+              value={resendLink}
+              onFocus={(e) => e.target.select()}
+              className={`${inputCls} font-mono text-sm`}
+            />
+            <GhostButton type="button" onClick={copyResendLink} className="shrink-0">
+              <IconCopy size={15} stroke={1.6} aria-hidden="true" />
+              {resendCopied ? 'Copied' : 'Copy'}
+            </GhostButton>
+          </div>
+          <p className="text-xs text-zinc-500">The link expires automatically (72h).</p>
+          <div className="flex justify-end pt-1">
+            <PrimaryButton type="button" onClick={() => setResendLink('')}>
+              Done
+            </PrimaryButton>
+          </div>
+        </div>
+      </Modal>
+
       <div className={toolbarCls}>
         <div className={tabGroupCls}>
           {TABS.map((tab) => (
@@ -317,6 +403,19 @@ function UsersPage() {
                     </td>
                     <td className="px-5 py-3.5 whitespace-nowrap text-right text-sm">
                       <div className="flex justify-end gap-1">
+                        {user.status === 'invited' && (
+                          <button
+                            onClick={() => resendMutation.mutate(user)}
+                            disabled={resendMutation.isPending}
+                            className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-teal-400 hover:text-teal-300 hover:bg-teal-500/10 transition-colors disabled:opacity-50"
+                            title="Resend the claim email (the invite link expired, got lost, or the original send hit an SMTP error)"
+                          >
+                            <IconMailForward size={14} stroke={1.6} aria-hidden="true" />
+                            {resendMutation.isPending && resendMutation.variables?.id === user.id
+                              ? 'Resending…'
+                              : 'Resend email'}
+                          </button>
+                        )}
                         {user.status === 'active' && (
                           <button
                             onClick={() => suspendMutation.mutate(user)}

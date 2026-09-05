@@ -117,7 +117,9 @@ function AdminsPage() {
     onSuccess: () => {
       setShowInvite(false)
       setForm({ email: '', role: 'admin' })
-      setNotice('Admin invited — initial credentials are emailed when SMTP is configured.')
+      setNotice(
+        'Admin invited — initial credentials are emailed when SMTP is configured. If the email fails or is lost, use Resend credentials on the row to rotate to a new temporary password.',
+      )
       setError('')
       queryClient.invalidateQueries({ queryKey: ['admins'] })
     },
@@ -162,7 +164,7 @@ function AdminsPage() {
     onSuccess: (data, vars) => {
       const pw = (data as { password?: string } | undefined)?.password
       setNotice(
-        `Temporary password for ${vars.admin.email}: ${pw}  (emailed if SMTP is configured)`,
+        `New temporary password for ${vars.admin.email}: ${pw}  (emailed — re-sent when the earlier email hit an SMTP error)`,
       )
       setError('')
       queryClient.invalidateQueries({ queryKey: ['admins'] })
@@ -222,6 +224,10 @@ function AdminsPage() {
 
   // ---- 2FA step-up wrappers: open the modal, run on confirm ----
 
+  // Re-sending an admin's credentials email rotates to a fresh temporary
+  // password (the original is never stored — only its hash — so it cannot
+  // be re-emailed verbatim). This is the same reset-password flow below;
+  // the acting super_admin confirms with their own 2FA code.
   const confirmResetPassword = (admin: Admin) => {
     setPending2FA({
       label: `reset the password for ${admin.email}`,
@@ -479,13 +485,13 @@ function AdminsPage() {
                           <>
                             <button
                               onClick={() => {
-                                if (confirm(`Reset the password for "${a.email}"? A temporary password will be generated and shown once.`))
+                                if (confirm(`Resend credentials to "${a.email}"? A new temporary password will be generated, emailed (when SMTP is configured), and shown once. Their current password is invalidated — use this when the original credentials email failed or was lost.`))
                                   confirmResetPassword(a)
                               }}
                               className="inline-flex items-center gap-1 text-sm rounded-md px-2 py-1 text-teal-400 hover:text-teal-300 hover:bg-teal-500/10 transition-colors"
                             >
                               <IconKey size={13} stroke={1.6} aria-hidden="true" />
-                              Reset password
+                              Resend credentials
                             </button>
                             {me?.id !== a.id && a.totp_enabled && (
                               <button

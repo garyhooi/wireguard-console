@@ -460,6 +460,53 @@ PersistentKeepalive = ` + strconv.Itoa(server.PersistentKeepalive) + `
 	return config
 }
 
+// ResendPeerConfigEmail re-issues the config-link email for an existing
+// peer. The original email may have failed on an SMTP hiccup or been lost
+// — resending mints a fresh 72h link (old links stay valid) and emails the
+// owning user again. Only peers with a stored (generated) private key can
+// be re-emailed, since the link page must serve a real client config.
+func ResendPeerConfigEmail(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		peerID, err := parseUUID(r.PathValue("id"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "Invalid peer ID")
+			return
+		}
+		ctx := context.Background()
+		adminID := getAdminID(r)
+
+		var userID uuid.UUID
+		var peerName string
+		if err := store.pool.QueryRow(ctx, `
+			SELECT user_id, name FROM peers WHERE id = $1
+		`, peerID).Scan(&userID, &peerName); err != nil {
+			writeError(w, http.StatusNotFound, "Peer not found")
+			return
+		}
+
+		configLink, err := issuePeerAccessLink(ctx, store.pool, peerID)
+		if err != nil {
+			if err == errPeerNotActive {
+				writeError(w, http.StatusConflict, errPeerNotActive.Error())
+			} else if err == errNoPrivateKey {
+				writeError(w, http.StatusConflict, errNoPrivateKey.Error())
+			} else {
+				writeError(w, http.StatusInternalServerError, "Failed to create access link")
+			}
+			return
+		}
+
+		sendPeerConfigLinkEmail(ctx, store, userID, peerName, configLink)
+
+		logAudit(ctx, store, adminID, "peer.config_email.resend", "peer", peerID.String(), nil)
+
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":      "resent",
+			"config_link": configLink,
+		})
+	}
+}
+
 // sendPeerConfigLinkEmail emails the user a secure link to their peer's
 // config page (download .conf / scan QR). The email never contains the
 // config or private key. Silent when SMTP is not configured.

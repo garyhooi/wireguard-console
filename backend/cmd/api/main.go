@@ -155,6 +155,9 @@ func main() {
 				r.Post("/users/{id}/suspend", api.SuspendUser(store))
 				r.Delete("/users/{id}", api.DeleteUser(store))
 				r.Post("/users/{id}/resume", api.ResumeUser(store))
+				// Re-issue the claim email when the original send failed
+				// (SMTP error) or the user lost/expired their invite link.
+				r.Post("/users/{id}/resend-invite", api.ResendUserInvite(store))
 
 				r.Get("/peers", api.ListPeers(store))
 				r.Post("/peers", api.CreatePeer(store))
@@ -165,6 +168,9 @@ func main() {
 				r.Delete("/peers/{id}", api.DeletePeer(store))
 				r.Get("/peers/{id}/config", api.GetPeerConfig(store))
 				r.Post("/peers/{id}/config-link", api.CreatePeerAccessLink(store))
+				// Re-email the config link when the original send hit an
+				// SMTP error or the user never received it.
+				r.Post("/peers/{id}/resend-config-email", api.ResendPeerConfigEmail(store))
 
 				r.Get("/servers", api.ListServers(store))
 				r.Post("/servers", api.CreateServer(store))
