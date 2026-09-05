@@ -18,12 +18,10 @@ import (
 var uuidNil = uuid.Nil
 
 // Typed context keys (unexported) carrying per-request auth state populated
-// by AuthMiddleware: resolved admin id, the session's CSRF token, whether
-// the request authenticated via the (transition-only) header, and the acting
-// admin_sessions row id (for the Active Sessions UI).
+// by AuthMiddleware: resolved admin id, the session's CSRF token, and the
+// acting admin_sessions row id (for the Active Sessions UI).
 type adminIDKey struct{}
 type csrfTokenKey struct{}
-type viaHeaderKey struct{}
 type sessionRowIDKey struct{}
 
 // Session cookie names. The token value is the same opaque 32-byte hex the
@@ -40,11 +38,6 @@ const (
 	// rejected even though its absolute expiry has not been reached.
 	// Overridable via SESSION_IDLE_MINUTES (0 disables the idle check).
 	defaultIdleMinutes = 30
-
-	// Legacy transition: accept the old Authorization header too while the
-	// cookie-only frontend rolls out (AUTH_ACCEPT_HEADER=1). Remove after
-	// cutover — never rely on the header as the long-term transport.
-	envAcceptLegacyHeader = "AUTH_ACCEPT_HEADER"
 )
 
 // idleTimeout returns the configured session idle timeout. SESSION_IDLE_MINUTES
@@ -59,12 +52,6 @@ func idleTimeout() time.Duration {
 		return 0
 	}
 	return time.Duration(n) * time.Minute
-}
-
-// acceptLegacyHeader reports whether the Authorization-header transport is
-// still honored during the localStorage→cookie migration window.
-func acceptLegacyHeader() bool {
-	return os.Getenv(envAcceptLegacyHeader) == "1"
 }
 
 // secureCookie decides whether the Secure attribute may be set on cookies.
@@ -154,15 +141,11 @@ func createSession(ctx context.Context, store *Store, adminID uuid.UUID, rawToke
 	return csrfToken.(string), nil
 }
 
-// currentSessionTokenHash returns the hash of the acting session's token —
-// from the cookie, or the legacy Authorization header during the transition —
-// used by self-service handlers to keep the acting session alive while
-// revoking the admin's other sessions.
+// currentSessionTokenHash returns the hash of the acting session's cookie
+// token — used by self-service handlers to keep the acting session alive
+// while revoking the admin's other sessions.
 func currentSessionTokenHash(r *http.Request) string {
 	token := readCookieToken(r, sessionCookieName)
-	if token == "" && acceptLegacyHeader() {
-		token = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	}
 	if token == "" {
 		return ""
 	}

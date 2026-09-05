@@ -161,11 +161,6 @@ func TestMain(m *testing.M) {
 		"POSTGRES_PASSWORD="+os.Getenv("E2E_PG_PASSWORD"),
 		"POSTGRES_DB="+os.Getenv("E2E_PG_DB"),
 		"BACKUP_DIR="+tmp,
-		// Transition mode: honor the legacy Authorization header alongside
-		// the new HttpOnly-cookie transport. The suite's api()/rawGet()
-		// helpers exercise the header path (an old bundle mid-deploy); the
-		// cookie+CSRF test below exercises the primary path.
-		"AUTH_ACCEPT_HEADER=1",
 	)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
@@ -240,7 +235,24 @@ func seedAdmin(dbURL, email, password, role string) error {
 	return nil
 }
 
-func api(t *testing.T, method, path, token string, body interface{}) (*http.Response, map[string]interface{}) {
+// authn is what the helpers accept: an *actor (cookie+CSRF), a raw node-agent
+// bearer token string ("Bearer ..."), or "" for no auth. Admin sessions ALWAYS
+// go through an *actor — the Authorization header is no longer a transport.
+type authn interface{}
+
+func actorFrom(a authn) (*actor, bool) {
+	act, ok := a.(*actor)
+	return act, ok
+}
+
+func bearerFrom(a authn) string {
+	if t, ok := a.(string); ok {
+		return t // "Bearer <node-token>" or "" (no auth)
+	}
+	return ""
+}
+
+func api(t *testing.T, method, path string, a authn, body interface{}) (*http.Response, map[string]interface{}) {
 	t.Helper()
 	var buf bytes.Buffer
 	if body != nil {
@@ -250,15 +262,33 @@ func api(t *testing.T, method, path, token string, body interface{}) (*http.Resp
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
-	if token != "" {
-		req.Header.Set("Authorization", token)
+	csrf := ""
+	if act, ok := actorFrom(a); ok {
+		for _, ck := range act.jar {
+			req.AddCookie(ck)
+		}
+		csrf = act.csrf
+	} else if bt := bearerFrom(a); bt != "" {
+		req.Header.Set("Authorization", bt)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	if csrf != "" && method != http.MethodGet && method != http.MethodHead && method != http.MethodOptions {
+		req.Header.Set("X-CSRF-Token", csrf)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	if act, ok := actorFrom(a); ok {
+		for _, ck := range resp.Cookies() {
+			if ck.MaxAge <= 0 && ck.Value == "" {
+				delete(act.jar, ck.Name)
+			} else {
+				act.jar[ck.Name] = ck
+			}
+		}
 	}
 	var out map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&out)
@@ -266,24 +296,38 @@ func api(t *testing.T, method, path, token string, body interface{}) (*http.Resp
 	return resp, out
 }
 
-func login(t *testing.T, email, password string) string {
+// login signs in as an admin and returns an *actor holding the session cookie
+// + CSRF token. Logging in again on the same actor replaces its session.
+func login(t *testing.T, email, password string) *actor {
 	t.Helper()
-	resp, out := api(t, "POST", "/api/auth/login", "", map[string]string{
+	return loginAs(t, newActor(), email, password)
+}
+
+// loginAs signs in into the given actor's jar (used when a test needs a
+// second concurrent admin session).
+func loginAs(t *testing.T, act *actor, email, password string) *actor {
+	t.Helper()
+	resp, out := api(t, "POST", "/api/auth/login", act, map[string]string{
 		"email": email, "password": password,
 	})
 	expectStatus(t, resp, 200, "/api/auth/login")
-	token, _ := out["token"].(string)
-	if token == "" {
-		t.Fatal("login returned no token")
+	csrf, _ := out["csrf_token"].(string)
+	if csrf == "" {
+		t.Fatal("login returned no csrf_token")
 	}
-	return token
+	act.csrf = csrf
+	sc, ok := act.jar["wgc_session"]
+	if !ok || sc.HttpOnly != true || sc.SameSite != http.SameSiteStrictMode {
+		t.Fatalf("wgc_session cookie not HttpOnly/SameSite=Strict: %+v", sc)
+	}
+	return act
 }
 
-// enable2FAFor enrolls 2FA on the logged-in admin and returns the TOTP
+// enable2FAFor enrolls 2FA on the actor's session and returns the TOTP
 // secret so the test can mint codes for step-up checks.
-func enable2FAFor(t *testing.T, token string) string {
+func enable2FAFor(t *testing.T, a authn) string {
 	t.Helper()
-	resp, setupOut := api(t, "POST", "/api/auth/2fa/setup", token, nil)
+	resp, setupOut := api(t, "POST", "/api/auth/2fa/setup", a, nil)
 	expectStatus(t, resp, 200, "POST /api/auth/2fa/setup")
 	secret, _ := setupOut["secret"].(string)
 	if secret == "" {
@@ -293,7 +337,7 @@ func enable2FAFor(t *testing.T, token string) string {
 	if err != nil {
 		t.Fatalf("generate totp: %v", err)
 	}
-	resp, enableOut := api(t, "POST", "/api/auth/2fa/enable", token, map[string]string{
+	resp, enableOut := api(t, "POST", "/api/auth/2fa/enable", a, map[string]string{
 		"secret": secret, "code": code,
 	})
 	expectStatus(t, resp, 200, "POST /api/auth/2fa/enable")
@@ -702,45 +746,48 @@ func TestEndToEnd(t *testing.T) {
 	op2Secret := enable2FAFor(t, op2Tok)
 	_ = op2Secret // enrollment itself proves the flow; reset uses the actor
 
-	// ---- Login with 2FA enabled (regression) ----
-	// op2 now has 2FA on. A FRESH login must return pending_2fa + a token
-	// that Verify2FA can resolve — Login persists it in admin_sessions with
-	// a short expiry. Before the fix the pending token was never stored, so
-	// verification always answered "Invalid or expired token".
-	loginResp, loginOut := api(t, "POST", "/api/auth/login", "", map[string]string{
+	// ---- Login with 2FA enabled (regression, cookie transport) ----
+	// op2 now has 2FA on. A FRESH login must set the pending_2fa cookie
+	// (wgc_pending2fa) that Verify2FA can resolve — Login persists it in
+	// admin_sessions with a short expiry. Before the original fix the
+	// pending token was never stored, so verification always answered
+	// "Invalid or expired token".
+	op2Login := newActor()
+	loginResp, loginOut := op2Login.do(t, "POST", "/api/auth/login", "", map[string]string{
 		"email": "op2-renamed@console.test", "password": op2pw,
 	})
 	expectStatus(t, loginResp, 200, "POST /api/auth/login (2FA pending)")
 	if pending, _ := loginOut["pending_2fa"].(bool); !pending {
 		t.Fatal("expected pending_2fa=true on login for a 2FA-enabled admin")
 	}
-	pendingTok, _ := loginOut["token"].(string)
-	if pendingTok == "" {
-		t.Fatal("login with 2FA returned no pending token")
+	if _, has := op2Login.jar["wgc_pending2fa"]; !has {
+		t.Fatal("login with 2FA did not set the pending cookie")
 	}
 
-	// Wrong code: 400, and the pending token survives for a retry. Note the
-	// Authorization header is the RAW token (no "Bearer ") — Verify2FA hashes
-	// the whole header, matching how the frontend sends it.
-	badCodeResp, _ := api(t, "POST", "/api/auth/2fa/verify", pendingTok, map[string]string{
+	// Wrong code: 400, and the pending cookie survives for a retry.
+	badCodeResp, _ := op2Login.do(t, "POST", "/api/auth/2fa/verify", "", map[string]string{
 		"code": "000000",
 	})
 	expectStatus(t, badCodeResp, 400, "POST /api/auth/2fa/verify (wrong code)")
 
-	// Correct code: real session token that authenticates.
-	goodResp, verifyOut := api(t, "POST", "/api/auth/2fa/verify", pendingTok, map[string]string{
+	// Correct code: swaps the pending cookie for the real session cookie.
+	goodResp, verifyOut := op2Login.do(t, "POST", "/api/auth/2fa/verify", "", map[string]string{
 		"code": current2FACode(t, op2Secret),
 	})
 	expectStatus(t, goodResp, 200, "POST /api/auth/2fa/verify (valid code)")
-	sessionTok, _ := verifyOut["token"].(string)
-	if sessionTok == "" {
-		t.Fatal("2fa verify returned no session token")
+	csrf2, _ := verifyOut["csrf_token"].(string)
+	if csrf2 == "" {
+		t.Fatal("2fa verify returned no csrf_token")
 	}
-	meResp, _ := api(t, "GET", "/api/admins/me", sessionTok, nil)
+	if _, has := op2Login.jar["wgc_session"]; !has {
+		t.Fatal("session cookie missing after 2fa verify")
+	}
+	meResp, _ := op2Login.do(t, "GET", "/api/admins/me", "", nil)
 	expectStatus(t, meResp, 200, "GET /api/admins/me (post-2FA session)")
 
-	// The pending token is single-use: a second verify must fail.
-	tfaReuseResp, _ := api(t, "POST", "/api/auth/2fa/verify", pendingTok, map[string]string{
+	// The pending token is single-use: a second verify must fail. The
+	// pending cookie was cleared, so verify answers 401.
+	tfaReuseResp, _ := op2Login.do(t, "POST", "/api/auth/2fa/verify", "", map[string]string{
 		"code": current2FACode(t, op2Secret),
 	})
 	expectStatus(t, tfaReuseResp, 401, "POST /api/auth/2fa/verify (pending token reused)")
@@ -963,18 +1010,20 @@ func TestEndToEnd(t *testing.T) {
 	expectStatus(t, denyResp, 403, "DELETE /api/audit-logs (admin denied)")
 }
 
-// cookieJarClient returns an http.Client whose cookie jar is shared, and a
-// helper to read a cookie's Set-Cookie attributes. This is the transport the
-// new frontend actually uses (HttpOnly SameSite=Strict cookie + X-CSRF-Token).
-type cookieJarClient struct {
+// actor is a browser-like admin session: an http.Client with a shared cookie
+// jar plus the session's CSRF token, mirroring how the real SPA authenticates
+// (the HttpOnly session cookie rides along automatically and X-CSRF-Token
+// stamps every state-changing call). Admin auth in this suite ALWAYS uses an
+// *actor — the Authorization header is no longer an accepted transport.
+type actor struct {
 	client *http.Client
 	jar    map[string]*http.Cookie
+	csrf   string
 }
 
-func newCookieClient() *cookieJarClient {
-	jar := make(map[string]*http.Cookie)
-	return &cookieJarClient{
-		jar: jar,
+func newActor() *actor {
+	return &actor{
+		jar: make(map[string]*http.Cookie),
 		client: &http.Client{
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				// Copy cookies into the redirect target so cross-call flows
@@ -988,15 +1037,15 @@ func newCookieClient() *cookieJarClient {
 	}
 }
 
-func (c *cookieJarClient) do(t *testing.T, method, path string, csrf string, body interface{}) (*http.Response, map[string]interface{}) {
+func (c *actor) do(t *testing.T, method, path string, csrf string, body interface{}) (*http.Response, map[string]interface{}) {
 	t.Helper()
 	return c.doFrom(t, "", method, path, csrf, body)
 }
 
 // doFrom is do with an explicit client-IP override (X-Forwarded-For). The
 // login rate limiter is per-IP (5/15min), so a test that logs in after a
-// heavy header-path suite must use its own bucket.
-func (c *cookieJarClient) doFrom(t *testing.T, fromIP, method, path string, csrf string, body interface{}) (*http.Response, map[string]interface{}) {
+// heavy suite must use its own bucket.
+func (c *actor) doFrom(t *testing.T, fromIP, method, path string, csrf string, body interface{}) (*http.Response, map[string]interface{}) {
 	t.Helper()
 	var buf bytes.Buffer
 	if body != nil {
@@ -1036,14 +1085,15 @@ func (c *cookieJarClient) doFrom(t *testing.T, fromIP, method, path string, csrf
 	return resp, out
 }
 
-func (c *cookieJarClient) login(t *testing.T, email, password string) string {
+func (c *actor) login(t *testing.T, email, password string) string {
 	t.Helper()
 	return c.loginFrom(t, "203.0.113.99", email, password)
 }
 
 // loginFrom logs in with an explicit client IP so the per-IP rate limiter
-// bucket is separate from the header-path suite's bucket.
-func (c *cookieJarClient) loginFrom(t *testing.T, fromIP, email, password string) string {
+// bucket is separate from other suites' buckets. The session CSRF token is
+// stored on the actor.
+func (c *actor) loginFrom(t *testing.T, fromIP, email, password string) string {
 	t.Helper()
 	resp, out := c.doFrom(t, fromIP, "POST", "/api/auth/login", "", map[string]string{
 		"email": email, "password": password,
@@ -1057,6 +1107,7 @@ func (c *cookieJarClient) loginFrom(t *testing.T, fromIP, email, password string
 	if !ok || sc.HttpOnly != true || sc.SameSite != http.SameSiteStrictMode {
 		t.Fatalf("wgc_session cookie not HttpOnly/SameSite=Strict: %+v", sc)
 	}
+	c.csrf = csrf
 	return csrf
 }
 
@@ -1073,7 +1124,7 @@ func TestCookieSessionAuth(t *testing.T) {
 	// Cookie login: sets HttpOnly Strict cookie + returns csrf_token. Login
 	// from a dedicated XFF IP so the shared per-IP login rate limiter (the
 	// header-path suite already used several attempts) doesn't 429 us.
-	c := newCookieClient()
+	c := newActor()
 	csrf := c.login(t, "cookie@console.test", "Cookie-Passw0rd!")
 	if c.jar["wgc_session"].Secure {
 		// The e2e API runs over plain HTTP with no X-Forwarded-Proto, so the
@@ -1106,7 +1157,7 @@ func TestCookieSessionAuth(t *testing.T) {
 	// A second live session for the same admin (a stolen/lost device) must
 	// die when the password changes from the first session, while the acting
 	// session survives.
-	c2 := newCookieClient()
+	c2 := newActor()
 	_ = c2.loginFrom(t, "203.0.113.100", "cookie@console.test", "Cookie-Passw0rd!")
 	resp, _ = c2.do(t, "GET", "/api/admins/me", "", nil)
 	expectStatus(t, resp, 200, "second session alive before password change")
@@ -1175,7 +1226,7 @@ func TestCookie2FALogin(t *testing.T) {
 	fromIP := "203.0.113.200"
 
 	// Login, enroll 2FA (step-up uses the session cookie + CSRF).
-	c := newCookieClient()
+	c := newActor()
 	csrf := c.loginFrom(t, fromIP, "cookie2fa@console.test", "Cookie2FA-Passw0rd!")
 	resp, setupOut := c.doFrom(t, fromIP, "POST", "/api/auth/2fa/setup", csrf, nil)
 	expectStatus(t, resp, 200, "2fa setup")
@@ -1235,9 +1286,9 @@ func TestCookie2FALogin(t *testing.T) {
 	expectStatus(t, resp, 200, "GET /api/admins/me (post-2FA cookie session)")
 }
 
-func firstID(t *testing.T, path, token string) string {
+func firstID(t *testing.T, path string, a authn) string {
 	t.Helper()
-	resp := rawGet(t, baseURL+path, token)
+	resp := rawGet(t, baseURL+path, a)
 	var rows []map[string]interface{}
 	json.NewDecoder(bytes.NewReader([]byte(resp))).Decode(&rows)
 	if len(rows) == 0 {
@@ -1250,13 +1301,19 @@ func firstID(t *testing.T, path, token string) string {
 	return id
 }
 
-func rawGet(t *testing.T, url, token string) string {
+func rawGet(t *testing.T, url string, a authn) string {
 	t.Helper()
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Authorization", token)
+	if act, ok := actorFrom(a); ok {
+		for _, ck := range act.jar {
+			req.AddCookie(ck)
+		}
+	} else if bt := bearerFrom(a); bt != "" {
+		req.Header.Set("Authorization", bt)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
@@ -1274,16 +1331,22 @@ type rawResp struct {
 }
 
 // rawPost posts JSON and returns the raw response without JSON-decoding it
-// (used for binary/gzip download checks).
-func rawPost(t *testing.T, url, token string, body map[string]string) rawResp {
+// (used for binary/gzip download checks). Runs through the actor's jar.
+func rawPost(t *testing.T, url string, a authn, body map[string]string) rawResp {
 	t.Helper()
+	act, _ := actorFrom(a)
 	var buf bytes.Buffer
 	json.NewEncoder(&buf).Encode(body)
 	req, err := http.NewRequest("POST", url, &buf)
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Authorization", token)
+	for _, ck := range act.jar {
+		req.AddCookie(ck)
+	}
+	if act.csrf != "" {
+		req.Header.Set("X-CSRF-Token", act.csrf)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -1294,9 +1357,10 @@ func rawPost(t *testing.T, url, token string, body map[string]string) rawResp {
 	return rawResp{status: resp.StatusCode, ctype: resp.Header.Get("Content-Type"), body: b}
 }
 
-// rawUpload multipart-posts a .sql.gz file plus a 2FA code.
-func rawUpload(t *testing.T, path, token, filename string, content []byte, code string) rawResp {
+// rawUpload multipart-posts a .sql.gz file plus a 2FA code (actor transport).
+func rawUpload(t *testing.T, path string, a authn, filename string, content []byte, code string) rawResp {
 	t.Helper()
+	act, _ := actorFrom(a)
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
 	fw, err := mw.CreateFormFile("file", filename)
@@ -1311,7 +1375,12 @@ func rawUpload(t *testing.T, path, token, filename string, content []byte, code 
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Authorization", token)
+	for _, ck := range act.jar {
+		req.AddCookie(ck)
+	}
+	if act.csrf != "" {
+		req.Header.Set("X-CSRF-Token", act.csrf)
+	}
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -1403,7 +1472,7 @@ func TestSessionLifecycle(t *testing.T) {
 	seedAdmin(dbURL, "lifecycle@console.test", "Lifecycle-Passw0rd!", "super_admin")
 	fromIP := "203.0.113.50"
 
-	c := newCookieClient()
+	c := newActor()
 	csrf := c.loginFrom(t, fromIP, "lifecycle@console.test", "Lifecycle-Passw0rd!")
 
 	// List: the acting session is present and flagged is_current.
@@ -1426,7 +1495,7 @@ func TestSessionLifecycle(t *testing.T) {
 	}
 
 	// A second session (different client IP) appears in the list.
-	c2 := newCookieClient()
+	c2 := newActor()
 	_ = c2.loginFrom(t, "203.0.113.51", "lifecycle@console.test", "Lifecycle-Passw0rd!")
 	resp, out = c.doFrom(t, fromIP, "GET", "/api/admins/me/sessions", "", nil)
 	expectStatus(t, resp, 200, "GET sessions with two")
@@ -1456,7 +1525,7 @@ func TestSessionLifecycle(t *testing.T) {
 	expectStatus(t, resp, 200, "acting session survives revoke")
 
 	// Sign out elsewhere: open a fresh second session then revoke-others.
-	c3 := newCookieClient()
+	c3 := newActor()
 	_ = c3.loginFrom(t, "203.0.113.52", "lifecycle@console.test", "Lifecycle-Passw0rd!")
 	resp, out = c.doFrom(t, fromIP, "POST", "/api/admins/me/sessions/revoke-others", csrf, nil)
 	expectStatus(t, resp, 200, "revoke-others")

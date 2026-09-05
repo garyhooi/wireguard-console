@@ -470,13 +470,6 @@ ADGUARD_API_USER=admin
 ADMIN_EMAIL='${FIRST_ADMIN_EMAIL}'
 ADMIN_PASSWORD='${FIRST_ADMIN_PASSWORD}'
 
-# --- Session auth transport (localStorage → HttpOnly cookie migration) ---
-# The admin session rides an HttpOnly SameSite=Strict cookie with a
-# per-session CSRF token. During the transition the API also accepts the
-# legacy Authorization header so a stale cached bundle keeps working.
-# Remove this line (and re-run) once the cookie-only frontend is proven.
-AUTH_ACCEPT_HEADER=1
-
 # --- Session lifecycle ---
 # Sessions idle longer than this are rejected (0 disables; the absolute
 # 24h expiry always applies). Profile → Active Sessions can revoke live

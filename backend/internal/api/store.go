@@ -171,18 +171,13 @@ type adminResponse struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
-// Session tokens normally travel only as HttpOnly cookies; the JSON carries
-// just the CSRF token. During the localStorage→cookie transition
-// (AUTH_ACCEPT_HEADER=1) the raw token is ALSO returned in JSON so an old
-// frontend bundle (deployed a minute before the new API during a rolling
-// rebuild) can keep authenticating via the legacy Authorization header.
+// Session tokens travel only as HttpOnly cookies; the JSON carries just the
+// per-session CSRF token that the SPA echoes on state-changing requests.
 type sessionResponse struct {
-	Token     string `json:"token,omitempty"`
 	CSRFToken string `json:"csrf_token,omitempty"`
 }
 
 type loginResponse struct {
-	Token      string         `json:"token,omitempty"`
 	CSRFToken  string         `json:"csrf_token,omitempty"`
 	Pending2FA bool           `json:"pending_2fa,omitempty"`
 	Admin      *adminResponse `json:"admin,omitempty"`
@@ -289,9 +284,6 @@ func Login(store *Store) http.HandlerFunc {
 				return
 			}
 			setSessionCookie(w, r, pending2FACookieName, token, int(pending2FALife.Seconds()))
-			if acceptLegacyHeader() {
-				resp.Token = token
-			}
 
 			resp.Pending2FA = true
 			writeJSON(w, http.StatusOK, resp)
@@ -315,9 +307,6 @@ func Login(store *Store) http.HandlerFunc {
 			return
 		}
 		setSessionCookie(w, r, sessionCookieName, token, int(sessionLifetime.Seconds()))
-		if acceptLegacyHeader() {
-			resp.Token = token
-		}
 
 		resp.CSRFToken = csrfToken
 		writeJSON(w, http.StatusOK, resp)
@@ -333,11 +322,6 @@ func Verify2FA(store *Store) http.HandlerFunc {
 		}
 
 		token := readCookieToken(r, pending2FACookieName)
-		// Transition: accept the pending token via the legacy header too so
-		// an old frontend tab can still finish a 2FA login mid-deploy.
-		if token == "" && acceptLegacyHeader() {
-			token = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		}
 		if token == "" {
 			writeError(w, http.StatusUnauthorized, "Missing authorization token")
 			return
@@ -408,11 +392,7 @@ func Verify2FA(store *Store) http.HandlerFunc {
 		setSessionCookie(w, r, sessionCookieName, sessionToken, int(sessionLifetime.Seconds()))
 		clearSessionCookie(w, r, pending2FACookieName)
 
-		resp := sessionResponse{CSRFToken: csrfToken}
-		if acceptLegacyHeader() {
-			resp.Token = sessionToken
-		}
-		writeJSON(w, http.StatusOK, resp)
+		writeJSON(w, http.StatusOK, sessionResponse{CSRFToken: csrfToken})
 	}
 }
 
@@ -422,9 +402,6 @@ func Verify2FA(store *Store) http.HandlerFunc {
 func Logout(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := readCookieToken(r, sessionCookieName)
-		if token == "" && acceptLegacyHeader() {
-			token = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		}
 
 		if token != "" {
 			store.pool.Exec(context.Background(), `
@@ -438,21 +415,15 @@ func Logout(store *Store) http.HandlerFunc {
 	}
 }
 
-// AuthMiddleware authenticates a request from the session cookie (primary)
-// or, during the localStorage→cookie transition only, the legacy
-// Authorization header (AUTH_ACCEPT_HEADER=1). It resolves the admin, loads
-// the session's CSRF token + row id, enforces the idle timeout, and writes
-// last_seen_at throttled (at most once a minute per session) so the Active
-// Sessions panel shows real activity without hammering the DB per request.
+// AuthMiddleware authenticates a request from the HttpOnly session cookie.
+// It resolves the admin, loads the session's CSRF token + row id, enforces
+// the idle timeout, and writes last_seen_at throttled (at most once a minute
+// per session) so the Active Sessions panel shows real activity without
+// hammering the DB per request.
 func AuthMiddleware(store *Store) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			token := readCookieToken(r, sessionCookieName)
-			viaHeader := false
-			if token == "" && acceptLegacyHeader() {
-				token = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-				viaHeader = token != ""
-			}
 			if token == "" {
 				writeError(w, http.StatusUnauthorized, "Missing authorization token")
 				return
@@ -501,7 +472,6 @@ func AuthMiddleware(store *Store) func(http.Handler) http.Handler {
 
 			ctx = context.WithValue(ctx, adminIDKey{}, adminID)
 			ctx = context.WithValue(ctx, csrfTokenKey{}, csrfToken)
-			ctx = context.WithValue(ctx, viaHeaderKey{}, viaHeader)
 			ctx = context.WithValue(ctx, sessionRowIDKey{}, sessionID)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
@@ -517,24 +487,13 @@ func getSessionRowID(r *http.Request) uuid.UUID {
 // RequireCSRF rejects state-changing requests that do not carry the session's
 // CSRF token. It must run AFTER AuthMiddleware (needs the resolved session).
 // GET/HEAD/OPTIONS are never state-changing and skip the check; public
-// (unauthenticated) routes are not mounted behind this middleware.
-//
-// A request authenticated via the legacy Authorization header (transition
-// only, AUTH_ACCEPT_HEADER=1) skips the check: cross-site attackers cannot
-// attach that header to a same-origin fetch, so the cookie auto-attach
-// attack CSRF defends against does not apply to the header transport.
-// Once the transition ends the header transport disappears and every
-// authenticated state-changing request is cookie+CSRF.
+// (unauthenticated) routes are not mounted behind this middleware. The
+// cookie rides along on every same-site request, so every state-changing
+// authed call must prove it came from the SPA via the per-session token.
 func RequireCSRF(store *Store) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			// Transition exemption: header-authed legacy clients.
-			if viaHeader, _ := r.Context().Value(viaHeaderKey{}).(bool); viaHeader && acceptLegacyHeader() {
 				next.ServeHTTP(w, r)
 				return
 			}
