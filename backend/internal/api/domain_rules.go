@@ -135,11 +135,20 @@ func ListDomainRules(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := context.Background()
 
-		var rules []db.DomainRule
+		// Join the owning user so the UI can show who a user-scoped rule
+		// applies to (same shape as ListPeers: user_email/user_full_name).
+		type domainRuleRow struct {
+			db.DomainRule
+			UserEmail    string `json:"user_email"`
+			UserFullName string `json:"user_full_name"`
+		}
+		var rules []domainRuleRow
 		rows, err := store.pool.Query(ctx, `
-			SELECT id, scope, user_id, domain, created_by, created_at
-			FROM domain_block_rules
-			ORDER BY created_at DESC
+			SELECT dr.id, dr.scope, dr.user_id, dr.domain, dr.created_by, dr.created_at,
+			       COALESCE(u.email, ''), COALESCE(u.full_name, '')
+			FROM domain_block_rules dr
+			LEFT JOIN users u ON u.id = dr.user_id
+			ORDER BY dr.created_at DESC
 		`)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to query domain rules")
@@ -148,9 +157,9 @@ func ListDomainRules(store *Store) http.HandlerFunc {
 		defer rows.Close()
 
 		for rows.Next() {
-			var rule db.DomainRule
+			var rule domainRuleRow
 			if err := rows.Scan(&rule.ID, &rule.Scope, &rule.UserID, &rule.Domain,
-				&rule.CreatedBy, &rule.CreatedAt); err != nil {
+				&rule.CreatedBy, &rule.CreatedAt, &rule.UserEmail, &rule.UserFullName); err != nil {
 				writeError(w, http.StatusInternalServerError, "Failed to scan domain rule")
 				return
 			}

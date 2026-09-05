@@ -23,6 +23,8 @@ interface DomainRule {
   id: string
   scope: 'global' | 'user'
   user_id: string | null
+  user_email?: string
+  user_full_name?: string
   domain: string
   created_by: string | null
   created_at: string
@@ -43,7 +45,7 @@ export const Route = createFileRoute('/_authenticated/domain-rules')({
   component: DomainRulesPage,
 })
 
-function DomainRulesPage() {
+export function DomainRulesPage() {
   const [showAddModal, setShowAddModal] = useState(false)
   const [scope, setScope] = useState<'global' | 'user'>('global')
   const [domain, setDomain] = useState('')
@@ -281,7 +283,9 @@ function DomainRulesPage() {
                     <td className="px-5 py-3.5 whitespace-nowrap">
                       <Badge tone={rule.scope === 'global' ? 'accent' : 'info'}>{rule.scope}</Badge>
                     </td>
-                    <td className={tdCls}>{rule.user_id ? 'User' : '—'}</td>
+                    <td className={tdCls}>
+                      {rule.user_full_name || rule.user_email || '—'}
+                    </td>
                     <td className={tdCls}>
                       {new Date(rule.created_at).toLocaleDateString()}
                     </td>
