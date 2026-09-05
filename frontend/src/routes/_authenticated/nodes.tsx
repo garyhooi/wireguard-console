@@ -1,5 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { apiJson } from '../../lib/api'
+import { fmtDateTime } from '../../lib/timezone'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { IconCopy, IconPlus } from '@tabler/icons-react'
@@ -211,7 +212,7 @@ function NodesPage() {
                       </td>
                       <td className={tdCls + ' font-mono tabular-nums'}>{node.server_count}</td>
                       <td className={tdCls + ' font-mono tabular-nums'}>
-                        {node.last_seen_at ? new Date(node.last_seen_at).toLocaleString() : 'never'}
+                        {node.last_seen_at ? fmtDateTime(node.last_seen_at) : 'never'}
                       </td>
                       <td className="px-5 py-3 text-xs text-zinc-500 max-w-[220px] truncate" title={node.last_status}>
                         {node.last_status || '—'}

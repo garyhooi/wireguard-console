@@ -1,5 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { apiFetch, apiJson } from '../../lib/api'
+import { fmtDateTime } from '../../lib/timezone'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import QRCode from 'qrcode'
@@ -571,7 +572,7 @@ function PeersPage() {
                       </Badge>
                     </td>
                     <td className={tdCls + ' font-mono tabular-nums'}>
-                      {peer.last_handshake_at ? new Date(peer.last_handshake_at).toLocaleString() : 'Never'}
+                      {peer.last_handshake_at ? fmtDateTime(peer.last_handshake_at) : 'Never'}
                     </td>
                     <td className="px-5 py-3.5 whitespace-nowrap text-right text-sm">
                       <div className="flex justify-end gap-1">

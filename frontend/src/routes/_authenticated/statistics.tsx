@@ -1,5 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { apiJson } from '../../lib/api'
+import { fmtDateTime, dateKey } from '../../lib/timezone'
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
@@ -182,12 +183,10 @@ export function StatisticsPage() {
   })
 
   const [usageScope, setUsageScope] = useState<'user' | 'peer'>('user')
-  const today = new Date()
-  const sevenAgo = new Date(today)
-  sevenAgo.setDate(sevenAgo.getDate() - 6)
-  const fmtD = (d: Date) => d.toISOString().slice(0, 10)
-  const [fromDate, setFromDate] = useState(fmtD(sevenAgo))
-  const [toDate, setToDate] = useState(fmtD(today))
+  // "Today" in the console timezone (falls back to the legacy UTC key when
+  // no console zone is configured).
+  const [fromDate, setFromDate] = useState(() => dateKey(-6))
+  const [toDate, setToDate] = useState(() => dateKey())
 
   const usageQuery = useQuery<UsageResponse>({
     queryKey: ['stats-usage', usageScope, fromDate, toDate],
@@ -381,7 +380,7 @@ export function StatisticsPage() {
                         <StatusBadge status={peer.status} />
                       </td>
                       <td className="px-5 py-3 text-sm text-zinc-500 font-mono tabular-nums">
-                        {peer.last_handshake_at ? new Date(peer.last_handshake_at).toLocaleString() : 'Never'}
+                        {peer.last_handshake_at ? fmtDateTime(peer.last_handshake_at) : 'Never'}
                       </td>
                     </tr>
                   ))}

@@ -1,5 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { apiJson } from '../../lib/api'
+import { fmtDateTime } from '../../lib/timezone'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 import { IconCopy, IconMailForward, IconMailPlus } from '@tabler/icons-react'
@@ -371,7 +372,7 @@ function UsersPage() {
                       <Badge tone={USER_TONE[user.status] || 'neutral'}>{user.status}</Badge>
                     </td>
                     <td className={tdCls}>
-                      {user.invited_at ? new Date(user.invited_at).toLocaleString() : '-'}
+                      {user.invited_at ? fmtDateTime(user.invited_at) : '-'}
                     </td>
                     <td className="px-5 py-3.5 whitespace-nowrap text-right text-sm">
                       <div className="flex justify-end gap-1">

@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { IconPlus, IconRefresh } from '@tabler/icons-react'
 import { apiJson } from '../../lib/api'
+import { fmtDate } from '../../lib/timezone'
 import {
   Badge,
   EmptyState,
@@ -287,7 +288,7 @@ export function DomainRulesPage() {
                       {rule.user_full_name || rule.user_email || '—'}
                     </td>
                     <td className={tdCls}>
-                      {new Date(rule.created_at).toLocaleDateString()}
+                      {fmtDate(rule.created_at)}
                     </td>
                     <td className="px-5 py-3.5 whitespace-nowrap text-right text-sm font-medium">
                       <button

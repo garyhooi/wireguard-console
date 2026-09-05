@@ -130,13 +130,24 @@ func GetTrafficStats(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := context.Background()
 
+		// Hourly series. When an admin has set a console timezone
+		// (Configuration), buckets align to local hours of that zone so the
+		// chart axis shows local clock times; otherwise UTC hours are kept
+		// (legacy behavior). sampled_at AT TIME ZONE $1 yields the local wall
+		// clock (a plain timestamp) — date_trunc + to_char on that never
+		// depends on the database session timezone.
+		tzName := loadTimezone(ctx, store.pool)
+		if tzName == "" {
+			tzName = "UTC"
+		}
+		hourExpr := "date_trunc('hour', sampled_at AT TIME ZONE $1)"
 		seriesRows, err := store.pool.Query(ctx, `
-			SELECT to_char(date_trunc('hour', sampled_at), 'HH24:00') AS hour,
+			SELECT to_char(`+hourExpr+`, 'HH24:00') AS hour,
 			       SUM(rx_bytes) AS rx, SUM(tx_bytes) AS tx
 			FROM peer_traffic_samples
 			WHERE sampled_at >= now() - interval '24 hours'
 			GROUP BY 1 ORDER BY 1
-		`)
+		`, tzName)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to query traffic series")
 			return

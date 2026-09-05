@@ -1,5 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { apiJson } from '../../lib/api'
+import { dateKey, fmtDateTime } from '../../lib/timezone'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { IconChevronDown, IconChevronRight, IconDownload, IconSearch } from '@tabler/icons-react'
@@ -80,12 +81,8 @@ const PURGE_OPTIONS = [
 type Scope = 'user' | 'peer'
 type StatusFilter = 'all' | 'allowed' | 'blocked'
 
-const today = () => new Date().toISOString().slice(0, 10)
-const daysAgo = (n: number) => {
-  const d = new Date()
-  d.setDate(d.getDate() - n)
-  return d.toISOString().slice(0, 10)
-}
+const today = () => dateKey()
+const daysAgo = (n: number) => dateKey(-n)
 
 export function WebActivityPage() {
   const queryClient = useQueryClient()
@@ -451,7 +448,6 @@ function EntityRow({
 }) {
   const total = row.allowed + row.blocked
   const blockPct = total > 0 ? Math.round((row.blocked / total) * 100) : 0
-  const lastSeen = row.last_seen ? new Date(row.last_seen) : null
   const colSpan = row.scope === 'user' ? 6 : 5
   return (
     <>
@@ -480,7 +476,7 @@ function EntityRow({
           )}
         </td>
         <td className="px-5 py-3 text-sm text-zinc-500 font-mono tabular-nums whitespace-nowrap">
-          {lastSeen ? lastSeen.toLocaleString() : '—'}
+          {row.last_seen ? fmtDateTime(row.last_seen) : '—'}
         </td>
       </tr>
       {open && (
@@ -509,7 +505,7 @@ function EntityRow({
                       {records.map((rec) => (
                         <tr key={rec.id} className="hover:bg-zinc-800/20">
                           <td className="px-5 py-2 text-xs text-zinc-500 font-mono tabular-nums whitespace-nowrap">
-                            {new Date(rec.queried_at).toLocaleString()}
+                            {fmtDateTime(rec.queried_at)}
                           </td>
                           <td className="px-5 py-2 text-zinc-200 font-mono">{rec.host}</td>
                           {row.scope === 'user' && (

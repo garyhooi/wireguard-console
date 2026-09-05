@@ -12,6 +12,7 @@ import {
   thCls,
 } from '../../lib/ui'
 import { apiFetch, apiJson } from '../../lib/api'
+import { fmtDateTime } from '../../lib/timezone'
 
 interface AuditLog {
   id: number
@@ -148,7 +149,7 @@ function AuditLogPage() {
               {logs?.map((log) => (
                 <tr key={log.id} className="hover:bg-zinc-800/30 transition-colors">
                   <td className={tdCls + ' font-mono tabular-nums'}>
-                    {new Date(log.created_at).toLocaleString()}
+                    {fmtDateTime(log.created_at)}
                   </td>
                   <td className="px-5 py-3.5 whitespace-nowrap text-sm text-zinc-200">{log.action}</td>
                   <td className={tdCls}>

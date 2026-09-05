@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { IconArrowRight, IconCirclePlus } from '@tabler/icons-react'
 import { EmptyState, PageHeader, Panel, Skeleton, Stat, StatusBadge } from '../../lib/ui'
 import { apiJson } from '../../lib/api'
+import { fmtDateTime } from '../../lib/timezone'
 
 interface Stats {
   total_peers: number
@@ -138,7 +139,7 @@ export function DashboardPage() {
                       </td>
                       <td className="px-5 py-3 text-sm text-zinc-500 font-mono tabular-nums">
                         {peer.last_handshake_at
-                          ? new Date(peer.last_handshake_at).toLocaleString()
+                          ? fmtDateTime(peer.last_handshake_at)
                           : 'Never'}
                       </td>
                     </tr>

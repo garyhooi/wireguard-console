@@ -20,6 +20,7 @@ import {
   IconX,
 } from '@tabler/icons-react'
 import { apiFetch, clearSessionCache, fetchSession } from '../lib/api'
+import { ensureTimezone } from '../lib/timezone'
 
 interface Stats {
   total_peers: number
@@ -39,6 +40,10 @@ export const Route = createFileRoute('/_authenticated')({
     if (!session) {
       throw redirect({ to: '/login' })
     }
+    // Resolve the admin-configured console timezone (Configuration →
+    // Timezone) before the first authed page renders so every timestamp is
+    // formatted in the chosen zone. Unset → viewer's browser zone.
+    await ensureTimezone()
   },
 })
 

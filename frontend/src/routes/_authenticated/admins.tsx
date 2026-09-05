@@ -24,6 +24,7 @@ import {
 } from '../../lib/ui'
 import { Confirm2FA } from '../../lib/Confirm2FA'
 import { apiJson } from '../../lib/api'
+import { fmtDate } from '../../lib/timezone'
 
 interface Admin {
   id: string
@@ -461,7 +462,7 @@ function AdminsPage() {
                       <StatusBadge status={a.status} />
                     </td>
                     <td className={tdCls + ' font-mono tabular-nums'}>
-                      {a.created_at ? new Date(a.created_at).toLocaleDateString() : '—'}
+                      {a.created_at ? fmtDate(a.created_at) : '—'}
                     </td>
                     <td className="px-5 py-3 text-right text-sm">
                       <div className="flex justify-end gap-1">

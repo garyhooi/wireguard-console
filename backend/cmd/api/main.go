@@ -239,6 +239,8 @@ func main() {
 				r.Patch("/config", api.UpdateConfig(store))
 				r.Get("/config/smtp", api.GetSMTPConfig(store))
 				r.Patch("/config/smtp", api.UpdateSMTPConfig(store))
+				r.Get("/config/timezone", api.GetTimezoneConfig(store))
+				r.Patch("/config/timezone", api.UpdateTimezoneConfig(store))
 				r.Post("/config/email/test", api.SendTestEmail(store))
 
 				// Backup endpoints (download/restore/delete require the

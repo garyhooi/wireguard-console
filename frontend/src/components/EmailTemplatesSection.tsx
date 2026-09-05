@@ -5,6 +5,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { fmtDateTime } from '../lib/timezone'
 import {
   IconAlertCircle,
   IconCheck,
@@ -70,9 +71,7 @@ function metaFor(key: string): TemplateMeta {
 
 function formatUpdatedAt(iso: string): string {
   if (!iso) return ''
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return ''
-  return d.toLocaleString(undefined, {
+  return fmtDateTime(iso, {
     dateStyle: 'medium',
     timeStyle: 'short',
   })
