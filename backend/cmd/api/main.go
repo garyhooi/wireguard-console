@@ -71,6 +71,10 @@ func main() {
 	// Reconcile DB rules into AdGuard periodically so rules can't silently
 	// drift (AGH re-provision, manual AGH edits, partial failed syncs).
 	go worker.NewDomainRuleWorker(conn.Pool(), 5*time.Minute).Start(ctx)
+	// Re-apply locally-managed WireGuard interfaces after host reboots (the
+	// kernel interface + NAT are lost on reboot; wg-helper is passive in
+	// local mode, so this worker restores them — fast at boot, then slow).
+	go worker.NewWGReconcileWorker(conn.Pool(), 2*time.Minute).Start(ctx)
 	// Import AdGuard Home's DNS query log into browsing_records so the Web
 	// Activity page and domain statistics have data (see worker/browse.go).
 	go worker.NewBrowseWorker(conn.Pool()).Start(ctx)

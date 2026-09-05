@@ -14,11 +14,13 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,6 +34,58 @@ var (
 	baseURL string
 	binPath string
 )
+
+// Fake wg-helper: a unix-socket HTTP server that records /apply and /remove
+// calls so the suite can assert the API actually pushes WireGuard state
+// (including the boot-time WG reconcile worker).
+var (
+	fakeHelperMu      sync.Mutex
+	fakeHelperApplies int
+	fakeHelperRemoves int
+)
+
+// startFakeWGHelper listens on the given unix socket and answers the
+// wg-helper endpoints. Returns a cleanup func.
+func startFakeWGHelper(sock string) func() {
+	_ = os.Remove(sock)
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		fmt.Println("fake helper listen:", err)
+		os.Exit(1)
+	}
+	mux := http.NewServeMux()
+	apply := func(w http.ResponseWriter, r *http.Request) {
+		fakeHelperMu.Lock()
+		fakeHelperApplies++
+		fakeHelperMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"status":"ok","warnings":[]}`)
+	}
+	mux.HandleFunc("/apply", apply)
+	mux.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"peers":[]}`)
+	})
+	mux.HandleFunc("/remove", func(w http.ResponseWriter, r *http.Request) {
+		fakeHelperMu.Lock()
+		fakeHelperRemoves++
+		fakeHelperMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"status":"removed","warnings":[]}`)
+	})
+	srv := &http.Server{Handler: mux}
+	go srv.Serve(l)
+	return func() {
+		srv.Close()
+		_ = os.Remove(sock)
+	}
+}
+
+func fakeApplyCount() int {
+	fakeHelperMu.Lock()
+	defer fakeHelperMu.Unlock()
+	return fakeHelperApplies
+}
 
 func TestMain(m *testing.M) {
 	dbURL := os.Getenv("TEST_DATABASE_URL")
@@ -66,11 +120,14 @@ func TestMain(m *testing.M) {
 
 	port := "18099"
 	baseURL = "http://127.0.0.1:" + port
+	helperSock := "/tmp/wgc-e2e-helper.sock"
+	cleanupHelper := startFakeWGHelper(helperSock)
+	defer cleanupHelper()
 	cmd := exec.Command(binPath)
 	cmd.Env = append(os.Environ(),
 		"DATABASE_URL="+dbURL,
 		"PORT="+port,
-		"WG_HELPER_SOCKET=/tmp/wgc-e2e-helper.sock",
+		"WG_HELPER_SOCKET="+helperSock,
 		"APP_ENCRYPTION_KEY="+randomHex(32),
 		"SESSION_SIGNING_KEY="+randomHex(32),
 		"CONSOLE_DOMAIN=console.test",
@@ -256,6 +313,13 @@ func TestEndToEnd(t *testing.T) {
 	}
 	if pub, _ := serverRows[0]["server_public_key"].(string); len(pub) < 20 {
 		t.Fatalf("server public key not generated: %q", pub)
+	}
+
+	// The API must push the server's state to wg-helper (fake helper counts
+	// /apply). This covers both the create-path sync and the boot reconcile
+	// worker wiring.
+	if fakeApplyCount() < 1 {
+		t.Fatalf("expected wg-helper /apply after server create, got %d", fakeApplyCount())
 	}
 
 	// User invite -> link

@@ -122,6 +122,56 @@ func syncServerLogged(ctx context.Context, pool *pgxpool.Pool, serverID uuid.UUI
 	return ""
 }
 
+// SyncAllLocalServersToKernel re-applies the full desired state of every
+// active locally-managed server to wg-helper. This is what repairs the
+// tunnel after a host reboot (kernel interfaces + iptables NAT are lost) —
+// wg-helper is passive in local mode and only acts when the API pushes state,
+// so without this nothing would restore the VPN until an admin touched a
+// server/peer. Returns the number of servers pushed and the first error (if
+// any); per-server failures are logged but do not stop the rest.
+func SyncAllLocalServersToKernel(pool *pgxpool.Pool) (int, error) {
+	if os.Getenv("WG_HELPER_SOCKET") == "" {
+		return 0, nil // local development without wg-helper
+	}
+
+	ctx := context.Background()
+	rows, err := pool.Query(ctx, `
+		SELECT id FROM servers
+		WHERE status = 'active' AND managed_mode = 'local'
+		ORDER BY created_at
+	`)
+	if err != nil {
+		return 0, fmt.Errorf("query local servers: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	applied := 0
+	var firstErr error
+	for _, id := range ids {
+		if err := syncServerToKernel(ctx, pool, id); err != nil {
+			log.Printf("wg reconcile failed for server %s: %v", id, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		applied++
+	}
+	return applied, firstErr
+}
+
 // removeServerFromKernel tears down the host interface of a deleted server.
 func removeServerFromKernel(ctx context.Context, pool *pgxpool.Pool, serverID uuid.UUID) error {
 	var ifaceName string
