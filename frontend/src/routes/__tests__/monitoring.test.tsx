@@ -77,41 +77,18 @@ const localStatus = {
   },
 }
 
-const serversFixture = [
-  {
-    id: 's1',
-    name: 'Singapore VPN',
-    public_endpoint: '13.212.0.1:51820',
-    managed_mode: 'local',
-    node_id: null,
-    status: 'active',
-  },
-  {
-    id: 's2',
-    name: 'Tokyo VPN',
-    public_endpoint: 'tokyo.example.com:51820',
-    managed_mode: 'remote',
-    node_id: 'n1',
-    status: 'active',
-  },
-]
-
 describe('MonitoringPage', () => {
   beforeEach(() => {
     localStorage.setItem('token', 'test-token')
   })
 
-  function stubFetch(overrides: { local?: () => Promise<Response>; servers?: unknown[] } = {}) {
-    const servers = overrides.servers ?? serversFixture
+  function stubFetch(overrides: { local?: () => Promise<Response> } = {}) {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (url: string) => {
         if (url.includes('/api/nodes/local/status')) {
           if (overrides.local) return overrides.local()
           return { ok: true, status: 200, json: async () => localStatus } as Response
-        }
-        if (url.includes('/api/servers')) {
-          return { ok: true, status: 200, json: async () => servers } as Response
         }
         // /api/nodes
         return { ok: true, status: 200, json: async () => [nodeWithMetrics, nodeNoMetrics] } as Response
@@ -126,11 +103,6 @@ describe('MonitoringPage', () => {
     await waitFor(() => expect(screen.getByText('Singapore Node')).toBeTruthy())
     expect(screen.getByText('Local host (console)')).toBeTruthy()
     expect(screen.getByText('Old Agent Node')).toBeTruthy()
-
-    // Server roster: local server under the console host card, remote
-    // server under its node card
-    expect(screen.getByText('Singapore VPN')).toBeTruthy()
-    expect(screen.getByText('Tokyo VPN')).toBeTruthy()
 
     // CPU percent rendered
     expect(screen.getByText('12.5%')).toBeTruthy()

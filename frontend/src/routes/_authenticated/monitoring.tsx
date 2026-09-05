@@ -49,18 +49,6 @@ interface Node {
   metrics_at?: string | null
 }
 
-// ServerRow is the subset of /api/servers the page uses to say *which* WG
-// servers run on each machine (local servers → console host card, remote
-// servers → their node's card).
-interface ServerRow {
-  id: string
-  name: string
-  public_endpoint?: string
-  managed_mode: string
-  node_id: string | null
-  status: string
-}
-
 interface LocalStatus {
   hostname?: string
   is_local?: boolean
@@ -185,7 +173,6 @@ function MetricsCard({
   online,
   lastStatus,
   serverCount,
-  servers,
   metrics,
   metricsAt,
   stale,
@@ -195,7 +182,6 @@ function MetricsCard({
   online: boolean
   lastStatus?: string
   serverCount?: number
-  servers?: ServerRow[]
   metrics?: Metrics
   metricsAt?: string | null
   stale?: boolean
@@ -208,7 +194,6 @@ function MetricsCard({
   )
   const disks = metrics?.disk ?? []
   const opacity = stale ? 'opacity-60' : ''
-  const activeServers = (servers ?? []).filter((s) => s.status === 'active')
   return (
     <Panel className={`flex flex-col ${opacity}`}>
       <header className="flex items-start justify-between gap-3 px-5 pt-4 pb-3 border-b border-zinc-800/60">
@@ -225,22 +210,6 @@ function MetricsCard({
         </div>
         <StatusBadge status={online ? 'ok' : stale ? 'warning' : 'error'} />
       </header>
-
-      {/* Which WG servers run on this machine */}
-      {activeServers.length > 0 && (
-        <div className="px-5 pt-3">
-          <ul className="space-y-1">
-            {activeServers.map((s) => (
-              <li key={s.id} className="flex items-baseline justify-between gap-3 text-xs">
-                <span className="text-zinc-300 truncate" title={s.name}>{s.name}</span>
-                <span className="text-zinc-600 font-mono text-[11px] truncate shrink-0 max-w-[45%]" title={s.public_endpoint}>
-                  {s.public_endpoint}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
 
       {!hasMetrics ? (
         <div className="px-5 py-6 text-sm text-zinc-500">
@@ -342,14 +311,6 @@ export function MonitoringPage() {
     refetchInterval: 15000,
   })
 
-  // Every WG server, so each card can say which servers run on its machine
-  // (managed_mode local → console host; remote → that node).
-  const { data: servers = [], refetch: refetchServers } = useQuery<ServerRow[]>({
-    queryKey: ['servers'],
-    queryFn: () => fetchJSON<ServerRow[]>('/api/servers'),
-    refetchInterval: 15000,
-  })
-
   // Console host card: hide silently when wg-helper isn't reachable (dev
   // without the helper, or pre-monitoring helper).
   const { data: local, isLoading: localLoading, refetch: refetchLocal } = useQuery<LocalStatus | null>({
@@ -364,12 +325,9 @@ export function MonitoringPage() {
     retry: false,
   })
 
-  const localServers = servers.filter((s) => s.managed_mode === 'local' && s.status === 'active')
-
   const isLoading = nodesLoading && localLoading
   const refresh = () => {
     refetchNodes()
-    refetchServers()
     refetchLocal()
     setTick((n) => n + 1)
   }
@@ -405,14 +363,12 @@ export function MonitoringPage() {
         />
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {/* Console host card pinned first — hosts every local-mode server */}
+          {/* Console host card pinned first */}
           {local?.metrics && (
             <MetricsCard
               title={local.hostname || 'Local host (console)'}
               sub="Console host"
               online={isOnline(local.metrics_at)}
-              serverCount={localServers.length}
-              servers={localServers}
               metrics={local.metrics}
               metricsAt={local.metrics_at}
             />
@@ -420,7 +376,6 @@ export function MonitoringPage() {
 
           {(nodes || []).map((node) => {
             const online = isOnline(node.metrics_at, node.last_seen_at)
-            const nodeServers = servers.filter((s) => s.node_id === node.id && s.status === 'active')
             return (
               <MetricsCard
                 key={node.id}
@@ -428,8 +383,7 @@ export function MonitoringPage() {
                 sub={node.location || undefined}
                 online={online}
                 lastStatus={node.last_status}
-                serverCount={nodeServers.length || node.server_count}
-                servers={nodeServers}
+                serverCount={node.server_count}
                 metrics={node.metrics}
                 metricsAt={node.metrics_at}
                 stale={!online}
