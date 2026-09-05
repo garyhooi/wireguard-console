@@ -61,6 +61,22 @@ async function copyText(text: string): Promise<boolean> {
 const REPO_OWNER = 'garyhooi'
 const REPO_NAME = 'wireguard-console'
 
+/**
+ * Normalize a version for display: strip a leading "v" so the UI can always
+ * prefix exactly one. GitHub release tags are "v1.0.0" while APP_VERSION
+ * (from the repo VERSION file) is "1.0.0" — rendering v${latest} verbatim
+ * produced the double-v ("vv1.0.0").
+ */
+export function stripVersionPrefix(v: string | undefined | null): string {
+  return (v || '').trim().replace(/^v/i, '')
+}
+
+/** Display form: exactly one leading "v" ("v1.0.0"), "" when empty. */
+function displayVersion(v: string): string {
+  const bare = stripVersionPrefix(v)
+  return bare ? `v${bare}` : ''
+}
+
 // ---------------------------------------------------------------------------
 // ConsoleVersionControl — current version + auto-detected GitHub latest
 // release, rendered in the top bar of the authenticated shell. Shows a pill
@@ -87,6 +103,9 @@ export function ConsoleVersionControl() {
   // Display/copy the server-provided one-liner (kept in sync with README +
   // install.sh); the exported constant is the fallback while loading/failed.
   const installCmd = data?.install_cmd || INSTALL_CMD
+  // Normalize once so a leading "v" (GitHub tags) never double-prefixes.
+  const currentV = displayVersion(data?.current || '')
+  const latestV = displayVersion(data?.latest || '')
 
   const onCopyInstall = async () => {
     const ok = await copyText(installCmd)
@@ -110,24 +129,24 @@ export function ConsoleVersionControl() {
           onClick={() => setShowModal(true)}
           title={
             canCheck
-              ? `v${data!.current} running · latest release v${data!.latest} — click for update info`
+              ? `${currentV} running · latest release ${latestV} — click for update info`
               : `Version ${data?.current ?? '…'} — click for release info`
           }
           aria-label={`Version ${data?.current ?? 'unknown'}${
-            hasUpdate && data?.latest ? ` — update available: v${data.latest}` : ''
+            hasUpdate && latestV ? ` — update available: ${latestV}` : ''
           }`}
           className="hidden md:inline-flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300 rounded-md px-1.5 py-1 -mx-1.5 transition-colors"
         >
           <IconPackage size={13} stroke={1.7} aria-hidden="true" />
-          <span className="font-mono tabular-nums">v{data?.current || '…'}</span>
+          <span className="font-mono tabular-nums">{currentV || '…'}</span>
         </button>
 
         {/* Update available → opens the modal with backup + install steps */}
-        {hasUpdate && data?.latest && (
+        {hasUpdate && latestV && (
           <button
             type="button"
             onClick={() => setShowModal(true)}
-            title={`v${data.latest} is available — you are on v${data.current}`}
+            title={`${latestV} is available — you are on ${currentV}`}
             className="inline-flex items-center gap-1.5 text-xs font-medium rounded-full px-2.5 py-1 bg-amber-500/10 text-amber-300 ring-1 ring-inset ring-amber-500/30 hover:bg-amber-500/20 transition-colors"
           >
             <IconAlertTriangle size={13} stroke={1.8} aria-hidden="true" />
@@ -140,7 +159,7 @@ export function ConsoleVersionControl() {
           href={GITHUB_RELEASES_URL}
           target="_blank"
           rel="noopener noreferrer"
-          title={`WireGuard Console releases (latest: ${data?.latest ? 'v' + data.latest : '—'})`}
+          title={`WireGuard Console releases (latest: ${latestV || '—'})`}
           aria-label="View the latest release on GitHub"
           className="inline-flex items-center gap-1.5 text-xs rounded-md border border-zinc-700 hover:border-zinc-500 hover:text-zinc-100 text-zinc-400 px-2.5 py-1.5 transition-colors"
         >
@@ -154,9 +173,9 @@ export function ConsoleVersionControl() {
         open={showModal}
         onClose={() => setShowModal(false)}
         title={
-          hasUpdate && data?.latest
-            ? `Update available: v${data.current} → v${data.latest}`
-            : `WireGuard Console v${data?.current || '…'}`
+          hasUpdate && latestV
+            ? `Update available: ${currentV} → ${latestV}`
+            : `WireGuard Console ${currentV || '…'}`
         }
         description="Updates run on the server, not from this page. The console does not touch the server's files — an admin runs two commands over SSH."
       >
@@ -166,13 +185,11 @@ export function ConsoleVersionControl() {
             <div className="grid grid-cols-2 gap-3">
               <div className="rounded-md border border-zinc-800 bg-zinc-950/60 px-3 py-2">
                 <p className="text-[11px] uppercase tracking-wider text-zinc-500">Current</p>
-                <p className="mt-1 font-mono text-sm text-zinc-200">v{data.current}</p>
+                <p className="mt-1 font-mono text-sm text-zinc-200">{currentV || '—'}</p>
               </div>
               <div className="rounded-md border border-zinc-800 bg-zinc-950/60 px-3 py-2">
                 <p className="text-[11px] uppercase tracking-wider text-zinc-500">Latest release</p>
-                <p className="mt-1 font-mono text-sm text-teal-300">
-                  {data.latest ? `v${data.latest}` : '—'}
-                </p>
+                <p className="mt-1 font-mono text-sm text-teal-300">{latestV || '—'}</p>
               </div>
             </div>
 
@@ -180,7 +197,7 @@ export function ConsoleVersionControl() {
               <p className="text-xs text-amber-300/90 flex items-start gap-1.5">
                 <IconAlertTriangle size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
                 Could not reach GitHub to check the latest release ({data.check_error}). You are
-                still on v{data.current}; try again in a bit or open the Releases page directly.
+                still on {currentV}; try again in a bit or open the Releases page directly.
               </p>
             )}
 
@@ -238,8 +255,7 @@ export function ConsoleVersionControl() {
                   {copyError && <p className="mt-2 pl-7 text-xs text-red-400">{copyError}</p>}
                   <p className="mt-2 text-xs text-zinc-500 pl-7 leading-relaxed">
                     Re-running the installer updates the stack in place — your admins, peers and
-                    data are kept. After it finishes, refresh this page to see v
-                    {data.latest}.
+                    data are kept. After it finishes, refresh this page to see {latestV}.
                   </p>
                 </div>
 
@@ -259,7 +275,7 @@ export function ConsoleVersionControl() {
                       rel="noopener noreferrer"
                       className="text-teal-400 hover:text-teal-300 underline underline-offset-2 inline-flex items-center gap-0.5"
                     >
-                      v{data.latest} on GitHub <IconExternalLink size={11} aria-hidden="true" />
+                      {latestV} on GitHub <IconExternalLink size={11} aria-hidden="true" />
                     </a>
                   </p>
                 </div>
