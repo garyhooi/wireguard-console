@@ -48,13 +48,13 @@ This installs Docker, WireGuard tools and the stack, provisions AdGuard Home, op
 
 **No domain?** Enter the server's public IP when prompted. HTTPS then uses Caddy's internal CA — your browser shows a one-time self-signed warning (the connection is still encrypted). For a trusted certificate without buying a domain, use `CONSOLE_DOMAIN=<your-ip>.sslip.io bash install.sh`.
 
-**Behind Cloudflare?** If the console is fronted by Cloudflare with the SSL/TLS mode set to **Flexible** (or "Automatic SSL/TLS" resolving to Flexible — Cloudflare reaches your server over plain HTTP), set `WGCONSOLE_TLS=external-proxy`:
+**Behind Cloudflare?** The installer detects it automatically: when the domain you enter resolves to Cloudflare's IP ranges (i.e. it's proxied through Cloudflare, "orange-cloud"), the installer asks whether Cloudflare is in **Flexible / Automatic SSL** mode — answer **Y** (or just press Enter) and it configures `WGCONSOLE_TLS=external-proxy` for you. If the server has no interactive terminal, it assumes Flexible and enables that mode with a warning. To set it explicitly instead:
 
 ```bash
 CONSOLE_DOMAIN=vpn.example.com WGCONSOLE_TLS=external-proxy bash install.sh
 ```
 
-In that mode Caddy serves plain HTTP only (Cloudflare terminates HTTPS at its edge) and — crucially — **does not redirect HTTP→HTTPS**. Without this, Caddy answers Cloudflare's plain-HTTP origin fetch with `308 → https://…`, Cloudflare forwards it, and the browser loops with `ERR_TOO_MANY_REDIRECTS`. Cloudflare's own proxy IP ranges are trusted for `X-Forwarded-*` headers so the API still sees the original client IP and scheme. Cloudflare reaches your server on **port 80 only** (Flexible mode can't reach an HTTPS origin, and the console is deliberately not served on 443 in this mode). If you can use Cloudflare **Full** instead, just leave `WGCONSOLE_TLS` empty — Caddy's own certificate then serves the origin over 443.
+With Cloudflare in **Flexible** mode (Cloudflare terminates HTTPS at its edge and reaches your server over plain HTTP), Caddy serves plain HTTP only and — crucially — **does not redirect HTTP→HTTPS**. Without this, Caddy answers Cloudflare's plain-HTTP origin fetch with `308 → https://…`, Cloudflare forwards it, and the browser loops with `ERR_TOO_MANY_REDIRECTS`. Cloudflare's own proxy IP ranges are trusted for `X-Forwarded-*` headers so the API still sees the original client IP and scheme. Cloudflare reaches your server on **port 80 only** (Flexible mode can't reach an HTTPS origin, and the console is deliberately not served on 443 in this mode). If you can use Cloudflare **Full** instead, just leave `WGCONSOLE_TLS` empty — Caddy's own certificate then serves the origin over 443.
 
 To add more operators: **System → Admins → Invite Admin**. Add VPN users under **Directory → VPN Users**, then issue peers to them.
 

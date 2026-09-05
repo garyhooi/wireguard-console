@@ -34,6 +34,64 @@ info()  { echo -e "\033[1;34m[info]\033[0m  $*"; }
 warn()  { echo -e "\033[1;33m[warn]\033[0m  $*"; }
 error() { echo -e "\033[1;31m[error]\033[0m $*" >&2; exit 1; }
 
+# Cloudflare's public IPv4 ranges (must match frontend/Caddyfile.cloudflare).
+# A domain whose A records all live inside these is fronted by Cloudflare
+# ("orange-cloud" proxied), which is how we can tell install.sh's one-liner
+# users they are very likely behind Cloudflare.
+CLOUDFLARE_RANGES="173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22"
+
+ip_to_int() {
+  local ip="$1" a b c d
+  IFS=. read -r a b c d <<< "$ip"
+  echo $(( (10#$a << 24) + (10#$b << 16) + (10#$c << 8) + 10#$d ))
+}
+
+# usage: is_cloudflare_ip <ipv4>  → 0 if the IP is inside Cloudflare's ranges
+is_cloudflare_ip() {
+  local ip_int net mask hostbits net_int range
+  ip_int="$(ip_to_int "$1")"
+  for range in $CLOUDFLARE_RANGES; do
+    net="${range%/*}"; mask="${range#*/}"
+    hostbits=$(( 32 - mask ))
+    net_int="$(ip_to_int "$net")"
+    if (( (ip_int >> hostbits) == (net_int >> hostbits) )); then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# usage: domain_is_cloudflare_proxied <domain> → 0 if its public A records
+# resolve inside Cloudflare's ranges (i.e. Cloudflare is in front of it).
+# Unresolvable/AAAA-only domains return 1 (fail closed to domain mode).
+# Resolution order: getent (glibc, the Ubuntu target) → dig → host →
+# nslookup → python3, so it also works on macOS for local testing.
+domain_is_cloudflare_proxied() {
+  local domain="$1" ips ip found=1
+  if command -v getent >/dev/null 2>&1; then
+    ips="$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u)"
+  elif command -v dig >/dev/null 2>&1; then
+    ips="$(dig +short A "$domain" 2>/dev/null | grep -E '^[0-9]+(\.[0-9]+){3}$' | sort -u)"
+  elif command -v host >/dev/null 2>&1; then
+    ips="$(host -t A "$domain" 2>/dev/null | awk '/has address/{print $NF}' | sort -u)"
+  elif command -v nslookup >/dev/null 2>&1; then
+    ips="$(nslookup "$domain" 2>/dev/null | awk '/^Address: /{print $2}' | grep -E '^[0-9]+(\.[0-9]+){3}$' | sort -u)"
+  elif command -v python3 >/dev/null 2>&1; then
+    ips="$(python3 -c "import socket,sys; print('\\n'.join({r[4][0] for r in socket.getaddrinfo(sys.argv[1], 443, socket.AF_INET)}))" "$domain" 2>/dev/null | sort -u)"
+  else
+    return 1
+  fi
+  [[ -z "${ips:-}" ]] && return 1
+  for ip in $ips; do
+    if is_cloudflare_ip "$ip"; then
+      found=0
+    else
+      return 1   # any non-Cloudflare address means it's NOT fronted by CF
+    fi
+  done
+  return "$found"
+}
+
 # ---------------------------------------------------------------------------
 # 1. Must be root (needs apt, systemd, Docker, firewall access)
 # ---------------------------------------------------------------------------
@@ -155,6 +213,33 @@ if [[ "${UPGRADE}" == true ]] \
     sed -i "s|^WGCONSOLE_TLS=.*|WGCONSOLE_TLS=internal|" .env
   fi
 
+  # Self-heal 2: an existing domain-mode install whose domain now resolves
+  # to Cloudflare (or was always behind it) and whose .env has no TLS mode
+  # is stuck in the ERR_TOO_MANY_REDIRECTS loop under Flexible SSL. Same
+  # logic as the fresh-install branch: interactive confirm, headless
+  # assumes Flexible. Never overrides a WGCONSOLE_TLS the user set.
+  if [[ -z "${WGCONSOLE_TLS:-}" ]] \
+     && [[ "${CONSOLE_DOMAIN:-}" == *.* ]] \
+     && domain_is_cloudflare_proxied "${CONSOLE_DOMAIN:-}"; then
+    if true 2>/dev/null < /dev/tty; then
+      read -rp "The domain ${CONSOLE_DOMAIN} is fronted by Cloudflare. Is Cloudflare set to Flexible / Automatic SSL (reaches this server over plain HTTP on port 80)? [Y/n]: " CF_ANSWER < /dev/tty || true
+      case "${CF_ANSWER:-y}" in
+        y|Y|yes|YES|"")
+          warn "Enabling WGCONSOLE_TLS=external-proxy (fixes the HTTP→HTTPS redirect loop behind Cloudflare Flexible)."
+          sed -i "s|^WGCONSOLE_TLS=.*|WGCONSOLE_TLS=external-proxy|" .env
+          ;;
+        *)
+          info "Keeping domain mode. Set WGCONSOLE_TLS=external-proxy in .env if Cloudflare is actually in Flexible mode."
+          ;;
+      esac
+    else
+      warn "CONSOLE_DOMAIN (${CONSOLE_DOMAIN}) resolves to Cloudflare IPs but no interactive terminal is available."
+      warn "Assuming Cloudflare 'Flexible' mode and enabling WGCONSOLE_TLS=external-proxy (Caddy serves plain HTTP on :80, no redirects)."
+      warn "If Cloudflare is set to 'Full' (HTTPS origin), set WGCONSOLE_TLS= in .env and re-run this installer."
+      sed -i "s|^WGCONSOLE_TLS=.*|WGCONSOLE_TLS=external-proxy|" .env
+    fi
+  fi
+
   # Reject a nonsense combination instead of silently mis-deploying.
   if [[ "${WGCONSOLE_TLS:-}" == "external-proxy" ]] && [[ "${CONSOLE_DOMAIN:-}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
     error "WGCONSOLE_TLS=external-proxy needs a real domain (Cloudflare fronts a hostname, not a raw IP). CONSOLE_DOMAIN=${CONSOLE_DOMAIN}"
@@ -204,24 +289,42 @@ else
   WG_PUBLIC_ENDPOINT="${WG_PUBLIC_ENDPOINT:-${CONSOLE_DOMAIN}:${WG_DEFAULT_PORT}}"
 
   # TLS mode selection. Priority:
-  #   1. WGCONSOLE_TLS pre-set by the caller (e.g.
-  #      "external-proxy" for a Cloudflare-fronted console) — respected.
+  #   1. WGCONSOLE_TLS pre-set by the caller — respected.
   #   2. A bare IPv4 CONSOLE_DOMAIN → "internal": IP-only deployments get
   #      Caddy's internal CA — public certificate authorities can't issue
   #      certificates for bare IP addresses. For a fully trusted
   #      certificate without owning a domain, use an sslip.io address
   #      instead, e.g. 203.0.113.5.sslip.io (works exactly like a domain).
-  #   3. Otherwise empty → domain mode (public ACME certificates).
-  #
-  #   "external-proxy" is for when the console sits behind Cloudflare in
-  #   Flexible / "Automatic SSL/TLS" mode: Cloudflare terminates TLS and
-  #   reaches this server over plain HTTP on :80. Caddy must then serve
-  #   HTTP only and never redirect to HTTPS — the automatic redirect is
-  #   what makes browsers loop with ERR_TOO_MANY_REDIRECTS (Cloudflare
-  #   fetches :80 → Caddy 308s to https → repeat).
+  #   3. CONSOLE_DOMAIN resolves inside Cloudflare's IP ranges (orange-cloud
+  #      proxied, e.g. vpn.example.com → 104.16.x/172.64.x) and the caller
+  #      did NOT pre-set WGCONSOLE_TLS → "external-proxy": such a domain is
+  #      almost always Cloudflare "Flexible"/"Automatic SSL/TLS", where
+  #      Cloudflare terminates HTTPS and reaches this server over plain
+  #      HTTP on :80. Caddy must then serve HTTP only and never redirect to
+  #      HTTPS — the automatic redirect is exactly what makes browsers loop
+  #      with ERR_TOO_MANY_REDIRECTS (Cloudflare fetches :80 → Caddy 308s
+  #      to https → repeat). DNS can't tell Flexible from Full (HTTPS
+  #      origin), so an interactive terminal is asked to confirm; headless
+  #      installs assume Flexible (the common case for a proxied domain)
+  #      and print how to switch to domain mode.
+  #   4. Otherwise empty → domain mode (public ACME certificates).
   if [[ -z "${WGCONSOLE_TLS:-}" ]] && [[ "${CONSOLE_DOMAIN}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
     WGCONSOLE_TLS="internal"
     info "IPv4 address detected — HTTPS will use Caddy's internal CA (browsers will show a self-signed certificate warning)."
+  elif [[ -z "${WGCONSOLE_TLS:-}" ]] && [[ "${CONSOLE_DOMAIN}" == *.* ]] \
+     && domain_is_cloudflare_proxied "${CONSOLE_DOMAIN}"; then
+    if true 2>/dev/null < /dev/tty; then
+      read -rp "The domain ${CONSOLE_DOMAIN} is fronted by Cloudflare. Is Cloudflare set to Flexible / Automatic SSL (reaches this server over plain HTTP on port 80)? [Y/n]: " CF_ANSWER < /dev/tty || true
+      case "${CF_ANSWER:-y}" in
+        y|Y|yes|YES|"") WGCONSOLE_TLS="external-proxy" ;;
+        *) info "Keeping domain mode (Caddy obtains its own certificate and serves HTTPS). Use WGCONSOLE_TLS=external-proxy if Cloudflare is actually in Flexible mode." ;;
+      esac
+    else
+      warn "CONSOLE_DOMAIN (${CONSOLE_DOMAIN}) resolves to Cloudflare IPs, but no interactive terminal is available."
+      warn "Assuming Cloudflare 'Flexible' mode and enabling WGCONSOLE_TLS=external-proxy (Caddy serves plain HTTP on :80, no redirects)."
+      warn "If Cloudflare is set to 'Full' (HTTPS origin) instead, set WGCONSOLE_TLS= in .env and re-run this installer."
+      WGCONSOLE_TLS="external-proxy"
+    fi
   fi
   if [[ "${WGCONSOLE_TLS:-}" == "external-proxy" ]]; then
     if [[ "${CONSOLE_DOMAIN}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
