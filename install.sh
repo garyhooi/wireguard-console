@@ -10,9 +10,12 @@
 # enables IP forwarding (required for WireGuard routing), clones/updates
 # this repo into /opt/wireguard-console, generates secrets on first
 # install, opens the firewall if ufw is active (including the interface-
-# scoped DNS exception so tunnel peers can reach AdGuard on the gateway),
-# and starts the stack with Docker Compose. Re-running it later updates an
-# existing install instead of reinstalling.
+# scoped DNS exception so tunnel peers can reach AdGuard on the gateway,
+# and the docker-bridge exception so the api container can reach AdGuard's
+# management API), and starts the stack with Docker Compose. AdGuard is
+# provisioned on first install and left untouched when already healthy on
+# updates (configure-adguard.sh). Re-running it later updates an existing
+# install instead of reinstalling.
 #
 # Read before piping this into root bash — that's the whole point of it
 # being a plain, commented script instead of a binary.
@@ -584,6 +587,17 @@ if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
     ufw allow in on "${iface}" to any port 53 proto tcp comment 'WG peers -> AdGuard DNS (TCP)' >/dev/null
   done
   info "Allowed DNS (53) from WireGuard peers to AdGuard on the tunnel gateway (interface-scoped: ${WG_IFACES}); port 53 stays closed to the internet."
+
+  # The api container reaches AdGuard Home (host network) through the docker
+  # bridge gateway (172.x.0.1). ufw default-deny incoming would drop that
+  # INPUT traffic, so the console shows "AdGuard unreachable" and can never
+  # enforce/re-push domain rules even though AdGuard is healthy. Docker
+  # bridge subnets vary per host (172.17/172.18/...), so allow the whole
+  # private 172.16.0.0/12 block on port 3000 ONLY — AdGuard's management API
+  # stays closed to the internet (AdGuard is on the host network, not the
+  # bridge, so this only ever matches docker-originated traffic).
+  ufw allow from 172.16.0.0/12 to any port 3000 proto tcp comment 'docker bridge -> AdGuard API' >/dev/null
+  info "Allowed docker bridge -> AdGuard API (:3000) so the console can enforce domain rules."
 fi
 
 # ---------------------------------------------------------------------------
@@ -600,13 +614,18 @@ if ! docker compose up -d --build; then
 fi
 
 # ---------------------------------------------------------------------------
-# 10b. Provision AdGuard Home (first run): write AdGuardHome.yaml directly
+# 10b. AdGuard Home. On a first install this writes AdGuardHome.yaml directly
 #      into its config volume so DNS filtering + the block page work out of
-#      the box. Idempotent — safe to re-run on updates.
+#      the box. On an update, configure-adguard.sh detects a healthy,
+#      authenticating AdGuard and skips the rewrite — a re-provision would
+#      wipe AdGuard's live user_rules (empty on a fresh config) and restart
+#      the container, which is exactly the "AdGuard unavailable after every
+#      update" gap. It also self-heals the docker bridge → host :3000 ufw
+#      path the api container needs to enforce rules.
 # ---------------------------------------------------------------------------
-info "Provisioning AdGuard Home..."
+info "Configuring AdGuard Home (skips a healthy AdGuard)..."
 if ! bash configure-adguard.sh 2>&1 | sed 's/^/  [adguard] /'; then
-  warn "AdGuard provisioning reported a problem — domain blocking may not work until"
+  warn "AdGuard configuration reported a problem — domain blocking may not work until"
   warn "it is fixed. Re-run: sudo bash ${INSTALL_DIR}/configure-adguard.sh"
 fi
 
