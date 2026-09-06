@@ -4,8 +4,20 @@
 # Console. Writes AdGuardHome.yaml directly into the config volume, so it
 # never depends on the flaky first-run wizard API.
 #
-#   sudo bash configure-adguard.sh           # (re)write config, start AGH
+#   sudo bash configure-adguard.sh           # provision, or skip if healthy
+#   sudo bash configure-adguard.sh --force   # (re)write config, start AGH
 #   sudo bash configure-adguard.sh --diag    # print state, don't change
+#
+# Default behavior: if AdGuard is already up AND authenticates with the .env
+# credentials (HTTP 200 on /control/status), the config is left alone — an
+# update must not stop/rewrite a healthy AdGuard, because a fresh
+# AdGuardHome.yaml starts with user_rules: [] and wipes every domain-block
+# rule (they only live in AdGuard's runtime config, not the DB-backed console
+# re-push). Rewriting from scratch happens only when AdGuard is missing,
+# unreachable, or its password no longer matches .env (use --force to demand
+# a rewrite). While here, if ufw is active the script also opens the docker
+# bridge → host :3000 path so the api container can reach AdGuard's API
+# (default-deny INPUT otherwise drops it and rules can never be enforced).
 #
 # Existing AdGuard configs (unknown password) are replaced; blocked
 # domains resolve to 10.8.0.1 where Caddy serves the branded block page.
@@ -14,6 +26,11 @@ set -euo pipefail
 COMPOSE_DIR="${COMPOSE_DIR:-/opt/wireguard-console}"
 ENV_FILE="${ENV_FILE:-$COMPOSE_DIR/.env}"
 MODE="${1:-}"
+FORCE=false
+if [[ "${MODE}" == "--force" ]]; then
+  FORCE=true
+  MODE=""
+fi
 
 error() { echo -e "\033[1;31m[error]\033[0m $*" >&2; exit 1; }
 info()  { echo -e "\033[1;34m[info]\033[0m  $*" >&2; }
@@ -65,6 +82,58 @@ fi
 
 command -v python3 >/dev/null || error "python3 is required"
 command -v docker >/dev/null || error "docker not found"
+
+# ---------------------------------------------------------------------------
+# Idempotent ufw rule for the api container -> AdGuard API management path.
+# AdGuard runs on the host network; the api container reaches it through the
+# docker bridge gateway (172.x.0.1). With ufw active and default-deny
+# incoming, that INPUT traffic is dropped unless allowed — the console then
+# shows "AdGuard unreachable" forever (rules can't be enforced or re-pushed)
+# while AdGuard itself is perfectly healthy on loopback. install.sh §9 opens
+# the public + tunnel ports but never this one; keeping it here means every
+# install/update self-heals the path, matching the interface-scoped DNS rule
+# pattern. Docker bridge subnets vary per host (172.17/172.18/...), so allow
+# the whole private 172.16.0.0/12 block on port 3000 only — ufw is
+# idempotent, so re-runs are no-ops.
+# ---------------------------------------------------------------------------
+if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+  ufw allow from 172.16.0.0/12 to any port 3000 proto tcp comment 'docker bridge -> AdGuard API' >/dev/null
+  info "ufw active — allowed docker bridge -> AdGuard API (:3000) so the console can enforce rules."
+fi
+
+# ---------------------------------------------------------------------------
+# Healthy check: if AdGuard is already up and authenticates with the .env
+# credentials, do NOT rewrite its config. A rewrite (or even a restart)
+# creates the "gap" after every console update: the api container is down
+# (rebuilt) while AdGuard restarts, and a fresh AdGuardHome.yaml starts with
+# empty user_rules — wiping every domain-block rule until the 5-minute worker
+# happens to re-push (which itself needs the :3000 path above). Skipping a
+# healthy AdGuard keeps rules + uptime intact across updates.
+# ---------------------------------------------------------------------------
+ALREADY_HEALTHY=false
+if ! "$FORCE"; then
+  # Retry briefly: on an update docker compose may have just recreated the
+  # adguardhome container (e.g. a new image), so give it a moment to come up
+  # before concluding it's unhealthy and rewriting. A fresh install is never
+  # misjudged here — a never-configured AGH answers 302/404, not 200.
+  for _ in $(seq 1 6); do
+    code="$(curl -s -u "$ADGUARD_API_USER:$ADGUARD_API_PASSWORD" -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:3000/control/status" || true)"
+    [[ "$code" == "200" ]] && break
+    sleep 2
+  done
+  if [[ "$code" == "200" ]]; then
+    ALREADY_HEALTHY=true
+    info "AdGuard is up and the .env credentials authenticate (HTTP 200) — leaving its config untouched (use --force to rewrite)."
+  fi
+fi
+
+if [[ "$ALREADY_HEALTHY" == true ]]; then
+  echo ""
+  echo " AdGuard Home is healthy — nothing to do. Its domain-block rules stay in place."
+  echo " If you meant to re-provision from scratch: sudo bash configure-adguard.sh --force"
+  echo ""
+  exit 0
+fi
 
 info "Generating AdGuard bcrypt password hash..."
 HASH="$(docker run --rm -v "$COMPOSE_DIR/backend":/src -w /src golang:1.27-alpine \

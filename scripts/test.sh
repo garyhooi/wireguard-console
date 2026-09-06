@@ -54,7 +54,10 @@ echo "== frontend: install + tests + build =="
 (cd frontend && bun install --frozen-lockfile >/dev/null && bunx vitest run && bun run build)
 
 echo "== shell scripts: syntax =="
-bash -n install.sh node-install.sh scripts/scan-vulnerabilities.sh
+bash -n install.sh node-install.sh scripts/scan-vulnerabilities.sh configure-adguard.sh
+
+echo "== configure-adguard.sh healthy-skip behavior =="
+bash scripts/test-configure-adguard-healthy.sh
 
 echo
 echo "ALL TESTS PASSED ✔"
