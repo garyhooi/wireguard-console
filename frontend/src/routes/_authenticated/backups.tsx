@@ -17,6 +17,7 @@ import {
 } from '../../lib/ui'
 import { Confirm2FA } from '../../lib/Confirm2FA'
 import { apiFetch, apiJson } from '../../lib/api'
+import { getTimezone } from '../../lib/timezone'
 
 interface BackupList {
   backups: string[]
@@ -27,12 +28,42 @@ export const Route = createFileRoute('/_authenticated/backups')({
 })
 
 
-// "wgconsole_backup_20260903_120405.sql.gz" → "2026-09-03 12:04"
-function backupLabel(name: string): string {
+/**
+ * The instant a backup was created, parsed from its filename. Backups are
+ * named on the server with the API container's wall clock in UTC
+ * (wgconsole_backup_YYYYMMDD_HHMMSS.sql.gz — no TZ is configured in the
+ * container), so this is parsed as a UTC instant and re-rendered through
+ * the console timezone when one is set (Configuration → Timezone) or the
+ * viewer's browser zone otherwise.
+ */
+export function backupCreatedAt(name: string): string | null {
   const m = name.match(/wgconsole_backup_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/)
-  if (!m) return name
+  if (!m) return null
   const [, y, mo, d, h, mi] = m
-  return `${y}-${mo}-${d} ${h}:${mi}`
+  // Trailing 'Z' makes the parse unambiguous: the embedded wall clock is UTC.
+  return `${y}-${mo}-${d}T${h}:${mi}:00Z`
+}
+
+// "wgconsole_backup_20260903_120405.sql.gz" → "2026-09-03 12:04" in the
+// console/browser timezone (falls back to the raw name when unparseable).
+// The YYYY-MM-DD HH:MM layout is kept fixed (unambiguous, matches the rest of
+// the console's tabular timestamps); only the instant is zone-converted.
+export function backupLabel(name: string): string {
+  const iso = backupCreatedAt(name)
+  if (!iso) return name
+  const z = getTimezone() || undefined
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: z,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+    hourCycle: 'h23',
+  }).formatToParts(new Date(iso))
+  const get = (t: Intl.DateTimeFormatPartTypes) => parts.find((p) => p.type === t)?.value ?? ''
+  return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}`
 }
 
 /** A pending privileged backup action awaiting the admin's own 2FA code. */
