@@ -9,6 +9,7 @@
 // stay legible on dark surfaces (never light-theme badge colors).
 
 import { useEffect, useRef } from 'react'
+import { createPortal } from 'react-dom'
 
 // ---------------------------------------------------------------------------
 // Layout primitives
@@ -363,13 +364,19 @@ export function Modal({
 
   if (!open) return null
 
+  // Render through a portal to document.body: Modal is used in many places —
+  // including inside the sticky, backdrop-blurred header (ConsoleVersionControl)
+  // — where a non-portaled fixed overlay would be clipped to the header's box
+  // and trapped in its z-30 stacking context (so page chrome could paint over
+  // it). Portaling escapes both and keeps every dialog full-viewport, topmost.
+
   // The overlay is the scroll container, not the panel: on mobile the URL
   // bar shrinks the visible viewport mid-scroll, and a centered flex with a
   // capped panel leaves the top of a tall dialog unreachable. Making the
   // full overlay scrollable (with margin-based centering instead of flex
   // centering) guarantees the whole dialog can always be scrolled into view,
   // whatever the current viewport height is.
-  return (
+  const dialog = (
     <div
       className="fixed inset-0 z-50 overflow-y-auto overscroll-contain"
       role="presentation"
@@ -402,6 +409,11 @@ export function Modal({
       </div>
     </div>
   )
+
+  // jsdom (vitest) has no layout engine and no createPortal target semantics;
+  // rendering straight into the container keeps the existing tests intact.
+  if (typeof document === 'undefined') return dialog
+  return createPortal(dialog, document.body)
 }
 
 // ---------------------------------------------------------------------------
