@@ -64,10 +64,11 @@ To add more operators: **System → Admins → Invite Admin**. Add VPN users und
 |---|---|---|
 | `80/tcp` | Caddy: HTTPS certificate issuance + block page | ✅ |
 | `443/tcp` | Console web UI + API | ✅ |
+| `3000/tcp` | AdGuard API — Docker containers only (never the internet) | 🔒 internal |
 | `53/udp+tcp` | AdGuard DNS for VPN peers (WireGuard interface only) | ✅ on VPN hosts |
 | `51820/udp` | WireGuard (use your custom port if you changed it) | ✅ only if this machine also runs a VPN server |
 
-The installer opens these automatically when ufw is active — port 53 is scoped to the WireGuard interface, so tunnel peers reach AdGuard on the gateway while it stays closed to the internet. On a cloud firewall (AWS/Azure/DigitalOcean security group), open 80/443 (and 51820 on VPN hosts) manually.
+The installer opens these automatically when ufw is active — port 53 is scoped to the WireGuard interface, so tunnel peers reach AdGuard on the gateway while it stays closed to the internet, and port 3000 is opened **only for Docker's private bridge subnets** (172.16.0.0/12) so the console's api container can reach AdGuard's API — AdGuard itself stays closed to the internet. On a cloud firewall (AWS/Azure/DigitalOcean security group), open 80/443 (and 51820 on VPN hosts) manually; **never** open 3000 publicly.
 
 ## Distributed nodes (one console, many regions)
 
