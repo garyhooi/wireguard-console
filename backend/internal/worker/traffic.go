@@ -9,6 +9,27 @@ import (
 	"github.com/wireguard-console/backend/internal/wgclient"
 )
 
+// counterDeltas returns the rx/tx bytes transferred since the previous
+// kernel-counter reading.
+//
+// WireGuard kernel counters are cumulative and monotonic while a peer lives,
+// but restart at 0 whenever the peer or its interface is re-applied — a peer
+// edit (wg-helper /apply replaces peers), a reconcile rebuild after a host
+// reboot, or the interface being torn down and recreated. A counter that went
+// backwards is a RESET, not negative traffic: report 0 for that direction so
+// the uint64 subtraction can never wrap to ~2^64 and store a huge negative
+// int64 sample (that is what dragged the hourly "Traffic over time" chart
+// below 0 B).
+func counterDeltas(prevRX, prevTX, curRX, curTX uint64) (rx, tx int64) {
+	if curRX >= prevRX {
+		rx = int64(curRX - prevRX)
+	}
+	if curTX >= prevTX {
+		tx = int64(curTX - prevTX)
+	}
+	return rx, tx
+}
+
 // TrafficWorker samples per-peer kernel counters (rx/tx bytes and last
 // handshake) from wg-helper for every locally-managed server, stores the
 // deltas as samples, and refreshes last_handshake_at.
@@ -83,13 +104,15 @@ func (w *TrafficWorker) pollTraffic(ctx context.Context) error {
 			rx := uint64(st.ReceiveBytes)
 			tx := uint64(st.TransmitBytes)
 			if seen {
-				deltaRX := rx - prev.RXBytes
-				deltaTX := tx - prev.TXBytes
+				// A counter that went backwards means the kernel reset it
+				// (peer/interface re-applied); guard so no negative sample
+				// is ever written (see counterDeltas).
+				deltaRX, deltaTX := counterDeltas(prev.RXBytes, prev.TXBytes, rx, tx)
 				if _, err := w.pool.Exec(ctx, `
 					INSERT INTO peer_traffic_samples (peer_id, rx_bytes, tx_bytes)
 					SELECT id, $2, $3 FROM peers
 					WHERE server_id = $1 AND public_key = $4 AND status != 'removed'
-				`, srv.id, int64(deltaRX), int64(deltaTX), st.PublicKey); err != nil {
+				`, srv.id, deltaRX, deltaTX, st.PublicKey); err != nil {
 					log.Printf("traffic sample insert: %v", err)
 				}
 			}

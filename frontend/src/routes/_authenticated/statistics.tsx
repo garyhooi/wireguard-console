@@ -105,6 +105,26 @@ const chartTooltipStyle = {
   fontSize: '12px',
 }
 
+// Floor every series point at 0. Negative samples (legacy kernel-counter
+// underflow rows, see backend migration 015) would otherwise drag the Y axis
+// below 0 B and render duplicate "0 B" ticks; they are measurement noise, not
+// negative traffic.
+export function clampSeries(series?: { time: string; rx: number; tx: number }[]) {
+  return (series ?? []).map((p) => ({
+    time: p.time,
+    rx: Math.max(0, Number(p.rx) || 0),
+    tx: Math.max(0, Number(p.tx) || 0),
+  }))
+}
+
+export function clampTop(top?: { name: string; rx: number; tx: number }[]) {
+  return (top ?? []).map((p) => ({
+    name: p.name,
+    rx: Math.max(0, Number(p.rx) || 0),
+    tx: Math.max(0, Number(p.tx) || 0),
+  }))
+}
+
 // Ranked list of domains with counts (top-10 panel).
 function DomainRankList({
   items,
@@ -303,10 +323,10 @@ export function StatisticsPage() {
           ) : hasTraffic ? (
             <div className="p-4">
               <ResponsiveContainer width="100%" height={280}>
-                <AreaChart data={traffic?.series} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+                <AreaChart data={clampSeries(traffic?.series)} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
                   <XAxis dataKey="time" stroke="#71717a" tick={{ fontSize: 11 }} tickLine={false} />
-                  <YAxis stroke="#71717a" tick={{ fontSize: 11 }} tickFormatter={(v: number) => formatBytes(Number.isFinite(Number(v)) ? Number(v) : 0)} tickLine={false} />
+                  <YAxis domain={[0, 'auto']} stroke="#71717a" tick={{ fontSize: 11 }} tickFormatter={(v: number) => formatBytes(Number.isFinite(Number(v)) ? Number(v) : 0)} tickLine={false} />
                   <Tooltip contentStyle={chartTooltipStyle} formatter={fmtTooltip} />
                   <Area type="monotone" dataKey="rx" stroke="#14b8a6" fill="#14b8a6" fillOpacity={0.18} name="Download" strokeWidth={1.5} />
                   <Area type="monotone" dataKey="tx" stroke="#71717a" fill="#71717a" fillOpacity={0.14} name="Upload" strokeWidth={1.5} />
@@ -330,7 +350,7 @@ export function StatisticsPage() {
           ) : (traffic?.top?.length ?? 0) > 0 ? (
             <div className="p-4">
               <ResponsiveContainer width="100%" height={280}>
-                <BarChart data={traffic?.top} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+                <BarChart data={clampTop(traffic?.top)} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
                   <XAxis
                     dataKey="name"
@@ -339,7 +359,7 @@ export function StatisticsPage() {
                     tickLine={false}
                     interval={0}
                   />
-                  <YAxis stroke="#71717a" tick={{ fontSize: 11 }} tickFormatter={(v: number) => formatBytes(Number.isFinite(Number(v)) ? Number(v) : 0)} tickLine={false} />
+                  <YAxis domain={[0, 'auto']} stroke="#71717a" tick={{ fontSize: 11 }} tickFormatter={(v: number) => formatBytes(Number.isFinite(Number(v)) ? Number(v) : 0)} tickLine={false} />
                   <Tooltip contentStyle={chartTooltipStyle} formatter={fmtTooltip} />
                   <Bar dataKey="rx" stackId="a" fill="#14b8a6" name="Download" />
                   <Bar dataKey="tx" stackId="a" fill="#52525b" name="Upload" />

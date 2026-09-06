@@ -143,7 +143,8 @@ func GetTrafficStats(store *Store) http.HandlerFunc {
 		hourExpr := "date_trunc('hour', sampled_at AT TIME ZONE $1)"
 		seriesRows, err := store.pool.Query(ctx, `
 			SELECT to_char(`+hourExpr+`, 'HH24:00') AS hour,
-			       SUM(rx_bytes) AS rx, SUM(tx_bytes) AS tx
+			       GREATEST(SUM(rx_bytes), 0) AS rx,
+			       GREATEST(SUM(tx_bytes), 0) AS tx
 			FROM peer_traffic_samples
 			WHERE sampled_at >= now() - interval '24 hours'
 			GROUP BY 1 ORDER BY 1
@@ -164,11 +165,15 @@ func GetTrafficStats(store *Store) http.HandlerFunc {
 		seriesRows.Close()
 
 		topRows, err := store.pool.Query(ctx, `
-			SELECT COALESCE(p.name, 'unknown'), SUM(t.rx_bytes), SUM(t.tx_bytes)
+			SELECT COALESCE(p.name, 'unknown'),
+			       GREATEST(SUM(t.rx_bytes), 0),
+			       GREATEST(SUM(t.tx_bytes), 0)
 			FROM peer_traffic_samples t
 			JOIN peers p ON p.id = t.peer_id
 			WHERE t.sampled_at >= now() - interval '24 hours'
-			GROUP BY p.name ORDER BY (SUM(t.rx_bytes) + SUM(t.tx_bytes)) DESC LIMIT 10
+			GROUP BY p.name
+			ORDER BY (GREATEST(SUM(t.rx_bytes), 0) + GREATEST(SUM(t.tx_bytes), 0)) DESC
+			LIMIT 10
 		`)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to query top peers")

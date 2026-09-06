@@ -10,7 +10,7 @@ vi.mock('@tanstack/react-router', async (importOriginal) => {
 })
 import { render, screen, waitFor, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { StatisticsPage } from '../_authenticated/statistics'
+import { StatisticsPage, clampSeries, clampTop } from '../_authenticated/statistics'
 
 function renderWithClient(ui: React.ReactNode) {
   const qc = new QueryClient({
@@ -135,5 +135,38 @@ describe('StatisticsPage', () => {
     expect(tfoot().textContent).toContain('5 MB') // total download 4+1
     expect(tfoot().textContent).toContain('3 MB') // total upload 2+1
     expect(tfoot().textContent).toContain('8 MB') // grand total
+  })
+})
+
+// The "Traffic over time" / "Top peers" charts must never see negative
+// points: a legacy kernel-counter underflow stored negative samples, which
+// dragged the Y axis below 0 B and made every negative tick render as the
+// same "0 B". Clamping is the frontend's half of that guarantee (the backend
+// clamps at write time and in the stats SQL too).
+describe('chart clamping', () => {
+  it('floors negative traffic series points at 0', () => {
+    const out = clampSeries([
+      { time: '10:00', rx: -1200, tx: 500 },
+      { time: '11:00', rx: 8, tx: -3 },
+      { time: '12:00', rx: 0, tx: 0 },
+    ])
+    expect(out).toEqual([
+      { time: '10:00', rx: 0, tx: 500 },
+      { time: '11:00', rx: 8, tx: 0 },
+      { time: '12:00', rx: 0, tx: 0 },
+    ])
+  })
+
+  it('floors negative top-peer values at 0 and tolerates junk', () => {
+    const out = clampTop([
+      { name: 'MacBook', rx: -1, tx: 2 },
+      { name: 'Phone', rx: NaN, tx: undefined as unknown as number },
+      { name: 'Tablet', rx: 0, tx: 0 },
+    ])
+    expect(out).toEqual([
+      { name: 'MacBook', rx: 0, tx: 2 },
+      { name: 'Phone', rx: 0, tx: 0 },
+      { name: 'Tablet', rx: 0, tx: 0 },
+    ])
   })
 })
