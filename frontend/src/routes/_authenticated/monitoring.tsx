@@ -48,6 +48,8 @@ interface Node {
   server_count: number
   metrics?: Metrics
   metrics_at?: string | null
+  agent_version?: string
+  agent_mismatch?: boolean
 }
 
 interface LocalStatus {
@@ -55,6 +57,8 @@ interface LocalStatus {
   is_local?: boolean
   metrics?: Metrics
   metrics_at?: string | null
+  agent_version?: string
+  agent_mismatch?: boolean
 }
 
 function fetchJSON<T>(url: string): Promise<T> {
@@ -175,6 +179,8 @@ function MetricsCard({
   metrics,
   metricsAt,
   stale,
+  agentVersion,
+  agentMismatch,
 }: {
   title: string
   sub?: string
@@ -184,6 +190,8 @@ function MetricsCard({
   metrics?: Metrics
   metricsAt?: string | null
   stale?: boolean
+  agentVersion?: string
+  agentMismatch?: boolean
 }) {
   const hasMetrics = !!metrics && (
     !!metrics.mem?.total ||
@@ -273,8 +281,24 @@ function MetricsCard({
                 {(metrics?.net ?? []).slice(0, 2).map((n) => `${n.interface} ↓${formatBytes(n.rx_bps)}/s`).join('  ')}
               </StatLine>
             )}
-            {metrics?.host?.agent_version && (
-              <StatLine label="Agent">{metrics.host.agent_version}</StatLine>
+            {agentVersion ? (
+              <StatLine label="Agent">
+                <span
+                  className={agentMismatch ? 'text-red-400' : undefined}
+                  title={agentMismatch ? 'Agent version differs from this console — re-run the node installer' : undefined}
+                >
+                  {agentVersion === 'dev'
+                    ? 'dev'
+                    : agentVersion.startsWith('v')
+                      ? agentVersion
+                      : `v${agentVersion}`}
+                  {agentMismatch ? ' · update' : ''}
+                </span>
+              </StatLine>
+            ) : (
+              metrics?.host?.agent_version && (
+                <StatLine label="Agent">{metrics.host.agent_version}</StatLine>
+              )
             )}
             {metrics?.host?.kernel && (
               <StatLine label="Kernel">{metrics.host.kernel}</StatLine>
@@ -370,6 +394,8 @@ export function MonitoringPage() {
               online={isOnline(local.metrics_at)}
               metrics={local.metrics}
               metricsAt={local.metrics_at}
+              agentVersion={local.agent_version}
+              agentMismatch={local.agent_mismatch}
             />
           )}
 
@@ -386,6 +412,8 @@ export function MonitoringPage() {
                 metrics={node.metrics}
                 metricsAt={node.metrics_at}
                 stale={!online}
+                agentVersion={node.agent_version}
+                agentMismatch={node.agent_mismatch}
               />
             )
           })}
