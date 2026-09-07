@@ -281,24 +281,22 @@ function MetricsCard({
                 {(metrics?.net ?? []).slice(0, 2).map((n) => `${n.interface} ↓${formatBytes(n.rx_bps)}/s`).join('  ')}
               </StatLine>
             )}
-            {agentVersion ? (
+            {agentVersion && agentVersion !== 'dev' ? (
               <StatLine label="Agent">
                 <span
                   className={agentMismatch ? 'text-red-400' : undefined}
                   title={agentMismatch ? 'Agent version differs from this console — re-run the node installer' : undefined}
                 >
-                  {agentVersion === 'dev'
-                    ? 'dev'
-                    : agentVersion.startsWith('v')
-                      ? agentVersion
-                      : `v${agentVersion}`}
+                  {agentVersion.startsWith('v') ? agentVersion : `v${agentVersion}`}
                   {agentMismatch ? ' · update' : ''}
                 </span>
               </StatLine>
             ) : (
-              metrics?.host?.agent_version && (
-                <StatLine label="Agent">{metrics.host.agent_version}</StatLine>
-              )
+              <StatLine label="Agent">
+                <span className="text-zinc-600 italic" title="The agent hasn't reported a version (unstamped build or not yet updated)">
+                  unknown
+                </span>
+              </StatLine>
             )}
             {metrics?.host?.kernel && (
               <StatLine label="Kernel">{metrics.host.kernel}</StatLine>

@@ -288,7 +288,7 @@ function NodesPage() {
                 <tr className="text-left text-[11px] uppercase tracking-wider text-zinc-500 bg-zinc-800/40">
                   <th className={thCls}>Node</th>
                   <th className={thCls}>Status</th>
-                  <th className={thCls}>Agent</th>
+                  <th className={thCls}>Agent Version</th>
                   <th className={thCls}>Servers</th>
                   <th className={thCls}>Last seen</th>
                   <th className={thCls} title="The agent's own status text from its most recent report (e.g. 'ok', or apply warnings)">
@@ -311,23 +311,21 @@ function NodesPage() {
                         <StatusBadge status={online ? 'ok' : node.last_seen_at ? 'warning' : 'error'} />
                       </td>
                       <td className="px-5 py-3">
-                        {node.agent_version ? (
-                          node.agent_version === 'dev' ? (
-                            <span className="text-xs text-zinc-500 italic">dev</span>
-                          ) : (
-                            <span className="inline-flex items-center gap-2">
-                              <span className={`font-mono text-xs ${node.agent_mismatch ? 'text-red-400' : 'text-zinc-300'}`}>
-                                {node.agent_version.startsWith('v') ? node.agent_version : `v${node.agent_version}`}
-                              </span>
-                              {node.agent_mismatch && (
-                                <Badge tone="bad" label="update">
-                                  outdated
-                                </Badge>
-                              )}
+                        {node.agent_version && node.agent_version !== 'dev' ? (
+                          <span className="inline-flex items-center gap-2">
+                            <span className={`font-mono text-xs ${node.agent_mismatch ? 'text-red-400' : 'text-zinc-300'}`}>
+                              {node.agent_version.startsWith('v') ? node.agent_version : `v${node.agent_version}`}
                             </span>
-                          )
+                            {node.agent_mismatch && (
+                              <Badge tone="bad" label="update">
+                                outdated
+                              </Badge>
+                            )}
+                          </span>
                         ) : (
-                          <span className="text-xs text-zinc-600">—</span>
+                          <span className="text-xs text-zinc-500 italic" title="The agent hasn't reported a version (unstamped build or not yet updated)">
+                            unknown
+                          </span>
                         )}
                       </td>
                       <td className={tdCls + ' font-mono tabular-nums'}>{node.server_count}</td>
