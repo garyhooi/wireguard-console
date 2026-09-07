@@ -187,7 +187,7 @@ func RotateNodeToken(store *Store) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
-		if !verifyActor2FA(w, ctx, store, adminID, req.Code) {
+		if !verifyActor2FA(w, r, ctx, store, adminID, req.Code) {
 			return
 		}
 
@@ -244,7 +244,7 @@ func DeleteNode(store *Store) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
-		if !verifyActor2FA(w, ctx, store, adminID, req.Code) {
+		if !verifyActor2FA(w, r, ctx, store, adminID, req.Code) {
 			return
 		}
 

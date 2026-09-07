@@ -124,6 +124,17 @@ curl -fsSL https://raw.githubusercontent.com/garyhooi/wireguard-console/main/ins
 
 **Back up first.** Open **System → Backups** and create one (or download one for an off-server copy) before re-running the installer on a production console.
 
+### Upgrading a node
+
+Run the node installer (not `install.sh`) with the same args as when you joined it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/garyhooi/wireguard-console/main/node-install.sh | \
+  sudo bash -s -- <TOKEN> https://<your-console-domain> <NODE_ID>
+```
+
+Lost the token? Nodes → **Join command** re-issues one.
+
 ### Version & update hints
 
 The console's top bar shows the installed version and — via a short, cached lookup of this repo's [latest GitHub release](https://github.com/garyhooi/wireguard-console/releases) — flags when a newer release exists. Clicking the version (or the **Update available** chip) shows the exact commands: back up, then run the one-liner above. install.sh stamps `APP_VERSION` (from the repo-root `VERSION` file) into `.env` on every run, so an update is reflected in the top bar as soon as the stack is back up.

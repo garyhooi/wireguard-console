@@ -247,7 +247,7 @@ func UpdateServer(store *Store) http.HandlerFunc {
 
 		// Editing a server reconfigures live VPN routing/NAT — require the
 		// acting admin's own 2FA code first.
-		if !verifyActor2FA(w, ctx, store, adminID, req.Code) {
+		if !verifyActor2FA(w, r, ctx, store, adminID, req.Code) {
 			return
 		}
 		_, err = store.pool.Exec(ctx, `
@@ -287,7 +287,7 @@ func DeleteServer(store *Store) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
-		if !verifyActor2FA(w, ctx, store, adminID, req.Code) {
+		if !verifyActor2FA(w, r, ctx, store, adminID, req.Code) {
 			return
 		}
 
@@ -352,7 +352,7 @@ func GetServerHostConfig(store *Store) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
-		if !verifyActor2FA(w, ctx, store, adminID, req.Code) {
+		if !verifyActor2FA(w, r, ctx, store, adminID, req.Code) {
 			return
 		}
 
@@ -657,7 +657,7 @@ func UpdateAdmin(store *Store) http.HandlerFunc {
 		// A no-op PATCH (nothing to change) is allowed through untouched so
 		// the UI can send the current values safely.
 		if req.Email != "" || req.Role != "" || req.Status != "" {
-			if !verifyActor2FA(w, ctx, store, actorID, req.Code) {
+			if !verifyActor2FA(w, r, ctx, store, actorID, req.Code) {
 				return
 			}
 		}
@@ -817,7 +817,7 @@ func ResetAdminPassword(store *Store) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
-		if !verifyActor2FA(w, ctx, store, actorID, req.Code) {
+		if !verifyActor2FA(w, r, ctx, store, actorID, req.Code) {
 			return
 		}
 

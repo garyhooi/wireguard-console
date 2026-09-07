@@ -7,6 +7,7 @@ import {
   IconMail,
   IconSend,
   IconSettings,
+  IconShieldLock,
 } from '@tabler/icons-react'
 import { PageHeader, PrimaryButton, GhostButton, inputCls, labelCls } from '../../lib/ui'
 import { apiJson } from '../../lib/api'
@@ -27,7 +28,7 @@ export const Route = createFileRoute('/_authenticated/config')({
   component: ConfigPage,
 })
 
-type ConfigTab = 'smtp' | 'templates' | 'timezone'
+type ConfigTab = 'smtp' | 'templates' | 'timezone' | 'security'
 
 // Each tab keeps its own scroll container so the page never grows into one
 // long column as configuration sections are added. Sections that belong to a
@@ -36,6 +37,7 @@ const TABS: { id: ConfigTab; label: string; icon: React.ComponentType<{ size?: n
   { id: 'smtp', label: 'Email (SMTP)', icon: IconSettings },
   { id: 'templates', label: 'Email templates', icon: IconCode },
   { id: 'timezone', label: 'Timezone', icon: IconClock },
+  { id: 'security', label: 'Security', icon: IconShieldLock },
 ]
 
 export function ConfigPage() {
@@ -45,7 +47,7 @@ export function ConfigPage() {
     <div>
       <PageHeader
         title="Configuration"
-        description="Outbound email (SMTP), the templates the console uses for invites, and the display timezone for reports and logs."
+        description="Outbound email (SMTP), the templates the console uses for invites, the display timezone for reports and logs, and security policy."
       />
 
       {/* Tab bar */}
@@ -71,7 +73,15 @@ export function ConfigPage() {
         })}
       </div>
 
-      {tab === 'smtp' ? <SmtpSettings /> : tab === 'templates' ? <EmailTemplatesSection /> : <TimezoneSettings />}
+      {tab === 'smtp' ? (
+        <SmtpSettings />
+      ) : tab === 'templates' ? (
+        <EmailTemplatesSection />
+      ) : tab === 'security' ? (
+        <SecuritySettings />
+      ) : (
+        <TimezoneSettings />
+      )}
     </div>
   )
 }
@@ -501,6 +511,130 @@ function TimezoneSettings() {
                 Reset to browser timezone
               </GhostButton>
             </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// SecuritySettings — 2FA step-up grace window (super_admin editable).
+//
+// After an admin passes one step-up 2FA code, their same session is trusted
+// for the other sensitive actions for this many minutes. 0 = ask every time.
+function SecuritySettings() {
+  const queryClient = useQueryClient()
+  const [draft, setDraft] = useState('0')
+  const [message, setMessage] = useState('')
+  const [error, setError] = useState('')
+
+  const { data: me } = useQuery<{ role: string }>({
+    queryKey: ['me'],
+    queryFn: async () => {
+      return apiJson<{ role: string }>('/api/admins/me')
+    },
+  })
+  const isSuperAdmin = me?.role === 'super_admin'
+
+  const { data: cfg, isLoading } = useQuery<{ step_up_minutes: number }>({
+    queryKey: ['stepup-config'],
+    queryFn: async () => {
+      return apiJson<{ step_up_minutes: number }>('/api/config/step-up')
+    },
+  })
+  const current = cfg?.step_up_minutes ?? 0
+
+  useEffect(() => {
+    setDraft(String(current))
+  }, [current])
+
+  const saveMutation = useMutation({
+    mutationFn: async (minutes: number) => {
+      return apiJson('/api/config/step-up', {
+        method: 'PATCH',
+        body: { step_up_minutes: minutes },
+      })
+    },
+    onSuccess: (_d, minutes) => {
+      queryClient.invalidateQueries({ queryKey: ['stepup-config'] })
+      setMessage(
+        minutes > 0
+          ? `Saved — after a 2FA check, your session is trusted for ${minutes} minute${minutes === 1 ? '' : 's'}.`
+          : 'Saved — every sensitive action now asks for a 2FA code.',
+      )
+      setError('')
+    },
+    onError: (e: Error) => {
+      setError(e.message)
+      setMessage('')
+    },
+  })
+
+  const parsed = parseInt(draft, 10)
+  const valid = Number.isFinite(parsed) && parsed >= 0 && parsed <= 1440
+
+  return (
+    <div className="max-w-xl">
+      <div className="border border-zinc-800 rounded-lg bg-zinc-900/50 p-6">
+        <div className="flex items-center gap-2 mb-1">
+          <IconShieldLock size={18} stroke={1.6} className="text-zinc-400" aria-hidden="true" />
+          <h2 className="text-base font-semibold text-zinc-100">2FA step-up window</h2>
+        </div>
+        <p className="text-sm text-zinc-400 mb-4">
+          Sensitive actions — editing or deleting servers, viewing host setup, deleting nodes,
+          re-issuing join commands, backup download/restore — ask for your authenticator code. Set
+          a window here to skip re-entering it on the same session for that long after one check.
+          <span className="block mt-1 text-zinc-500">
+            0 = ask every time (strictest). The grace never carries across a new login or another
+            admin's session.
+          </span>
+        </p>
+
+        {error && <p className="text-red-400 text-sm mb-3">{error}</p>}
+        {message && <p className="text-teal-400 text-sm mb-3">{message}</p>}
+
+        {isLoading ? (
+          <p className="text-zinc-400 text-sm">Loading…</p>
+        ) : (
+          <div className="space-y-5">
+            <div className="flex items-baseline justify-between gap-3 text-sm">
+              <span className="text-zinc-500">Currently</span>
+              <span className="text-zinc-100 font-mono tabular-nums">
+                {current > 0 ? `trusted for ${current} minute${current === 1 ? '' : 's'}` : 'ask every time (0)'}
+              </span>
+            </div>
+
+            {isSuperAdmin ? (
+              <div>
+                <label htmlFor="stepUpMinutes" className={labelCls}>
+                  Minutes to trust after a 2FA check
+                </label>
+                <div className="flex items-center gap-3">
+                  <input
+                    id="stepUpMinutes"
+                    type="number"
+                    min={0}
+                    max={1440}
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    className={`${inputCls} max-w-[10rem]`}
+                  />
+                  <PrimaryButton
+                    onClick={() => valid && saveMutation.mutate(parsed)}
+                    disabled={!valid || saveMutation.isPending || parsed === current}
+                  >
+                    {saveMutation.isPending ? 'Saving…' : 'Save'}
+                  </PrimaryButton>
+                </div>
+                <p className="mt-1.5 text-xs text-zinc-600">
+                  Minutes, 0–1440 (a 24h cap). Applied to every admin's session — super_admin only.
+                </p>
+              </div>
+            ) : (
+              <p className="text-xs text-amber-400/90">
+                Only a super admin can change the 2FA step-up window.
+              </p>
+            )}
           </div>
         )}
       </div>

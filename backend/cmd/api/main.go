@@ -255,6 +255,13 @@ func main() {
 				r.Get("/config/timezone", api.GetTimezoneConfig(store))
 				r.Patch("/config/timezone", api.UpdateTimezoneConfig(store))
 				r.Post("/config/email/test", api.SendTestEmail(store))
+				r.Get("/config/step-up", api.GetStepUpConfig(store))
+				// The 2FA step-up grace window is a security policy —
+				// super_admin only.
+				r.Group(func(r chi.Router) {
+					r.Use(api.RequireRole(store, "super_admin"))
+					r.Patch("/config/step-up", api.UpdateStepUpConfig(store))
+				})
 
 				// Backup endpoints (download/restore/delete require the
 				// acting admin's own 2FA code — see each handler).

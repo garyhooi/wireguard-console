@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/wireguard-console/backend/internal/auth"
@@ -13,14 +14,37 @@ import (
 
 // verifyActor2FA confirms the signed-in admin's own second factor before a
 // sensitive action (resetting another admin's 2FA/password, changing an
-// admin's email/role, downloading or restoring a backup).
+// admin's email/role, downloading or restoring a backup, editing/deleting
+// servers and nodes, re-issuing node join commands).
 //
 // The acting admin must have 2FA enrolled: these operations are exactly the
 // ones that should be impossible to perform from a stolen session cookie
 // alone. A TOTP code is accepted; a stored backup code is accepted once and
 // then consumed. On failure it writes the error response and returns false.
-func verifyActor2FA(w http.ResponseWriter, ctx context.Context, store *Store, actorID uuid.UUID, code string) bool {
-	if code == "" {
+//
+// Step-up grace (Configuration → Security): when the console has a positive
+// step_up_minutes window and THIS session already passed a code inside that
+// window, an empty code is accepted without re-prompting — the verified
+// timestamp is stamped on the admin_sessions row on every successful code,
+// so the grace never leaks across sessions or logins. Window 0 (default)
+// disables the grace: every action asks for a code.
+func verifyActor2FA(w http.ResponseWriter, r *http.Request, ctx context.Context, store *Store, actorID uuid.UUID, code string) bool {
+	sessionHash := currentSessionTokenHash(r)
+
+	// Already verified this session inside the grace window → allow without
+	// a code (the admin just proved possession of the authenticator).
+	if code == "" && sessionHash != "" {
+		minutes := loadStepUpMinutes(ctx, store.pool)
+		if minutes > 0 {
+			var verifiedAt *time.Time
+			_ = store.pool.QueryRow(ctx, `
+				SELECT step_up_verified_at FROM admin_sessions
+				WHERE token_hash = $1 AND expires_at > now()
+			`, sessionHash).Scan(&verifiedAt)
+			if verifiedAt != nil && time.Since(*verifiedAt) <= time.Duration(minutes)*time.Minute {
+				return true
+			}
+		}
 		writeError(w, http.StatusBadRequest, "A 2FA code is required for this action")
 		return false
 	}
@@ -43,6 +67,7 @@ func verifyActor2FA(w http.ResponseWriter, ctx context.Context, store *Store, ac
 
 	// Accept a normal authenticator code first.
 	if auth.VerifyTOTP(secret, code) {
+		stampStepUp(ctx, store, sessionHash)
 		return true
 	}
 
@@ -63,6 +88,7 @@ func verifyActor2FA(w http.ResponseWriter, ctx context.Context, store *Store, ac
 				_, _ = store.pool.Exec(ctx,
 					`UPDATE admins SET backup_codes_hash = $1 WHERE id = $2`,
 					next, actorID)
+				stampStepUp(ctx, store, sessionHash)
 				return true
 			}
 		}
@@ -70,6 +96,19 @@ func verifyActor2FA(w http.ResponseWriter, ctx context.Context, store *Store, ac
 
 	writeError(w, http.StatusUnauthorized, "Invalid 2FA code")
 	return false
+}
+
+// stampStepUp records that the acting session just passed a step-up 2FA
+// verification, starting (or extending) its grace window. Best-effort: a
+// missing session hash (no cookie) simply means no grace is granted.
+func stampStepUp(ctx context.Context, store *Store, sessionHash string) {
+	if sessionHash == "" {
+		return
+	}
+	_, _ = store.pool.Exec(ctx, `
+		UPDATE admin_sessions SET step_up_verified_at = now()
+		WHERE token_hash = $1 AND expires_at > now()
+	`, sessionHash)
 }
 
 type stepUpRequest struct {
@@ -97,7 +136,7 @@ func ResetAdmin2FA(store *Store) http.HandlerFunc {
 		ctx := context.Background()
 		actorID := getAdminID(r)
 
-		if !verifyActor2FA(w, ctx, store, actorID, req.Code) {
+		if !verifyActor2FA(w, r, ctx, store, actorID, req.Code) {
 			return
 		}
 

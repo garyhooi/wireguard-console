@@ -1058,6 +1058,56 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatal("op2 2FA still enabled after reset")
 	}
 
+	// ---- 2FA step-up grace window ----
+	// Configuration → Security: after one successful step-up check the same
+	// session is trusted for N minutes (no re-code). Default 0 = ask always.
+	resp, stepOut := api(t, "GET", "/api/config/step-up", token, nil)
+	expectStatus(t, resp, 200, "GET /api/config/step-up")
+	if m, _ := stepOut["step_up_minutes"].(float64); m != 0 {
+		t.Fatalf("default step_up_minutes = %v, want 0", m)
+	}
+	// Enable a 60-minute grace (super_admin only).
+	resp, _ = api(t, "PATCH", "/api/config/step-up", token, map[string]interface{}{
+		"step_up_minutes": 60,
+	})
+	expectStatus(t, resp, 200, "PATCH /api/config/step-up (super_admin)")
+	resp, _ = api(t, "PATCH", "/api/config/step-up", token, map[string]interface{}{
+		"step_up_minutes": 99999,
+	})
+	expectStatus(t, resp, 400, "PATCH /api/config/step-up (out of range)")
+
+	// Pass one code on a gated action, then the NEXT gated action with an
+	// empty code must be accepted within the grace window (same session).
+	resp, _ = api(t, "PATCH", "/api/servers/"+serverID, token, map[string]interface{}{
+		"name": "E2E Renamed", "public_endpoint": "203.0.113.9:51821", "listen_port": 51821,
+		"network_cidr": "10.9.0.0/24", "dns_servers": []string{"1.1.1.1"},
+		"default_allowed_ips": "0.0.0.0/0", "mtu": 1420, "persistent_keepalive": 25,
+		"code": actorCode(),
+	})
+	expectStatus(t, resp, 200, "PATCH server with code (stamps session)")
+	graceNoCode, _ := api(t, "PATCH", "/api/servers/"+serverID, token, map[string]interface{}{
+		"name": "E2E Grace", "public_endpoint": "203.0.113.9:51821", "listen_port": 51821,
+		"network_cidr": "10.9.0.0/24", "dns_servers": []string{"1.1.1.1"},
+		"default_allowed_ips": "0.0.0.0/0", "mtu": 1420, "persistent_keepalive": 25,
+		"code": "",
+	})
+	if graceNoCode.StatusCode != 200 {
+		t.Fatalf("server PATCH within grace window without code: status %d, want 200 (grace)", graceNoCode.StatusCode)
+	}
+
+	// Disable the grace again (0) — the very next gated action must ask again.
+	resp, _ = api(t, "PATCH", "/api/config/step-up", token, map[string]interface{}{
+		"step_up_minutes": 0,
+	})
+	expectStatus(t, resp, 200, "PATCH /api/config/step-up (reset to 0)")
+	backToStrict, _ := api(t, "PATCH", "/api/servers/"+serverID, token, map[string]interface{}{
+		"name": "E2E Renamed", "public_endpoint": "203.0.113.9:51821", "listen_port": 51821,
+		"network_cidr": "10.9.0.0/24", "dns_servers": []string{"1.1.1.1"},
+		"default_allowed_ips": "0.0.0.0/0", "mtu": 1420, "persistent_keepalive": 25,
+		"code": "",
+	})
+	expectStatus(t, backToStrict, 400, "server PATCH without code after grace disabled")
+
 	// ---- Peers carry their owner ----
 	peerJSON := rawGet(t, baseURL+"/api/peers", token)
 	var peerRows []map[string]interface{}
