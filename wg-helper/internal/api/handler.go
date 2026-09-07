@@ -133,11 +133,23 @@ func (h *Handler) handleApply(w http.ResponseWriter, r *http.Request) {
 
 // applyState applies one interface's full desired state to the local
 // kernel. Shared by the /apply endpoint and the distributed agent loop.
+//
+// The apply is idempotent: when the running device already matches the
+// desired state (same private key, listen port, peer set), nothing is
+// reconfigured — a force re-apply (wg set + ReplacePeers) resets live
+// kernel handshake timestamps and counters and briefly disturbs connected
+// peers for zero benefit. The console's local reconcile worker follows the
+// same probe-before-apply rule. A missing device still triggers the full
+// apply, so the agent self-heals after a reboot.
 func (h *Handler) applyState(req applyRequest) []string {
 	var warnings []string
 	warn := func(format string, a ...interface{}) {
 		warnings = append(warnings, fmt.Sprintf(format, a...))
 		log.Printf("wg-helper [%s]: %s", req.InterfaceName, fmt.Sprintf(format, a...))
+	}
+
+	if h.deviceMatches(req) {
+		return warnings // already in the desired state — leave kernel state alone
 	}
 
 	// 1. Create the interface if it doesn't exist yet.
@@ -228,6 +240,57 @@ func (h *Handler) applyState(req applyRequest) []string {
 
 	log.Printf("wg-helper [%s]: applied %d peers", req.InterfaceName, len(config.Peers))
 	return warnings
+}
+
+// deviceMatches reports whether the running WireGuard device already
+// reflects the desired state: same private key, same listen port, and the
+// same peer set (public keys + allowed IPs). Returns false when the device
+// does not exist yet (so the caller runs the full apply) or when any field
+// differs. It deliberately ignores handshake timestamps and traffic
+// counters — those live on the running device and are exactly what a skip
+// preserves.
+func (h *Handler) deviceMatches(req applyRequest) bool {
+	dev, err := h.client.Device(req.InterfaceName)
+	if err != nil {
+		return false // device missing (first poll or post-reboot) — apply it
+	}
+	if dev.PrivateKey.String() != req.PrivateKey {
+		return false
+	}
+	// A zero listen port in the desired state means "leave whatever is
+	// running" (some callers omit it); otherwise it must match.
+	if req.ListenPort != 0 && dev.ListenPort != req.ListenPort {
+		return false
+	}
+
+	desired := map[string]map[string]bool{} // public key -> allowed IPs
+	count := 0
+	for _, p := range req.Peers {
+		key, err := wgtypes.ParseKey(p.PublicKey)
+		if err != nil {
+			return false // unparseable desired peer — re-apply so it surfaces
+		}
+		if desired[key.String()] == nil {
+			desired[key.String()] = map[string]bool{}
+			count++
+		}
+		desired[key.String()][p.AllowedIP] = true
+	}
+	if len(dev.Peers) != count {
+		return false
+	}
+	for _, p := range dev.Peers {
+		ips, ok := desired[p.PublicKey.String()]
+		if !ok || len(ips) != len(p.AllowedIPs) {
+			return false
+		}
+		for _, ipnet := range p.AllowedIPs {
+			if !ips[ipnet.IP.String()] {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // removeInterface deletes a WireGuard interface from the kernel.

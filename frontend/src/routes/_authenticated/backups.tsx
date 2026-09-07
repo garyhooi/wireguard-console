@@ -17,6 +17,7 @@ import {
 } from '../../lib/ui'
 import { Confirm2FA } from '../../lib/Confirm2FA'
 import { apiFetch, apiJson } from '../../lib/api'
+import { is2FAError, useStepUpMinutes } from '../../lib/stepup'
 import { getTimezone } from '../../lib/timezone'
 
 interface BackupList {
@@ -88,6 +89,24 @@ function BackupsPage() {
   const [error, setError] = useState('')
   const [pending2FA, setPending2FA] = useState<Pending2FA | null>(null)
 
+  // 2FA step-up grace: try the action without a code first — the server
+  // accepts it when this session already verified within the window. Only
+  // when the server answers with a 2FA error do we open the code modal.
+  const stepUpMinutes = useStepUpMinutes()
+  const gate2FA = (label: string, run: (code: string) => Promise<void>) => {
+    if (stepUpMinutes <= 0) {
+      setPending2FA({ label, run }) // grace off — ask immediately
+      return
+    }
+    run('').catch((e: Error) => {
+      if (is2FAError(e.message)) {
+        setPending2FA({ label, run })
+      } else {
+        setError(e.message)
+      }
+    })
+  }
+
   const { data, isLoading } = useQuery<BackupList>({
     queryKey: ['backups'],
     queryFn: async () => {
@@ -125,10 +144,7 @@ function BackupsPage() {
   }
 
   const confirmDownload = (filename: string) => {
-    setPending2FA({
-      label: `download backup ${filename}`,
-      run: (code) => download(filename, code),
-    })
+    gate2FA(`download backup ${filename}`, (code) => download(filename, code))
   }
 
   // Restore from an existing server-side backup (2FA-gated).
@@ -155,10 +171,9 @@ function BackupsPage() {
     ) {
       return
     }
-    setPending2FA({
-      label: `restore backup ${filename} (replaces current data)`,
-      run: (code) => restoreMutation.mutateAsync({ filename, code }).then(() => undefined),
-    })
+    gate2FA(`restore backup ${filename} (replaces current data)`, (code) =>
+      restoreMutation.mutateAsync({ filename, code }).then(() => undefined),
+    )
   }
 
   // Restore from an uploaded .sql.gz file (2FA-gated).
@@ -203,10 +218,9 @@ function BackupsPage() {
     ) {
       return
     }
-    setPending2FA({
-      label: `delete backup ${filename}`,
-      run: (code) => deleteMutation.mutateAsync({ filename, code }).then(() => undefined),
-    })
+    gate2FA(`delete backup ${filename}`, (code) =>
+      deleteMutation.mutateAsync({ filename, code }).then(() => undefined),
+    )
   }
 
   const backups = data?.backups ?? []
@@ -222,10 +236,9 @@ function BackupsPage() {
       return
     }
     setError('')
-    setPending2FA({
-      label: `restore from uploaded file ${file.name} (replaces current data)`,
-      run: (code) => uploadMutation.mutateAsync({ file, code }).then(() => undefined),
-    })
+    gate2FA(`restore from uploaded file ${file.name} (replaces current data)`, (code) =>
+      uploadMutation.mutateAsync({ file, code }).then(() => undefined),
+    )
   }
 
   return (
