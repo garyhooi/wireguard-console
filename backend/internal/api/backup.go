@@ -74,7 +74,7 @@ func DownloadBackup(store *Store) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "filename is required")
 			return
 		}
-		if !verifyActor2FA(w, ctx, store, adminID, req.Code) {
+		if !verifyActor2FA(w, r, ctx, store, adminID, req.Code) {
 			return
 		}
 
@@ -114,7 +114,7 @@ func RestoreBackup(store *Store) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "filename is required")
 			return
 		}
-		if !verifyActor2FA(w, ctx, store, adminID, req.Code) {
+		if !verifyActor2FA(w, r, ctx, store, adminID, req.Code) {
 			return
 		}
 
@@ -158,7 +158,7 @@ func RestoreBackupUpload(store *Store) http.HandlerFunc {
 			return
 		}
 		code := r.FormValue("code")
-		if !verifyActor2FA(w, ctx, store, adminID, code) {
+		if !verifyActor2FA(w, r, ctx, store, adminID, code) {
 			return
 		}
 
@@ -224,7 +224,7 @@ func DeleteBackup(store *Store) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "filename is required")
 			return
 		}
-		if !verifyActor2FA(w, ctx, store, adminID, req.Code) {
+		if !verifyActor2FA(w, r, ctx, store, adminID, req.Code) {
 			return
 		}
 

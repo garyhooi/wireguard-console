@@ -362,6 +362,32 @@ func loginAs(t *testing.T, act *actor, email, password string) *actor {
 	return act
 }
 
+// loginAs2FA logs an account in when 2FA is enabled: the password step
+// returns a pending session, which the caller completes with their TOTP code.
+func loginAs2FA(t *testing.T, act *actor, email, password, secret string) *actor {
+	t.Helper()
+	resp, out := api(t, "POST", "/api/auth/login", act, map[string]string{
+		"email": email, "password": password,
+	})
+	expectStatus(t, resp, 200, "/api/auth/login (2FA pending)")
+	if pending, _ := out["pending_2fa"].(bool); !pending {
+		t.Fatal("expected pending_2fa=true for a 2FA-enabled admin")
+	}
+	resp, verifyOut := act.do(t, "POST", "/api/auth/2fa/verify", "", map[string]string{
+		"code": current2FACode(t, secret),
+	})
+	expectStatus(t, resp, 200, "/api/auth/2fa/verify")
+	csrf, _ := verifyOut["csrf_token"].(string)
+	if csrf == "" {
+		t.Fatal("2fa verify returned no csrf_token")
+	}
+	act.csrf = csrf
+	if _, has := act.jar["wgc_session"]; !has {
+		t.Fatal("wgc_session cookie missing after 2fa verify")
+	}
+	return act
+}
+
 // enable2FAFor enrolls 2FA on the actor's session and returns the TOTP
 // secret so the test can mint codes for step-up checks.
 func enable2FAFor(t *testing.T, a authn) string {
@@ -409,6 +435,13 @@ func TestEndToEnd(t *testing.T) {
 
 	// Login
 	token := login(t, "e2e@console.test", "e2e-Passw0rd!")
+
+	// 2FA enrollment (step-up model): enroll once up-front so every
+	// privileged action below (server edit/delete/host-config, node
+	// delete/rotate) can carry a valid actor code. Mirrors production
+	// policy: super_admins must have 2FA enabled for sensitive actions.
+	actorSecret := enable2FAFor(t, token)
+	actorCode := func() string { return current2FACode(t, actorSecret) }
 
 	// Server create -> auto keygen -> list scan (cidr regression)
 	resp, _ := api(t, "POST", "/api/servers", token, map[string]interface{}{
@@ -477,8 +510,32 @@ func TestEndToEnd(t *testing.T) {
 		"name": "E2E Renamed", "public_endpoint": "203.0.113.9:51821", "listen_port": 51821,
 		"network_cidr": "10.9.0.0/24", "dns_servers": []string{"1.1.1.1"},
 		"default_allowed_ips": "0.0.0.0/0", "mtu": 1420, "persistent_keepalive": 25,
+		"code": actorCode(),
 	})
 	expectStatus(t, resp, 200, "PATCH /api/servers/{id}")
+
+	// Server edit without the actor's 2FA code is refused.
+	resp, _ = api(t, "PATCH", "/api/servers/"+serverID, token, map[string]interface{}{
+		"name": "No-2FA", "public_endpoint": "203.0.113.9:51821", "listen_port": 51821,
+		"network_cidr": "10.9.0.0/24", "dns_servers": []string{"1.1.1.1"},
+		"default_allowed_ips": "0.0.0.0/0", "mtu": 1420, "persistent_keepalive": 25,
+	})
+	expectStatus(t, resp, 400, "PATCH /api/servers/{id} without 2FA code")
+
+	// Host setup (reveals the server's private key) now requires POST + the
+	// actor's 2FA code. Refused without a code, served with one.
+	resp, _ = api(t, "POST", "/api/servers/"+serverID+"/host-config", token, nil)
+	expectStatus(t, resp, 400, "POST /api/servers/{id}/host-config without 2FA code")
+	hostCfgResp := rawPost(t, baseURL+"/api/servers/"+serverID+"/host-config", token, map[string]string{
+		"code": actorCode(),
+	})
+	hostBody := string(hostCfgResp.body)
+	if hostCfgResp.status != 200 {
+		t.Fatalf("host-config with code: status %d, want 200", hostCfgResp.status)
+	}
+	if !strings.Contains(hostBody, "[Interface]") || strings.Contains(hostBody, "[REDACTED]") {
+		t.Fatalf("host-config body invalid:\n%s", hostBody)
+	}
 
 	// Regression: the reconcile worker must NOT force-reapply a server whose
 	// kernel interface is already present (a re-apply would ReplacePeers and
@@ -733,6 +790,33 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatal("local status missing metrics")
 	}
 
+	// Rotate the node token (super_admin) → fresh join command; the old
+	// token must stop working immediately (only the hash is stored, so
+	// re-showing the command is implemented as a rotation).
+	rotResp, rotOut := api(t, "POST", "/api/nodes/"+nodeID+"/rotate-token", token, map[string]string{
+		"code": actorCode(),
+	})
+	expectStatus(t, rotResp, 200, "POST /api/nodes/{id}/rotate-token (super_admin)")
+	// Missing code is refused before any rotation happens.
+	noCodeResp, _ := api(t, "POST", "/api/nodes/"+nodeID+"/rotate-token", token, nil)
+	expectStatus(t, noCodeResp, 400, "POST /api/nodes/{id}/rotate-token without code")
+	newToken, _ := rotOut["token"].(string)
+	joinCmd, _ := rotOut["join_command"].(string)
+	if newToken == "" || newToken == nodeToken {
+		t.Fatalf("rotate-token did not issue a fresh token (old=%q new=%q)", nodeToken, newToken)
+	}
+	if !strings.Contains(joinCmd, "node-install.sh") || !strings.Contains(joinCmd, newToken) || !strings.Contains(joinCmd, nodeID) {
+		t.Fatalf("rotate-token join_command malformed: %q", joinCmd)
+	}
+	// The old token must now be rejected.
+	resp, _ = api(t, "GET", "/api/nodes/"+nodeID+"/state", "Bearer "+nodeToken, nil)
+	if resp.StatusCode != 401 {
+		t.Fatalf("node state with rotated-away token: status %d, want 401", resp.StatusCode)
+	}
+	// And the fresh one works.
+	resp, _ = api(t, "GET", "/api/nodes/"+nodeID+"/state", "Bearer "+newToken, nil)
+	expectStatus(t, resp, 200, "GET /api/nodes/{id}/state (fresh token)")
+
 	// ---- Email templates ----
 	resp, _ = api(t, "GET", "/api/config/email-templates", token, nil)
 	expectStatus(t, resp, 200, "GET /api/config/email-templates")
@@ -759,14 +843,9 @@ func TestEndToEnd(t *testing.T) {
 		"email": "e2e@console.test", "password": "e2e-Passw0rd!",
 	})
 	expectStatus(t, resp, 401, "old password rejected after change")
-	token = login(t, "e2e@console.test", "e2e-NewPassw0rd!")
-
-	// ---- 2FA enrollment (step-up model) ----
-	// From here the actor has 2FA on, so every privileged admin/backup action
-	// must carry a current TOTP code. This also mirrors production policy:
-	// super_admins must have 2FA enabled to perform helpdesk actions.
-	actorSecret := enable2FAFor(t, token)
-	actorCode := func() string { return current2FACode(t, actorSecret) }
+	// The actor has 2FA enrolled, so the re-login completes the pending
+	// session with a fresh TOTP code.
+	token = loginAs2FA(t, newActor(), "e2e@console.test", "e2e-NewPassw0rd!", actorSecret)
 
 	// ---- Claim: invite link end-to-end ----
 	// (fresh invite so the token is one-time and unused)
@@ -942,6 +1021,14 @@ func TestEndToEnd(t *testing.T) {
 	meResp, _ := op2Login.do(t, "GET", "/api/admins/me", "", nil)
 	expectStatus(t, meResp, 200, "GET /api/admins/me (post-2FA session)")
 
+	// Rotate-token is super_admin-only: a plain admin must be refused. The
+	// 2FA verify above returned the session's csrf2, so the call reaches the
+	// role gate (not a CSRF rejection).
+	rot403, _ := op2Login.do(t, "POST", "/api/nodes/"+nodeID+"/rotate-token", csrf2, nil)
+	if rot403.StatusCode != 403 {
+		t.Fatalf("rotate-token as plain admin: status %d, want 403", rot403.StatusCode)
+	}
+
 	// The pending token is single-use: a second verify must fail. The
 	// pending cookie was cleared, so verify answers 401.
 	tfaReuseResp, _ := op2Login.do(t, "POST", "/api/auth/2fa/verify", "", map[string]string{
@@ -970,6 +1057,56 @@ func TestEndToEnd(t *testing.T) {
 	if op2Enabled {
 		t.Fatal("op2 2FA still enabled after reset")
 	}
+
+	// ---- 2FA step-up grace window ----
+	// Configuration → Security: after one successful step-up check the same
+	// session is trusted for N minutes (no re-code). Default 0 = ask always.
+	resp, stepOut := api(t, "GET", "/api/config/step-up", token, nil)
+	expectStatus(t, resp, 200, "GET /api/config/step-up")
+	if m, _ := stepOut["step_up_minutes"].(float64); m != 0 {
+		t.Fatalf("default step_up_minutes = %v, want 0", m)
+	}
+	// Enable a 60-minute grace (super_admin only).
+	resp, _ = api(t, "PATCH", "/api/config/step-up", token, map[string]interface{}{
+		"step_up_minutes": 60,
+	})
+	expectStatus(t, resp, 200, "PATCH /api/config/step-up (super_admin)")
+	resp, _ = api(t, "PATCH", "/api/config/step-up", token, map[string]interface{}{
+		"step_up_minutes": 99999,
+	})
+	expectStatus(t, resp, 400, "PATCH /api/config/step-up (out of range)")
+
+	// Pass one code on a gated action, then the NEXT gated action with an
+	// empty code must be accepted within the grace window (same session).
+	resp, _ = api(t, "PATCH", "/api/servers/"+serverID, token, map[string]interface{}{
+		"name": "E2E Renamed", "public_endpoint": "203.0.113.9:51821", "listen_port": 51821,
+		"network_cidr": "10.9.0.0/24", "dns_servers": []string{"1.1.1.1"},
+		"default_allowed_ips": "0.0.0.0/0", "mtu": 1420, "persistent_keepalive": 25,
+		"code": actorCode(),
+	})
+	expectStatus(t, resp, 200, "PATCH server with code (stamps session)")
+	graceNoCode, _ := api(t, "PATCH", "/api/servers/"+serverID, token, map[string]interface{}{
+		"name": "E2E Grace", "public_endpoint": "203.0.113.9:51821", "listen_port": 51821,
+		"network_cidr": "10.9.0.0/24", "dns_servers": []string{"1.1.1.1"},
+		"default_allowed_ips": "0.0.0.0/0", "mtu": 1420, "persistent_keepalive": 25,
+		"code": "",
+	})
+	if graceNoCode.StatusCode != 200 {
+		t.Fatalf("server PATCH within grace window without code: status %d, want 200 (grace)", graceNoCode.StatusCode)
+	}
+
+	// Disable the grace again (0) — the very next gated action must ask again.
+	resp, _ = api(t, "PATCH", "/api/config/step-up", token, map[string]interface{}{
+		"step_up_minutes": 0,
+	})
+	expectStatus(t, resp, 200, "PATCH /api/config/step-up (reset to 0)")
+	backToStrict, _ := api(t, "PATCH", "/api/servers/"+serverID, token, map[string]interface{}{
+		"name": "E2E Renamed", "public_endpoint": "203.0.113.9:51821", "listen_port": 51821,
+		"network_cidr": "10.9.0.0/24", "dns_servers": []string{"1.1.1.1"},
+		"default_allowed_ips": "0.0.0.0/0", "mtu": 1420, "persistent_keepalive": 25,
+		"code": "",
+	})
+	expectStatus(t, backToStrict, 400, "server PATCH without code after grace disabled")
 
 	// ---- Peers carry their owner ----
 	peerJSON := rawGet(t, baseURL+"/api/peers", token)
@@ -1094,8 +1231,13 @@ func TestEndToEnd(t *testing.T) {
 	ruleResp.Body.Close()
 
 	// Cleanup: delete local server (cascade peers) must succeed
-	resp, _ = api(t, "DELETE", "/api/servers/"+serverID, token, nil)
+	resp, _ = api(t, "DELETE", "/api/servers/"+serverID, token, map[string]string{
+		"code": actorCode(),
+	})
 	expectStatus(t, resp, 200, "DELETE /api/servers/{id}")
+	// Deleting a server without the actor's 2FA code is refused.
+	resp, _ = api(t, "DELETE", "/api/servers/"+serverID, token, nil)
+	expectStatus(t, resp, 400, "DELETE /api/servers/{id} without 2FA code")
 
 	// ---- Backups: create / download / restore require the actor's 2FA ----
 	// Create a backup (no gate — making one is safe), then list it.

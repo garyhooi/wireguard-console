@@ -1,9 +1,10 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { apiJson } from '../../lib/api'
+import { Confirm2FA } from '../../lib/Confirm2FA'
+import { apiFetch, apiJson } from '../../lib/api'
 import { fmtDateTime } from '../../lib/timezone'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
-import { IconCopy, IconPlus } from '@tabler/icons-react'
+import { IconCopy, IconPlus, IconTerminal2 } from '@tabler/icons-react'
 import {
   ActionLink,
   Badge,
@@ -43,9 +44,30 @@ function NodesPage() {
   const queryClient = useQueryClient()
   const [showAdd, setShowAdd] = useState(false)
   const [form, setForm] = useState({ name: '', location: '' })
-  const [join, setJoin] = useState<{ command: string; token: string } | null>(null)
+  const [join, setJoin] = useState<{
+    command: string
+    token: string
+    rotated?: boolean
+    nodeName?: string
+  } | null>(null)
   const [error, setError] = useState('')
   const [copied, setCopied] = useState(false)
+  // Step-up 2FA gate: deleting a node and re-issuing its join command
+  // (token rotation) are privileged — both require the admin's own code.
+  const [pending2FA, setPending2FA] = useState<{
+    label: string
+    run: (code: string) => Promise<void>
+  } | null>(null)
+
+  // Which admin is signed in — the Join-command (token rotate) action is
+  // super_admin only, like the other sensitive re-issue actions.
+  const { data: me } = useQuery<{ id: string; email: string; role: string }>({
+    queryKey: ['me'],
+    queryFn: async () => {
+      return apiJson('/api/admins/me')
+    },
+  })
+  const isSuperAdmin = me?.role === 'super_admin'
 
   const { data: nodes, isLoading } = useQuery<Node[]>({
     queryKey: ['nodes'],
@@ -69,12 +91,59 @@ function NodesPage() {
   })
 
   const removeMutation = useMutation({
-    mutationFn: async (node: Node) => {
-      await apiJson(`/api/nodes/${node.id}`, { method: 'DELETE' })
+    mutationFn: async (args: { node: Node; code: string }) => {
+      const res = await apiFetch(`/api/nodes/${args.node.id}`, {
+        method: 'DELETE',
+        body: { code: args.code },
+      })
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}))
+        throw new Error((j as { error?: string }).error || 'Failed to delete node')
+      }
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['nodes'] }),
     onError: (e: Error) => setError(e.message),
   })
+
+  const confirmDeleteNode = (node: Node) => {
+    if (!confirm(`Delete node "${node.name}"? Its servers fall back to manual mode.`)) return
+    setPending2FA({
+      label: `delete node "${node.name}"`,
+      run: async (code) => removeMutation.mutateAsync({ node, code }),
+    })
+  }
+
+  // Re-issue the join command: the plaintext node token is only stored
+  // hashed, so showing it again means rotating to a fresh one. The old
+  // token stops working immediately — re-run the command on the node.
+  const rotateMutation = useMutation({
+    mutationFn: async (args: { node: Node; code: string }) => {
+      const res = await apiFetch(`/api/nodes/${args.node.id}/rotate-token`, {
+        method: 'POST',
+        body: { code: args.code },
+      })
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}))
+        throw new Error((j as { error?: string }).error || 'Failed to rotate node token')
+      }
+      return (await res.json()) as { join_command: string; token: string }
+    },
+    onSuccess: (data: { join_command: string; token: string }, args: { node: Node; code: string }) => {
+      setJoin({ command: data.join_command, token: data.token, rotated: true, nodeName: args.node.name })
+      setCopied(false)
+      setError('')
+    },
+    onError: (e: Error) => setError(e.message),
+  })
+
+  const confirmJoinCommand = (node: Node) => {
+    setPending2FA({
+      label: `view the join command for node "${node.name}"`,
+      run: async (code) => {
+        await rotateMutation.mutateAsync({ node, code })
+      },
+    })
+  }
 
   const copyJoin = async () => {
     if (!join) return
@@ -103,9 +172,12 @@ function NodesPage() {
       {error && <p className="text-red-400 text-sm mb-3">{error}</p>}
 
       <Modal
-        open={showAdd}
-        onClose={() => setShowAdd(false)}
-        title="Add Node"
+        open={showAdd || !!join}
+        onClose={() => {
+          setShowAdd(false)
+          setJoin(null)
+        }}
+        title={join && !showAdd ? `Join command — ${join.nodeName || ''}` : 'Add Node'}
         className="max-w-lg"
       >
         {!join ? (
@@ -150,10 +222,17 @@ function NodesPage() {
           </form>
         ) : (
           <div className="space-y-4">
-            <p className="text-sm text-zinc-400">
-              Run this one-liner on the node machine. It installs Docker (if needed), builds the
-              agent and connects to this console. No inbound ports required.
-            </p>
+            {join.rotated ? (
+              <p className="text-sm text-amber-300">
+                A new token was issued — the previous one stopped working. Run this on the node to
+                reconnect it with the fresh token.
+              </p>
+            ) : (
+              <p className="text-sm text-zinc-400">
+                Run this one-liner on the node machine. It installs Docker (if needed), builds the
+                agent and connects to this console. No inbound ports required.
+              </p>
+            )}
             <pre className="bg-zinc-950 border border-zinc-800 rounded-md p-4 text-xs text-zinc-300 overflow-x-auto whitespace-pre-wrap break-all">
               {join.command}
             </pre>
@@ -242,12 +321,21 @@ function NodesPage() {
                         {node.last_status || '—'}
                       </td>
                       <td className="px-5 py-3 text-right">
+                        {isSuperAdmin && (
+                          <ActionLink
+                            onClick={() => {
+                              setShowAdd(false)
+                              setCopied(false)
+                              confirmJoinCommand(node)
+                            }}
+                          >
+                            <IconTerminal2 size={14} stroke={1.6} aria-hidden="true" />
+                            Join command
+                          </ActionLink>
+                        )}
                         <ActionLink
                           tone="danger"
-                          onClick={() => {
-                            if (confirm(`Delete node "${node.name}"? Its servers fall back to manual mode.`))
-                              removeMutation.mutate(node)
-                          }}
+                          onClick={() => confirmDeleteNode(node)}
                         >
                           Delete
                         </ActionLink>
@@ -260,6 +348,20 @@ function NodesPage() {
           </div>
         )}
       </div>
+
+      {/* Step-up 2FA: delete node or re-issue its join command */}
+      <Confirm2FA
+        open={pending2FA !== null}
+        onClose={() => setPending2FA(null)}
+        title="Confirm with 2FA"
+        description={
+          pending2FA
+            ? `Enter your own authenticator code to ${pending2FA.label}.`
+            : undefined
+        }
+        onSubmit={pending2FA ? pending2FA.run : null}
+        submitLabel="Authorize"
+      />
     </div>
   )
 }

@@ -163,6 +163,69 @@ func CreateNode(store *Store) http.HandlerFunc {
 	}
 }
 
+// RotateNodeToken issues a fresh agent token for a node and returns the full
+// join command carrying it. Only the token's hash is stored (the plaintext is
+// shown once at creation), so "show me the join command again" is implemented
+// as a rotation: the old token stops working the moment this runs and the new
+// one must be applied by re-running node-install.sh on the node. super_admin
+// only (route-gated) — a node token can re-enroll a replacement machine.
+func RotateNodeToken(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		nodeID, err := parseUUID(r.PathValue("id"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "Invalid node ID")
+			return
+		}
+
+		ctx := context.Background()
+		adminID := getAdminID(r)
+
+		// Re-issuing a node token hands out a working agent credential —
+		// require the acting super_admin's own 2FA code first.
+		var req stepUpRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "Invalid request body")
+			return
+		}
+		if !verifyActor2FA(w, r, ctx, store, adminID, req.Code) {
+			return
+		}
+
+		var exists bool
+		if err := store.pool.QueryRow(ctx,
+			`SELECT true FROM nodes WHERE id = $1`, nodeID).Scan(&exists); err != nil {
+			writeError(w, http.StatusNotFound, "Node not found")
+			return
+		}
+
+		token, err := generateNodeToken()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to generate token")
+			return
+		}
+		if _, err := store.pool.Exec(ctx,
+			`UPDATE nodes SET token_hash = $1 WHERE id = $2`,
+			hashNodeToken(token), nodeID); err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to rotate token")
+			return
+		}
+
+		logAudit(ctx, store, adminID, "node.token_rotate", "node", nodeID.String(), nil)
+
+		domain := os.Getenv("CONSOLE_DOMAIN")
+		join := fmt.Sprintf(
+			"curl -fsSL https://raw.githubusercontent.com/garyhooi/wireguard-console/main/node-install.sh | sudo bash -s -- %s https://%s %s",
+			token, domain, nodeID.String())
+
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":       "rotated",
+			"node_id":      nodeID.String(),
+			"token":        token,
+			"join_command": join,
+		})
+	}
+}
+
 func DeleteNode(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		nodeID, err := parseUUID(r.PathValue("id"))
@@ -173,6 +236,17 @@ func DeleteNode(store *Store) http.HandlerFunc {
 
 		ctx := context.Background()
 		adminID := getAdminID(r)
+
+		// Deleting a node drops its agent access — require the acting
+		// admin's own 2FA code first.
+		var req stepUpRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "Invalid request body")
+			return
+		}
+		if !verifyActor2FA(w, r, ctx, store, adminID, req.Code) {
+			return
+		}
 
 		// Unassign servers first so they fall back to manual mode.
 		if _, err := store.pool.Exec(ctx, `

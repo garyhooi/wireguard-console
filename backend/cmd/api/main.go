@@ -205,7 +205,8 @@ func main() {
 				r.Patch("/servers/{id}", api.UpdateServer(store))
 				r.Delete("/servers/{id}", api.DeleteServer(store))
 				r.Get("/servers/{id}/status", api.GetServerStatus(store))
-				r.Get("/servers/{id}/host-config", api.GetServerHostConfig(store))
+				// Host setup reveals the server's private key — POST + 2FA.
+				r.Post("/servers/{id}/host-config", api.GetServerHostConfig(store))
 
 				// Node management (admin session auth)
 				r.Get("/admins/me", api.GetMe(store))
@@ -220,6 +221,13 @@ func main() {
 				r.Post("/nodes", api.CreateNode(store))
 				r.Get("/nodes/local/status", api.GetLocalNodeStatus(store))
 				r.Delete("/nodes/{id}", api.DeleteNode(store))
+				// Rotating a node token re-issues the join command (the
+				// plaintext token is only stored hashed) — super_admin only,
+				// like the other node-management write actions.
+				r.Group(func(r chi.Router) {
+					r.Use(api.RequireRole(store, "super_admin"))
+					r.Post("/nodes/{id}/rotate-token", api.RotateNodeToken(store))
+				})
 
 				r.Get("/domain-rules", api.ListDomainRules(store))
 				r.Post("/domain-rules", api.CreateDomainRule(store))
@@ -247,6 +255,13 @@ func main() {
 				r.Get("/config/timezone", api.GetTimezoneConfig(store))
 				r.Patch("/config/timezone", api.UpdateTimezoneConfig(store))
 				r.Post("/config/email/test", api.SendTestEmail(store))
+				r.Get("/config/step-up", api.GetStepUpConfig(store))
+				// The 2FA step-up grace window is a security policy —
+				// super_admin only.
+				r.Group(func(r chi.Router) {
+					r.Use(api.RequireRole(store, "super_admin"))
+					r.Patch("/config/step-up", api.UpdateStepUpConfig(store))
+				})
 
 				// Backup endpoints (download/restore/delete require the
 				// acting admin's own 2FA code — see each handler).
