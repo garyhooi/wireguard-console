@@ -1,6 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { Confirm2FA } from '../../lib/Confirm2FA'
 import { apiFetch, apiJson } from '../../lib/api'
+import { is2FAError, useStepUpMinutes } from '../../lib/stepup'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { IconCopy, IconPlus, IconTerminal2 } from '@tabler/icons-react'
@@ -79,6 +80,24 @@ function ServersPage() {
     run: (code: string) => Promise<void>
   } | null>(null)
 
+  // 2FA step-up grace: try the action without a code first — the server
+  // accepts it when this session already verified within the window. Only
+  // when the server answers with a 2FA error do we open the code modal.
+  const stepUpMinutes = useStepUpMinutes()
+  const gate2FA = (label: string, run: (code: string) => Promise<void>) => {
+    if (stepUpMinutes <= 0) {
+      setPending2FA({ label, run }) // grace off — ask immediately
+      return
+    }
+    run('').catch((e: Error) => {
+      if (is2FAError(e.message)) {
+        setPending2FA({ label, run })
+      } else {
+        setError(e.message)
+      }
+    })
+  }
+
   const { data: nodes } = useQuery<{ id: string; name: string; status: string }[]>({
     queryKey: ['nodes'],
     queryFn: async () => {
@@ -132,10 +151,9 @@ function ServersPage() {
   // admin's own 2FA code before the PATCH. Creating is not gated.
   const submit = () => {
     if (editing) {
-      setPending2FA({
-        label: `save changes to server "${editing.name}"`,
-        run: async (code) => saveMutation.mutateAsync(code),
-      })
+      gate2FA(`save changes to server "${editing.name}"`, async (code) =>
+        saveMutation.mutateAsync(code),
+      )
     } else {
       saveMutation.mutate('')
     }
@@ -158,10 +176,9 @@ function ServersPage() {
 
   const confirmDelete = (server: Server) => {
     if (!confirm(`Delete server "${server.name}" and all of its peers?`)) return
-    setPending2FA({
-      label: `delete server "${server.name}"`,
-      run: async (code) => removeMutation.mutateAsync({ ...server, code }),
-    })
+    gate2FA(`delete server "${server.name}"`, async (code) =>
+      removeMutation.mutateAsync({ ...server, code }),
+    )
   }
 
   const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) =>
@@ -211,10 +228,9 @@ function ServersPage() {
   }
 
   const confirmHostSetup = (server: Server) => {
-    setPending2FA({
-      label: `view the host setup for server "${server.name}"`,
-      run: async (code) => fetchHostSetup(server, code),
-    })
+    gate2FA(`view the host setup for server "${server.name}"`, async (code) =>
+      fetchHostSetup(server, code),
+    )
   }
 
   const copyHostConfig = async () => {

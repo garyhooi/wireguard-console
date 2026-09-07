@@ -24,6 +24,7 @@ import {
 } from '../../lib/ui'
 import { Confirm2FA } from '../../lib/Confirm2FA'
 import { apiJson } from '../../lib/api'
+import { is2FAError, useStepUpMinutes } from '../../lib/stepup'
 import { fmtDate } from '../../lib/timezone'
 
 interface Admin {
@@ -71,6 +72,24 @@ function AdminsPage() {
   const [draftEmail, setDraftEmail] = useState('')
   // Step-up 2FA gate for privileged actions.
   const [pending2FA, setPending2FA] = useState<Pending2FA | null>(null)
+
+  // 2FA step-up grace: try the action without a code first — the server
+  // accepts it when this session already verified within the window. Only
+  // when the server answers with a 2FA error do we open the code modal.
+  const stepUpMinutes = useStepUpMinutes()
+  const gate2FA = (label: string, run: (code: string) => Promise<void>) => {
+    if (stepUpMinutes <= 0) {
+      setPending2FA({ label, run }) // grace off — ask immediately
+      return
+    }
+    run('').catch((e: Error) => {
+      if (is2FAError(e.message)) {
+        setPending2FA({ label, run })
+      } else {
+        setError(e.message)
+      }
+    })
+  }
 
   const { data: me } = useQuery<Me>({
     queryKey: ['me'],
@@ -214,35 +233,29 @@ function AdminsPage() {
   // be re-emailed verbatim). This is the same reset-password flow below;
   // the acting super_admin confirms with their own 2FA code.
   const confirmResetPassword = (admin: Admin) => {
-    setPending2FA({
-      label: `reset the password for ${admin.email}`,
-      run: (code) => resetPwMutation.mutateAsync({ admin, code }).then(() => undefined),
-    })
+    gate2FA(`reset the password for ${admin.email}`, (code) =>
+      resetPwMutation.mutateAsync({ admin, code }).then(() => undefined),
+    )
   }
 
   const confirmReset2FA = (admin: Admin) => {
-    setPending2FA({
-      label: `reset 2FA for ${admin.email}`,
-      run: (code) => reset2FAMutation.mutateAsync({ admin, code }).then(() => undefined),
-    })
+    gate2FA(`reset 2FA for ${admin.email}`, (code) =>
+      reset2FAMutation.mutateAsync({ admin, code }).then(() => undefined),
+    )
   }
 
   const confirmRoleChange = (admin: Admin, role: string) => {
     if (admin.role === role) return
-    setPending2FA({
-      label: `change ${admin.email}'s role to ${ROLE_LABELS[role] || role}`,
-      run: (code) =>
-        roleMutation.mutateAsync({ id: admin.id, role, code }).then(() => undefined),
-    })
+    gate2FA(`change ${admin.email}'s role to ${ROLE_LABELS[role] || role}`, (code) =>
+      roleMutation.mutateAsync({ id: admin.id, role, code }).then(() => undefined),
+    )
   }
 
   const confirmStatusToggle = (admin: Admin) => {
     const next = admin.status === 'active' ? 'disable' : 'enable'
-    setPending2FA({
-      label: `${next} admin ${admin.email}`,
-      run: (code) =>
-        statusMutation.mutateAsync({ admin, code }).then(() => undefined),
-    })
+    gate2FA(`${next} admin ${admin.email}`, (code) =>
+      statusMutation.mutateAsync({ admin, code }).then(() => undefined),
+    )
   }
 
   const beginEmailEdit = (admin: Admin) => {
@@ -256,10 +269,9 @@ function AdminsPage() {
       setEditingId('')
       return
     }
-    setPending2FA({
-      label: `change ${admin.email}'s email to ${email}`,
-      run: (code) => emailMutation.mutateAsync({ id: admin.id, email, code }).then(() => undefined),
-    })
+    gate2FA(`change ${admin.email}'s email to ${email}`, (code) =>
+      emailMutation.mutateAsync({ id: admin.id, email, code }).then(() => undefined),
+    )
     setEditingId('')
   }
 

@@ -125,6 +125,27 @@ export function clampTop(top?: { name: string; rx: number; tx: number }[]) {
   }))
 }
 
+// AngleTopTick renders a bar-chart X tick with the label rotated 45° so
+// long peer/device names stop overlapping. The full name is kept in a
+// title tooltip (hover) and truncated to ~18 chars to keep the bar slim.
+function AngleTopTick({ x, y, payload }: { x?: number; y?: number; payload?: { value: string } }) {
+  const name = payload?.value ?? ''
+  const shown = name.length > 18 ? `${name.slice(0, 17)}…` : name
+  return (
+    <g transform={`translate(${x ?? 0},${y ?? 0})`}>
+      <title>{name}</title>
+      <text
+        transform="rotate(45)"
+        textAnchor="start"
+        dy={2}
+        style={{ fontSize: 10, fill: '#71717a' }}
+      >
+        {shown}
+      </text>
+    </g>
+  )
+}
+
 // Ranked list of domains with counts (top-10 panel).
 function DomainRankList({
   items,
@@ -348,16 +369,17 @@ export function StatisticsPage() {
               <Skeleton className="h-64 w-full" />
             </div>
           ) : (traffic?.top?.length ?? 0) > 0 ? (
-            <div className="p-4">
+            <div className="p-4 pb-10">
               <ResponsiveContainer width="100%" height={280}>
-                <BarChart data={clampTop(traffic?.top)} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+                <BarChart data={clampTop(traffic?.top)} margin={{ top: 4, right: 8, left: 0, bottom: 46 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
                   <XAxis
                     dataKey="name"
                     stroke="#71717a"
-                    tick={{ fontSize: 10 }}
+                    tick={<AngleTopTick />}
                     tickLine={false}
                     interval={0}
+                    height={50}
                   />
                   <YAxis domain={[0, 'auto']} stroke="#71717a" tick={{ fontSize: 11 }} tickFormatter={(v: number) => formatBytes(Number.isFinite(Number(v)) ? Number(v) : 0)} tickLine={false} />
                   <Tooltip contentStyle={chartTooltipStyle} formatter={fmtTooltip} />

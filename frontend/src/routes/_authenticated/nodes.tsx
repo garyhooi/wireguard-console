@@ -1,6 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { Confirm2FA } from '../../lib/Confirm2FA'
 import { apiFetch, apiJson } from '../../lib/api'
+import { is2FAError, useStepUpMinutes } from '../../lib/stepup'
 import { fmtDateTime } from '../../lib/timezone'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
@@ -59,6 +60,24 @@ function NodesPage() {
     run: (code: string) => Promise<void>
   } | null>(null)
 
+  // 2FA step-up grace: try the action without a code first — the server
+  // accepts it when this session already verified within the window. Only
+  // when the server answers with a 2FA error do we open the code modal.
+  const stepUpMinutes = useStepUpMinutes()
+  const gate2FA = (label: string, run: (code: string) => Promise<void>) => {
+    if (stepUpMinutes <= 0) {
+      setPending2FA({ label, run }) // grace off — ask immediately
+      return
+    }
+    run('').catch((e: Error) => {
+      if (is2FAError(e.message)) {
+        setPending2FA({ label, run })
+      } else {
+        setError(e.message)
+      }
+    })
+  }
+
   // Which admin is signed in — the Join-command (token rotate) action is
   // super_admin only, like the other sensitive re-issue actions.
   const { data: me } = useQuery<{ id: string; email: string; role: string }>({
@@ -107,10 +126,9 @@ function NodesPage() {
 
   const confirmDeleteNode = (node: Node) => {
     if (!confirm(`Delete node "${node.name}"? Its servers fall back to manual mode.`)) return
-    setPending2FA({
-      label: `delete node "${node.name}"`,
-      run: async (code) => removeMutation.mutateAsync({ node, code }),
-    })
+    gate2FA(`delete node "${node.name}"`, async (code) =>
+      removeMutation.mutateAsync({ node, code }),
+    )
   }
 
   // Re-issue the join command: the plaintext node token is only stored
@@ -137,11 +155,8 @@ function NodesPage() {
   })
 
   const confirmJoinCommand = (node: Node) => {
-    setPending2FA({
-      label: `view the join command for node "${node.name}"`,
-      run: async (code) => {
-        await rotateMutation.mutateAsync({ node, code })
-      },
+    gate2FA(`view the join command for node "${node.name}"`, async (code) => {
+      await rotateMutation.mutateAsync({ node, code })
     })
   }
 
@@ -276,7 +291,9 @@ function NodesPage() {
                   <th className={thCls}>Agent</th>
                   <th className={thCls}>Servers</th>
                   <th className={thCls}>Last seen</th>
-                  <th className={thCls}>Agent report</th>
+                  <th className={thCls} title="The agent's own status text from its most recent report (e.g. 'ok', or apply warnings)">
+                    Last report
+                  </th>
                   <th className={thCls + ' text-right'}>Actions</th>
                 </tr>
               </thead>
