@@ -100,7 +100,9 @@ A **node** is a machine in another location (e.g. Singapore, Thailand) that runs
    - **Managed by** → `Node (agent applies it automatically)`
    - **Node** → pick `Singapore Exit`
    - **Network** → a subnet unique to this location, e.g. `10.9.0.0/24`
-   - **DNS servers** → set a public resolver (e.g. `1.1.1.1, 8.8.8.8`). Nodes have no AdGuard, and leaving this empty defaults peers to the tunnel gateway, where no DNS server listens — clients then can't resolve anything.
+   - **DNS servers** → never leave empty (peers default to the tunnel gateway, where nothing listens on 53):
+     - public resolver, e.g. `1.1.1.1, 8.8.8.8` — simplest
+     - the console's public IP, to reuse its AdGuard filtering — first allow DNS from this node on the console: `sudo ufw allow from <node-public-ip> to any port 53 proto udp`
 
 6. **Wait ~30s and verify.** The console shows the node green/"ok" with a server count; on the node machine `sudo wg show` lists the interface. Add a peer to that server and connect from a device to test the exit.
 
