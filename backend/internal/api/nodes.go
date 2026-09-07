@@ -319,6 +319,17 @@ func ReportNodeState(store *Store) http.HandlerFunc {
 			Status  string          `json:"status"`
 			Details string          `json:"details"`
 			Metrics json.RawMessage `json:"metrics"` // optional host snapshot
+			// Interfaces carries the agent's live per-peer kernel state for
+			// each interface this node manages (see wg-helper agent.go). Old
+			// agents omit it; when present we refresh peers.last_handshake_at
+			// so node-server peers show real handshake times in the UI.
+			Interfaces []struct {
+				InterfaceName string `json:"interface_name"`
+				Peers         []struct {
+					PublicKey       string `json:"public_key"`
+					LastHandshakeAt string `json:"last_handshake_at"`
+				} `json:"peers"`
+			} `json:"interfaces"`
 		}
 		json.NewDecoder(r.Body).Decode(&req)
 		if req.Status == "" {
@@ -352,6 +363,40 @@ func ReportNodeState(store *Store) http.HandlerFunc {
 		if qerr != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to update node")
 			return
+		}
+
+		// Refresh last_handshake_at for every peer the agent reports live
+		// state for. The console's traffic worker only samples local servers,
+		// so without this, peers on remote-node servers would stay "Never"
+		// forever. Resolve each interface_name to this node's server id and
+		// update peers by (server, public_key).
+		if len(req.Interfaces) > 0 {
+			ctx := context.Background()
+			for _, iface := range req.Interfaces {
+				if len(iface.Peers) == 0 {
+					continue
+				}
+				var serverID uuid.UUID
+				err := store.pool.QueryRow(ctx, `
+					SELECT id FROM servers
+					WHERE node_id = $1 AND interface_name = $2
+					  AND status = 'active' AND managed_mode = 'remote'
+				`, nodeID, iface.InterfaceName).Scan(&serverID)
+				if err != nil {
+					continue // not one of this node's servers — skip
+				}
+				for _, p := range iface.Peers {
+					if p.LastHandshakeAt == "" || p.PublicKey == "" {
+						continue
+					}
+					if t, err := time.Parse(time.RFC3339, p.LastHandshakeAt); err == nil {
+						_, _ = store.pool.Exec(ctx, `
+							UPDATE peers SET last_handshake_at = $1
+							WHERE server_id = $2 AND public_key = $3
+						`, t, serverID, p.PublicKey)
+					}
+				}
+			}
 		}
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

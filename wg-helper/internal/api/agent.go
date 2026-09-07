@@ -68,7 +68,7 @@ func (a *Agent) cycle() {
 	state, err := a.fetchState()
 	if err != nil {
 		log.Printf("agent: fetch failed: %v", err)
-		a.report("error", err.Error(), a.handler.collectMetrics())
+		a.report("error", err.Error(), a.handler.collectMetrics(), nil)
 		return
 	}
 
@@ -106,7 +106,24 @@ func (a *Agent) cycle() {
 	if details != "" {
 		status = "warning"
 	}
-	a.report(status, details, a.handler.collectMetrics())
+
+	// Collect live per-peer kernel state (handshake/rx/tx) for every desired
+	// interface so the console can show real handshake times for this node's
+	// peers — not just the local host's. Interfaces that just failed to apply
+	// are skipped (no kernel device to read yet).
+	interfaces := make([]interfaceReport, 0, len(state.Servers))
+	for _, srv := range state.Servers {
+		stats, err := a.handler.devicePeers(srv.InterfaceName)
+		if err != nil {
+			continue // not present yet (apply failed / first poll) — no state to report
+		}
+		interfaces = append(interfaces, interfaceReport{
+			InterfaceName: srv.InterfaceName,
+			Peers:         stats,
+		})
+	}
+
+	a.report(status, details, a.handler.collectMetrics(), interfaces)
 }
 
 func (a *Agent) fetchState() (*desiredState, error) {
@@ -132,14 +149,22 @@ func (a *Agent) fetchState() (*desiredState, error) {
 	return &state, nil
 }
 
-// report sends status (+ optional host metrics) back to the console. The
-// console stores the metrics for the monitoring page; old consoles ignore
-// the extra field.
-func (a *Agent) report(status, details string, snap metrics.Snapshot) {
+// interfaceReport is the live per-peer kernel state of one WireGuard
+// interface on this node, reported to the console after each poll cycle.
+type interfaceReport struct {
+	InterfaceName string      `json:"interface_name"`
+	Peers         []peerStats `json:"peers"`
+}
+
+// report sends status (+ optional host metrics and per-peer interface state)
+// back to the console. The console stores the metrics for the monitoring
+// page; old consoles ignore the extra fields.
+func (a *Agent) report(status, details string, snap metrics.Snapshot, interfaces []interfaceReport) {
 	type reportBody struct {
-		Status  string            `json:"status"`
-		Details string            `json:"details"`
-		Metrics *metrics.Snapshot `json:"metrics,omitempty"`
+		Status     string            `json:"status"`
+		Details    string            `json:"details"`
+		Metrics    *metrics.Snapshot `json:"metrics,omitempty"`
+		Interfaces []interfaceReport `json:"interfaces,omitempty"`
 	}
 	// Only attach metrics when at least one subsystem produced data —
 	// avoids a 200-byte '{}' snapshot on every poll of a broken collector.
@@ -149,7 +174,7 @@ func (a *Agent) report(status, details string, snap metrics.Snapshot) {
 		s := snap
 		m = &s
 	}
-	body, _ := json.Marshal(reportBody{Status: status, Details: details, Metrics: m})
+	body, _ := json.Marshal(reportBody{Status: status, Details: details, Metrics: m, Interfaces: interfaces})
 	req, err := http.NewRequest(http.MethodPost,
 		fmt.Sprintf("%s/api/nodes/%s/report", a.url, a.nodeID), bytes.NewReader(body))
 	if err != nil {

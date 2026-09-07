@@ -303,10 +303,23 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dev, err := h.client.Device(req.InterfaceName)
+	peers, err := h.devicePeers(req.InterfaceName)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to get device: %v", err))
 		return
+	}
+
+	writeJSON(w, http.StatusOK, statsResponse{Peers: peers})
+}
+
+// devicePeers returns live per-peer kernel stats (rx/tx + last handshake)
+// for one WireGuard interface. Shared by the local /stats endpoint and the
+// distributed-node agent, which reports this state back to the console so
+// node-server peers show real handshake times.
+func (h *Handler) devicePeers(iface string) ([]peerStats, error) {
+	dev, err := h.client.Device(iface)
+	if err != nil {
+		return nil, err
 	}
 
 	var peers []peerStats
@@ -322,8 +335,7 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 			LastHandshakeAt: lastHandshake,
 		})
 	}
-
-	writeJSON(w, http.StatusOK, statsResponse{Peers: peers})
+	return peers, nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
