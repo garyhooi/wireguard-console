@@ -34,6 +34,7 @@ interface Peer {
   created_at: string
   user_email: string
   user_full_name: string
+  server_name: string
 }
 
 interface Server {
@@ -547,6 +548,7 @@ function PeersPage() {
               <thead>
                 <tr className="text-left text-[11px] uppercase tracking-wider text-zinc-500 bg-zinc-800/40">
                   <th className={thCls}>Name</th>
+                  <th className={thCls}>Server</th>
                   <th className={thCls}>User</th>
                   <th className={thCls}>Public Key</th>
                   <th className={thCls}>Allowed IP</th>
@@ -559,6 +561,7 @@ function PeersPage() {
                 {activePeers.map((peer) => (
                   <tr key={peer.id} className="hover:bg-zinc-800/30 transition-colors">
                     <td className="px-5 py-3.5 whitespace-nowrap text-sm text-zinc-200">{peer.name}</td>
+                    <td className={tdCls}>{peer.server_name || '—'}</td>
                     <td className={tdCls}>
                       {peer.user_full_name || peer.user_email || '—'}
                     </td>

@@ -533,6 +533,19 @@ func TestEndToEnd(t *testing.T) {
 		"managed_mode": "remote", "node_id": nodeID,
 	})
 	expectStatus(t, resp, 201, "POST /api/servers (remote)")
+	remoteServerID := ""
+	{
+		var allSrv []map[string]interface{}
+		json.Unmarshal([]byte(rawGet(t, baseURL+"/api/servers", token)), &allSrv)
+		for _, s := range allSrv {
+			if n, _ := s["name"].(string); n == "Remote-1" {
+				remoteServerID, _ = s["id"].(string)
+			}
+		}
+	}
+	if remoteServerID == "" {
+		t.Fatal("remote server id not found in list")
+	}
 
 	// Agent state with the node token (authorization enforced)
 	resp, state := api(t, "GET", "/api/nodes/"+nodeID+"/state", "Bearer "+nodeToken, nil)
@@ -615,6 +628,90 @@ func TestEndToEnd(t *testing.T) {
 		"status": "ok", "details": "", "metrics": map[string]interface{}{"cpu": map[string]interface{}{"percent": "not-a-number"}},
 	})
 	expectStatus(t, resp, 200, "POST /api/nodes/{id}/report (invalid metrics tolerated)")
+
+	// Node peers report live handshake state: create a peer on the remote
+	// server, POST a report carrying that peer's kernel stats (as the agent
+	// would), and assert the console persisted last_handshake_at — remote
+	// servers have no local traffic worker, so this is the only refresh path.
+	remotePeerID, remotePeerKey := "", ""
+	{
+		var allUsr []map[string]interface{}
+		json.Unmarshal([]byte(rawGet(t, baseURL+"/api/users", token)), &allUsr)
+		anyUserID := ""
+		if len(allUsr) > 0 {
+			anyUserID, _ = allUsr[0]["id"].(string)
+		}
+		if anyUserID == "" {
+			t.Fatal("no user to attach remote peer")
+		}
+		_, peerOut := api(t, "POST", "/api/peers", token, map[string]interface{}{
+			"name": "Remote MacBook", "server_id": remoteServerID, "user_id": anyUserID,
+		})
+		remotePeerKey, _ = peerOut["public_key"].(string)
+		if remotePeerKey == "" {
+			t.Fatal("remote peer create returned no public_key")
+		}
+		var allP []map[string]interface{}
+		json.Unmarshal([]byte(rawGet(t, baseURL+"/api/peers", token)), &allP)
+		for _, p := range allP {
+			if k, _ := p["public_key"].(string); k == remotePeerKey {
+				remotePeerID, _ = p["id"].(string)
+			}
+		}
+		if remotePeerID == "" {
+			t.Fatal("remote peer not found in peer list")
+		}
+	}
+
+	hs := "2025-09-05T03:00:00Z"
+	resp, _ = api(t, "POST", "/api/nodes/"+nodeID+"/report", "Bearer "+nodeToken, map[string]interface{}{
+		"status": "ok", "details": "",
+		"interfaces": []interface{}{
+			map[string]interface{}{
+				"interface_name": "wg0",
+				"peers": []interface{}{
+					map[string]interface{}{
+						"public_key":        remotePeerKey,
+						"last_handshake_at": hs,
+					},
+				},
+			},
+		},
+	})
+	expectStatus(t, resp, 200, "POST /api/nodes/{id}/report (with peer interfaces)")
+
+	// The handshake must now be persisted on the remote peer (it was NULL).
+	var stored *string
+	{
+		poolX, _ := pgxpool.New(context.Background(), dbURL)
+		defer poolX.Close()
+		var raw *time.Time
+		poolX.QueryRow(context.Background(),
+			`SELECT last_handshake_at FROM peers WHERE id = $1`, remotePeerID).Scan(&raw)
+		if raw != nil {
+			s := raw.UTC().Format(time.RFC3339)
+			stored = &s
+		}
+	}
+	if stored == nil || *stored != hs {
+		t.Fatalf("remote peer last_handshake_at = %v, want %s", stored, hs)
+	}
+
+	// The peers list must now carry the server name (Server column data).
+	peerListRaw := rawGet(t, baseURL+"/api/peers", token)
+	var peerRowsRemote []map[string]interface{}
+	json.Unmarshal([]byte(peerListRaw), &peerRowsRemote)
+	foundServerName := false
+	for _, pr := range peerRowsRemote {
+		if id, _ := pr["id"].(string); id == remotePeerID {
+			if sn, _ := pr["server_name"].(string); sn == "Remote-1" {
+				foundServerName = true
+			}
+		}
+	}
+	if !foundServerName {
+		t.Fatal("remote peer list row missing server_name='Remote-1'")
+	}
 
 	// Console host card: /api/nodes/local/status reads the fake wg-helper
 	resp, localOut := api(t, "GET", "/api/nodes/local/status", token, nil)
