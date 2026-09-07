@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -59,6 +60,14 @@ type nodeView struct {
 	ServerCount int             `json:"server_count"`
 	Metrics     json.RawMessage `json:"metrics"` // latest host snapshot (see metrics package)
 	MetricsAt   *string         `json:"metrics_at"`
+	// AgentVersion is the wg-helper build this node reports (from
+	// metrics.host.agent_version), and AgentMismatch is true when that
+	// version differs from the console's own APP_VERSION — the admin then
+	// knows the node is running an older agent and should re-run the node
+	// installer. Both are "" / false when the node hasn't reported metrics
+	// yet, or when the console itself is a "dev" build (no comparison).
+	AgentVersion  string `json:"agent_version"`
+	AgentMismatch bool   `json:"agent_mismatch"`
 }
 
 func ListNodes(store *Store) http.HandlerFunc {
@@ -98,6 +107,7 @@ func ListNodes(store *Store) http.HandlerFunc {
 				n.Metrics = json.RawMessage("{}")
 			} else {
 				n.Metrics = metrics
+				n.AgentVersion, n.AgentMismatch = agentVersionInfo(metrics)
 			}
 			nodes = append(nodes, n)
 		}
@@ -202,13 +212,47 @@ func GetLocalNodeStatus(store *Store) http.HandlerFunc {
 			writeError(w, http.StatusServiceUnavailable, "Local wg-helper returned invalid metrics")
 			return
 		}
+		agentVersion, mismatch := agentVersionInfo(sanitized)
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"hostname":   "Local host (console)",
-			"is_local":   true,
-			"metrics":    json.RawMessage(sanitized),
-			"metrics_at": time.Now().UTC().Format(time.RFC3339),
+			"hostname":       "Local host (console)",
+			"is_local":       true,
+			"metrics":        json.RawMessage(sanitized),
+			"metrics_at":     time.Now().UTC().Format(time.RFC3339),
+			"agent_version":  agentVersion,
+			"agent_mismatch": mismatch,
 		})
 	}
+}
+
+// agentVersionInfo extracts the wg-helper agent version a machine reports
+// from its sanitized host-metrics payload (metrics.host.agent_version) and
+// whether it differs from the console's own version. The console stamps its
+// APP_VERSION on every install; node agents are stamped with the repo VERSION
+// they were built from (node-install.sh). A mismatch means the machine runs
+// an agent older than the console and the node installer should be re-run.
+// Returns ("", false) when no version is reported, when it is "dev" (an
+// unstamped build — nothing to compare), or when the console is a dev build.
+func agentVersionInfo(metricsJSON json.RawMessage) (string, bool) {
+	var m struct {
+		Host struct {
+			AgentVersion string `json:"agent_version"`
+		} `json:"host"`
+	}
+	if err := json.Unmarshal(metricsJSON, &m); err != nil {
+		return "", false
+	}
+	v := strings.TrimSpace(m.Host.AgentVersion)
+	if v == "" || v == "dev" {
+		return v, false
+	}
+	cur := strings.TrimSpace(ConsoleVersion())
+	if cur == "" || cur == "dev" {
+		return v, false // console itself unknown — can't judge
+	}
+	// "v1.2.3" (a GitHub-style tag) and "1.2.3" (repo VERSION) are the same
+	// release — compare with the leading "v" normalized away.
+	norm := func(s string) string { return strings.TrimPrefix(s, "v") }
+	return v, norm(v) != norm(cur)
 }
 
 // ---- Agent-facing endpoints (token auth) ----

@@ -50,10 +50,15 @@ else
   git -C "${INSTALL_DIR}" reset -q --hard origin/main
 fi
 
-# 3. Build the agent image.
+# 3. Build the agent image, stamped with the release this checkout cloned
+#    (repo-root VERSION file) so the console can show which nodes run an
+#    agent older than the console itself. Without the stamp the agent
+#    reports "dev" and the console cannot flag out-of-date nodes.
 info "Building wg-helper image (first run takes a few minutes)..."
 cd "${INSTALL_DIR}"
-docker build -q -t wireguard-console-wg-helper wg-helper >/dev/null
+AGENT_VERSION="$(tr -d '[:space:]' < VERSION 2>/dev/null || true)"
+[[ -n "${AGENT_VERSION}" ]] || AGENT_VERSION="dev"
+docker build -q --build-arg "VERSION=${AGENT_VERSION}" -t wireguard-console-wg-helper wg-helper >/dev/null
 
 # 4. Run the agent. Stale containers are replaced.
 #    The host root is bind-mounted read-only at /host (slave propagation) so

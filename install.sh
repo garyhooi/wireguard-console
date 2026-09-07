@@ -169,6 +169,25 @@ stamp_app_version() {
   fi
 }
 
+# stamp_wg_helper_version sets WG_HELPER_VERSION in a .env file to the same
+# release as APP_VERSION (the repo-root VERSION), so the local wg-helper
+# container is rebuilt with a real agent version on every update. Runs on
+# EVERY install/update — a kept .env from an older installer may lack the key.
+stamp_wg_helper_version() {
+  local file="$1"
+  local value
+  value="$(tr -d '[:space:]' < "${INSTALL_DIR}/VERSION" 2>/dev/null || true)"
+  [[ -n "${value}" ]] || value="dev"
+  if grep -q '^WG_HELPER_VERSION=' "$file"; then
+    WG_HELPER_VERSION_VAL="${value}" awk '
+      /^WG_HELPER_VERSION=/ { print "WG_HELPER_VERSION=" ENVIRON["WG_HELPER_VERSION_VAL"]; next }
+      { print }
+    ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+  else
+    printf "\nWG_HELPER_VERSION=%s\n" "${value}" >> "$file"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # 1. Must be root (needs apt, systemd, Docker, firewall access)
 # ---------------------------------------------------------------------------
@@ -493,6 +512,11 @@ else
 # the newest GitHub release for update hints. Resolved by stamp_app_version
 # right after this block.
 APP_VERSION=${APP_VERSION:-}
+# WG_HELPER_VERSION is what the wg-helper build arg gets stamped with (the
+# console host's local agent). Resolved right after this block so it always
+# matches the release being installed — the Monitoring card then flags the
+# console host too if its helper ever falls behind.
+WG_HELPER_VERSION=
 CONSOLE_DOMAIN=${CONSOLE_DOMAIN}
 WG_PUBLIC_ENDPOINT=${WG_PUBLIC_ENDPOINT}
 # Empty for domain mode (public ACME certificates); "internal" for
@@ -556,6 +580,8 @@ fi
 # alike). On upgrades CALLER_APP_VERSION carries the caller's export through
 # `source .env`; otherwise the value comes from this checkout's VERSION file.
 stamp_app_version .env "${CALLER_APP_VERSION:-}"
+# WG_HELPER_VERSION likewise always tracks the release being installed.
+stamp_wg_helper_version .env
 
 # ---------------------------------------------------------------------------
 # 9. Firewall — only touch it if ufw is installed AND active, and only add

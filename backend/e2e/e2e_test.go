@@ -618,6 +618,16 @@ func TestEndToEnd(t *testing.T) {
 	if host == nil || host["hostname"] != "node-1" {
 		t.Fatalf("node list metrics missing host: %v", metricsObj)
 	}
+	// The reported agent version must surface on the node row so the UI can
+	// flag out-of-date nodes. The e2e console runs without APP_VERSION (a
+	// "dev" build), so agent_mismatch must be false — a dev console never
+	// flags nodes (nothing to compare against).
+	if av, _ := nodeRows[0]["agent_version"].(string); av != "e2e" {
+		t.Fatalf("node list agent_version = %q, want the reported 'e2e'", av)
+	}
+	if mm, _ := nodeRows[0]["agent_mismatch"].(bool); mm {
+		t.Fatal("node agent_mismatch should be false when the console is a dev build")
+	}
 	load, _ := metricsObj["load"].([]interface{})
 	if len(load) != 3 {
 		t.Fatalf("node list metrics load = %v", metricsObj["load"])

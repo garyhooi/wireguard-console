@@ -6,6 +6,7 @@ import { useState } from 'react'
 import { IconCopy, IconPlus } from '@tabler/icons-react'
 import {
   ActionLink,
+  Badge,
   EmptyState,
   GhostButton,
   Modal,
@@ -29,6 +30,8 @@ interface Node {
   last_seen_at: string | null
   last_status: string
   server_count: number
+  agent_version?: string
+  agent_mismatch?: boolean
 }
 
 export const Route = createFileRoute('/_authenticated/nodes')({
@@ -191,6 +194,7 @@ function NodesPage() {
                 <tr className="text-left text-[11px] uppercase tracking-wider text-zinc-500 bg-zinc-800/40">
                   <th className={thCls}>Node</th>
                   <th className={thCls}>Status</th>
+                  <th className={thCls}>Agent</th>
                   <th className={thCls}>Servers</th>
                   <th className={thCls}>Last seen</th>
                   <th className={thCls}>Agent report</th>
@@ -209,6 +213,26 @@ function NodesPage() {
                       </td>
                       <td className="px-5 py-3">
                         <StatusBadge status={online ? 'ok' : node.last_seen_at ? 'warning' : 'error'} />
+                      </td>
+                      <td className="px-5 py-3">
+                        {node.agent_version ? (
+                          node.agent_version === 'dev' ? (
+                            <span className="text-xs text-zinc-500 italic">dev</span>
+                          ) : (
+                            <span className="inline-flex items-center gap-2">
+                              <span className={`font-mono text-xs ${node.agent_mismatch ? 'text-red-400' : 'text-zinc-300'}`}>
+                                {node.agent_version.startsWith('v') ? node.agent_version : `v${node.agent_version}`}
+                              </span>
+                              {node.agent_mismatch && (
+                                <Badge tone="bad" label="update">
+                                  outdated
+                                </Badge>
+                              )}
+                            </span>
+                          )
+                        ) : (
+                          <span className="text-xs text-zinc-600">—</span>
+                        )}
                       </td>
                       <td className={tdCls + ' font-mono tabular-nums'}>{node.server_count}</td>
                       <td className={tdCls + ' font-mono tabular-nums'}>
