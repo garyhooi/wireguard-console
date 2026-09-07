@@ -134,6 +134,10 @@ function NodesPage() {
   // Re-issue the join command: the plaintext node token is only stored
   // hashed, so showing it again means rotating to a fresh one. The old
   // token stops working immediately — re-run the command on the node.
+  //
+  // This resets the token, so confirm FIRST: the warning must live in this
+  // pre-2FA popup, because inside the 2FA step-up grace window the rotation
+  // goes through with no code at all — a mis-click would strand the node.
   const rotateMutation = useMutation({
     mutationFn: async (args: { node: Node; code: string }) => {
       const res = await apiFetch(`/api/nodes/${args.node.id}/rotate-token`, {
@@ -155,7 +159,16 @@ function NodesPage() {
   })
 
   const confirmJoinCommand = (node: Node) => {
-    gate2FA(`view the join command for node "${node.name}"`, async (code) => {
+    if (
+      !confirm(
+        `Re-issue the join command for "${node.name}"?\n\n` +
+          'This resets the node token — the previous one stops working ' +
+          'immediately. Run the new command on the node to reconnect it.',
+      )
+    ) {
+      return
+    }
+    gate2FA(`reset the join token for node "${node.name}"`, async (code) => {
       await rotateMutation.mutateAsync({ node, code })
     })
   }
