@@ -235,6 +235,7 @@ func UpdateServer(store *Store) http.HandlerFunc {
 			DefaultAllowedIPs   string   `json:"default_allowed_ips"`
 			MTU                 int      `json:"mtu"`
 			PersistentKeepalive int      `json:"persistent_keepalive"`
+			Code                string   `json:"code"` // step-up 2FA
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
@@ -244,6 +245,11 @@ func UpdateServer(store *Store) http.HandlerFunc {
 		ctx := context.Background()
 		adminID := getAdminID(r)
 
+		// Editing a server reconfigures live VPN routing/NAT — require the
+		// acting admin's own 2FA code first.
+		if !verifyActor2FA(w, ctx, store, adminID, req.Code) {
+			return
+		}
 		_, err = store.pool.Exec(ctx, `
 			UPDATE servers 
 			SET name = $1, public_endpoint = $2, listen_port = $3, network_cidr = $4,
@@ -273,6 +279,17 @@ func DeleteServer(store *Store) http.HandlerFunc {
 
 		ctx := context.Background()
 		adminID := getAdminID(r)
+
+		// Deleting a server tears down the interface and every peer — require
+		// the acting admin's own 2FA code first.
+		var req stepUpRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "Invalid request body")
+			return
+		}
+		if !verifyActor2FA(w, ctx, store, adminID, req.Code) {
+			return
+		}
 
 		var ifaceName string
 		if err := store.pool.QueryRow(ctx, `SELECT interface_name FROM servers WHERE id = $1`, serverID).Scan(&ifaceName); err != nil {
@@ -316,6 +333,9 @@ func DeleteServer(store *Store) http.HandlerFunc {
 // server: the server's own interface (decrypted private key, gateway
 // address, listen port) plus every active peer, and the one-time NAT
 // command required for client internet access.
+//
+// Served as POST (not GET): the config contains the server's private key,
+// so the acting admin must confirm with their own 2FA code first.
 func GetServerHostConfig(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		serverID, err := parseUUID(r.PathValue("id"))
@@ -325,6 +345,16 @@ func GetServerHostConfig(store *Store) http.HandlerFunc {
 		}
 
 		ctx := context.Background()
+		adminID := getAdminID(r)
+
+		var req stepUpRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "Invalid request body")
+			return
+		}
+		if !verifyActor2FA(w, ctx, store, adminID, req.Code) {
+			return
+		}
 
 		var (
 			ifaceName      string

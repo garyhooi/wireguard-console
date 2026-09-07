@@ -180,6 +180,17 @@ func RotateNodeToken(store *Store) http.HandlerFunc {
 		ctx := context.Background()
 		adminID := getAdminID(r)
 
+		// Re-issuing a node token hands out a working agent credential —
+		// require the acting super_admin's own 2FA code first.
+		var req stepUpRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "Invalid request body")
+			return
+		}
+		if !verifyActor2FA(w, ctx, store, adminID, req.Code) {
+			return
+		}
+
 		var exists bool
 		if err := store.pool.QueryRow(ctx,
 			`SELECT true FROM nodes WHERE id = $1`, nodeID).Scan(&exists); err != nil {
@@ -225,6 +236,17 @@ func DeleteNode(store *Store) http.HandlerFunc {
 
 		ctx := context.Background()
 		adminID := getAdminID(r)
+
+		// Deleting a node drops its agent access — require the acting
+		// admin's own 2FA code first.
+		var req stepUpRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "Invalid request body")
+			return
+		}
+		if !verifyActor2FA(w, ctx, store, adminID, req.Code) {
+			return
+		}
 
 		// Unassign servers first so they fall back to manual mode.
 		if _, err := store.pool.Exec(ctx, `

@@ -1,5 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { apiJson } from '../../lib/api'
+import { Confirm2FA } from '../../lib/Confirm2FA'
+import { apiFetch, apiJson } from '../../lib/api'
 import { fmtDateTime } from '../../lib/timezone'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
@@ -51,6 +52,12 @@ function NodesPage() {
   } | null>(null)
   const [error, setError] = useState('')
   const [copied, setCopied] = useState(false)
+  // Step-up 2FA gate: deleting a node and re-issuing its join command
+  // (token rotation) are privileged — both require the admin's own code.
+  const [pending2FA, setPending2FA] = useState<{
+    label: string
+    run: (code: string) => Promise<void>
+  } | null>(null)
 
   // Which admin is signed in — the Join-command (token rotate) action is
   // super_admin only, like the other sensitive re-issue actions.
@@ -84,29 +91,59 @@ function NodesPage() {
   })
 
   const removeMutation = useMutation({
-    mutationFn: async (node: Node) => {
-      await apiJson(`/api/nodes/${node.id}`, { method: 'DELETE' })
+    mutationFn: async (args: { node: Node; code: string }) => {
+      const res = await apiFetch(`/api/nodes/${args.node.id}`, {
+        method: 'DELETE',
+        body: { code: args.code },
+      })
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}))
+        throw new Error((j as { error?: string }).error || 'Failed to delete node')
+      }
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['nodes'] }),
     onError: (e: Error) => setError(e.message),
   })
 
+  const confirmDeleteNode = (node: Node) => {
+    if (!confirm(`Delete node "${node.name}"? Its servers fall back to manual mode.`)) return
+    setPending2FA({
+      label: `delete node "${node.name}"`,
+      run: async (code) => removeMutation.mutateAsync({ node, code }),
+    })
+  }
+
   // Re-issue the join command: the plaintext node token is only stored
   // hashed, so showing it again means rotating to a fresh one. The old
   // token stops working immediately — re-run the command on the node.
   const rotateMutation = useMutation({
-    mutationFn: async (node: Node) => {
-      return apiJson<{ join_command: string; token: string }>(`/api/nodes/${node.id}/rotate-token`, {
+    mutationFn: async (args: { node: Node; code: string }) => {
+      const res = await apiFetch(`/api/nodes/${args.node.id}/rotate-token`, {
         method: 'POST',
+        body: { code: args.code },
       })
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}))
+        throw new Error((j as { error?: string }).error || 'Failed to rotate node token')
+      }
+      return (await res.json()) as { join_command: string; token: string }
     },
-    onSuccess: (data: { join_command: string; token: string }, node: Node) => {
-      setJoin({ command: data.join_command, token: data.token, rotated: true, nodeName: node.name })
+    onSuccess: (data: { join_command: string; token: string }, args: { node: Node; code: string }) => {
+      setJoin({ command: data.join_command, token: data.token, rotated: true, nodeName: args.node.name })
       setCopied(false)
       setError('')
     },
     onError: (e: Error) => setError(e.message),
   })
+
+  const confirmJoinCommand = (node: Node) => {
+    setPending2FA({
+      label: `view the join command for node "${node.name}"`,
+      run: async (code) => {
+        await rotateMutation.mutateAsync({ node, code })
+      },
+    })
+  }
 
   const copyJoin = async () => {
     if (!join) return
@@ -289,7 +326,7 @@ function NodesPage() {
                             onClick={() => {
                               setShowAdd(false)
                               setCopied(false)
-                              rotateMutation.mutate(node)
+                              confirmJoinCommand(node)
                             }}
                           >
                             <IconTerminal2 size={14} stroke={1.6} aria-hidden="true" />
@@ -298,10 +335,7 @@ function NodesPage() {
                         )}
                         <ActionLink
                           tone="danger"
-                          onClick={() => {
-                            if (confirm(`Delete node "${node.name}"? Its servers fall back to manual mode.`))
-                              removeMutation.mutate(node)
-                          }}
+                          onClick={() => confirmDeleteNode(node)}
                         >
                           Delete
                         </ActionLink>
@@ -314,6 +348,20 @@ function NodesPage() {
           </div>
         )}
       </div>
+
+      {/* Step-up 2FA: delete node or re-issue its join command */}
+      <Confirm2FA
+        open={pending2FA !== null}
+        onClose={() => setPending2FA(null)}
+        title="Confirm with 2FA"
+        description={
+          pending2FA
+            ? `Enter your own authenticator code to ${pending2FA.label}.`
+            : undefined
+        }
+        onSubmit={pending2FA ? pending2FA.run : null}
+        submitLabel="Authorize"
+      />
     </div>
   )
 }

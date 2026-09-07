@@ -1,4 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
+import { Confirm2FA } from '../../lib/Confirm2FA'
 import { apiFetch, apiJson } from '../../lib/api'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
@@ -70,6 +71,13 @@ function ServersPage() {
   const [form, setForm] = useState(emptyForm)
   const [hostSetup, setHostSetup] = useState<{ name: string; text: string } | null>(null)
   const [hostCopied, setHostCopied] = useState(false)
+  // Step-up 2FA gate: server edits/deletes and viewing the host setup
+  // (which reveals the server's private key) all require the admin's own
+  // authenticator code. run() receives the entered code.
+  const [pending2FA, setPending2FA] = useState<{
+    label: string
+    run: (code: string) => Promise<void>
+  } | null>(null)
 
   const { data: nodes } = useQuery<{ id: string; name: string; status: string }[]>({
     queryKey: ['nodes'],
@@ -85,25 +93,30 @@ function ServersPage() {
     },
   })
 
+  const buildBody = () => ({
+    name: form.name,
+    public_endpoint: form.public_endpoint,
+    interface_name: form.interface_name,
+    listen_port: Number(listenPortFromEndpoint(form.public_endpoint)),
+    network_cidr: form.network_cidr,
+    dns_servers: form.dns_servers.split(',').map((s) => s.trim()).filter(Boolean),
+    default_allowed_ips: form.default_allowed_ips,
+    mtu: Number(form.mtu),
+    persistent_keepalive: Number(form.persistent_keepalive),
+    managed_mode: form.managed_mode,
+    node_id: form.managed_mode === 'remote' ? form.node_id : null,
+  })
+
   const saveMutation = useMutation({
-    mutationFn: async () => {
-      const body = {
-        name: form.name,
-        public_endpoint: form.public_endpoint,
-        interface_name: form.interface_name,
-        listen_port: Number(listenPortFromEndpoint(form.public_endpoint)),
-        network_cidr: form.network_cidr,
-        dns_servers: form.dns_servers.split(',').map((s) => s.trim()).filter(Boolean),
-        default_allowed_ips: form.default_allowed_ips,
-        mtu: Number(form.mtu),
-        persistent_keepalive: Number(form.persistent_keepalive),
-        managed_mode: form.managed_mode,
-        node_id: form.managed_mode === 'remote' ? form.node_id : null,
-      }
-      return apiJson(editing ? `/api/servers/${editing.id}` : '/api/servers', {
+    mutationFn: async (code: string) => {
+      const res = await apiFetch(editing ? `/api/servers/${editing.id}` : '/api/servers', {
         method: editing ? 'PATCH' : 'POST',
-        body,
+        body: { ...buildBody(), code },
       })
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}))
+        throw new Error((j as { error?: string }).error || 'Failed to save server')
+      }
     },
     onSuccess: () => {
       setShowAdd(false)
@@ -115,13 +128,41 @@ function ServersPage() {
     onError: (e: Error) => setError(e.message),
   })
 
+  // Submit (create or edit). Editing is a privileged action — require the
+  // admin's own 2FA code before the PATCH. Creating is not gated.
+  const submit = () => {
+    if (editing) {
+      setPending2FA({
+        label: `save changes to server "${editing.name}"`,
+        run: async (code) => saveMutation.mutateAsync(code),
+      })
+    } else {
+      saveMutation.mutate('')
+    }
+  }
+
   const removeMutation = useMutation({
-    mutationFn: async (server: Server) => {
-      await apiJson(`/api/servers/${server.id}`, { method: 'DELETE' })
+    mutationFn: async (server: Server & { code: string }) => {
+      const res = await apiFetch(`/api/servers/${server.id}`, {
+        method: 'DELETE',
+        body: { code: server.code },
+      })
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}))
+        throw new Error((j as { error?: string }).error || 'Failed to delete server')
+      }
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['servers'] }),
     onError: (e: Error) => setError(e.message),
   })
+
+  const confirmDelete = (server: Server) => {
+    if (!confirm(`Delete server "${server.name}" and all of its peers?`)) return
+    setPending2FA({
+      label: `delete server "${server.name}"`,
+      run: async (code) => removeMutation.mutateAsync({ ...server, code }),
+    })
+  }
 
   const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setForm((f) => ({ ...f, [k]: e.target.value }))
@@ -149,20 +190,31 @@ function ServersPage() {
     setShowAdd(true)
   }
 
-  const openHostSetup = async (server: Server) => {
+  // Host setup reveals the server's private key + NAT commands — gated
+  // behind the admin's own 2FA code.
+  const fetchHostSetup = async (server: Server, code: string) => {
     setError('')
     try {
-      const res = await apiFetch(`/api/servers/${server.id}/host-config`)
+      const res = await apiFetch(`/api/servers/${server.id}/host-config`, {
+        method: 'POST',
+        body: { code },
+      })
       if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        setError(err.error || 'Failed to load host config')
-        return
+        const j = await res.json().catch(() => ({}))
+        throw new Error((j as { error?: string }).error || 'Failed to load host config')
       }
       setHostSetup({ name: server.name, text: await res.text() })
       setHostCopied(false)
-    } catch {
-      setError('Failed to load host config')
+    } catch (e) {
+      throw e instanceof Error ? e : new Error('Failed to load host config')
     }
+  }
+
+  const confirmHostSetup = (server: Server) => {
+    setPending2FA({
+      label: `view the host setup for server "${server.name}"`,
+      run: async (code) => fetchHostSetup(server, code),
+    })
   }
 
   const copyHostConfig = async () => {
@@ -214,7 +266,7 @@ function ServersPage() {
         <form
           onSubmit={(e) => {
             e.preventDefault()
-            saveMutation.mutate()
+            submit()
           }}
           className="space-y-4"
         >
@@ -408,17 +460,14 @@ function ServersPage() {
                       <ActionLink onClick={() => openEdit(server)}>Edit</ActionLink>
                       <ActionLink
                         tone="default"
-                        onClick={() => openHostSetup(server)}
+                        onClick={() => confirmHostSetup(server)}
                       >
                         <IconTerminal2 size={14} stroke={1.6} aria-hidden="true" />
                         Host Setup
                       </ActionLink>
                       <ActionLink
                         tone="danger"
-                        onClick={() => {
-                          if (confirm(`Delete server "${server.name}" and all of its peers?`))
-                            removeMutation.mutate(server)
-                        }}
+                        onClick={() => confirmDelete(server)}
                       >
                         Delete
                       </ActionLink>
@@ -430,6 +479,20 @@ function ServersPage() {
           </table>
         </div>
       </div>
+
+      {/* Step-up 2FA: edit/delete server or view its host setup */}
+      <Confirm2FA
+        open={pending2FA !== null}
+        onClose={() => setPending2FA(null)}
+        title="Confirm with 2FA"
+        description={
+          pending2FA
+            ? `Enter your own authenticator code to ${pending2FA.label}.`
+            : undefined
+        }
+        onSubmit={pending2FA ? pending2FA.run : null}
+        submitLabel="Authorize"
+      />
     </div>
   )
 }

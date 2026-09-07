@@ -205,7 +205,8 @@ func main() {
 				r.Patch("/servers/{id}", api.UpdateServer(store))
 				r.Delete("/servers/{id}", api.DeleteServer(store))
 				r.Get("/servers/{id}/status", api.GetServerStatus(store))
-				r.Get("/servers/{id}/host-config", api.GetServerHostConfig(store))
+				// Host setup reveals the server's private key — POST + 2FA.
+				r.Post("/servers/{id}/host-config", api.GetServerHostConfig(store))
 
 				// Node management (admin session auth)
 				r.Get("/admins/me", api.GetMe(store))
