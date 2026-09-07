@@ -220,6 +220,13 @@ func main() {
 				r.Post("/nodes", api.CreateNode(store))
 				r.Get("/nodes/local/status", api.GetLocalNodeStatus(store))
 				r.Delete("/nodes/{id}", api.DeleteNode(store))
+				// Rotating a node token re-issues the join command (the
+				// plaintext token is only stored hashed) — super_admin only,
+				// like the other node-management write actions.
+				r.Group(func(r chi.Router) {
+					r.Use(api.RequireRole(store, "super_admin"))
+					r.Post("/nodes/{id}/rotate-token", api.RotateNodeToken(store))
+				})
 
 				r.Get("/domain-rules", api.ListDomainRules(store))
 				r.Post("/domain-rules", api.CreateDomainRule(store))

@@ -733,6 +733,28 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatal("local status missing metrics")
 	}
 
+	// Rotate the node token (super_admin) → fresh join command; the old
+	// token must stop working immediately (only the hash is stored, so
+	// re-showing the command is implemented as a rotation).
+	rotResp, rotOut := api(t, "POST", "/api/nodes/"+nodeID+"/rotate-token", token, nil)
+	expectStatus(t, rotResp, 200, "POST /api/nodes/{id}/rotate-token (super_admin)")
+	newToken, _ := rotOut["token"].(string)
+	joinCmd, _ := rotOut["join_command"].(string)
+	if newToken == "" || newToken == nodeToken {
+		t.Fatalf("rotate-token did not issue a fresh token (old=%q new=%q)", nodeToken, newToken)
+	}
+	if !strings.Contains(joinCmd, "node-install.sh") || !strings.Contains(joinCmd, newToken) || !strings.Contains(joinCmd, nodeID) {
+		t.Fatalf("rotate-token join_command malformed: %q", joinCmd)
+	}
+	// The old token must now be rejected.
+	resp, _ = api(t, "GET", "/api/nodes/"+nodeID+"/state", "Bearer "+nodeToken, nil)
+	if resp.StatusCode != 401 {
+		t.Fatalf("node state with rotated-away token: status %d, want 401", resp.StatusCode)
+	}
+	// And the fresh one works.
+	resp, _ = api(t, "GET", "/api/nodes/"+nodeID+"/state", "Bearer "+newToken, nil)
+	expectStatus(t, resp, 200, "GET /api/nodes/{id}/state (fresh token)")
+
 	// ---- Email templates ----
 	resp, _ = api(t, "GET", "/api/config/email-templates", token, nil)
 	expectStatus(t, resp, 200, "GET /api/config/email-templates")
@@ -941,6 +963,14 @@ func TestEndToEnd(t *testing.T) {
 	}
 	meResp, _ := op2Login.do(t, "GET", "/api/admins/me", "", nil)
 	expectStatus(t, meResp, 200, "GET /api/admins/me (post-2FA session)")
+
+	// Rotate-token is super_admin-only: a plain admin must be refused. The
+	// 2FA verify above returned the session's csrf2, so the call reaches the
+	// role gate (not a CSRF rejection).
+	rot403, _ := op2Login.do(t, "POST", "/api/nodes/"+nodeID+"/rotate-token", csrf2, nil)
+	if rot403.StatusCode != 403 {
+		t.Fatalf("rotate-token as plain admin: status %d, want 403", rot403.StatusCode)
+	}
 
 	// The pending token is single-use: a second verify must fail. The
 	// pending cookie was cleared, so verify answers 401.

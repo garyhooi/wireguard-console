@@ -3,7 +3,7 @@ import { apiJson } from '../../lib/api'
 import { fmtDateTime } from '../../lib/timezone'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
-import { IconCopy, IconPlus } from '@tabler/icons-react'
+import { IconCopy, IconPlus, IconTerminal2 } from '@tabler/icons-react'
 import {
   ActionLink,
   Badge,
@@ -43,9 +43,24 @@ function NodesPage() {
   const queryClient = useQueryClient()
   const [showAdd, setShowAdd] = useState(false)
   const [form, setForm] = useState({ name: '', location: '' })
-  const [join, setJoin] = useState<{ command: string; token: string } | null>(null)
+  const [join, setJoin] = useState<{
+    command: string
+    token: string
+    rotated?: boolean
+    nodeName?: string
+  } | null>(null)
   const [error, setError] = useState('')
   const [copied, setCopied] = useState(false)
+
+  // Which admin is signed in — the Join-command (token rotate) action is
+  // super_admin only, like the other sensitive re-issue actions.
+  const { data: me } = useQuery<{ id: string; email: string; role: string }>({
+    queryKey: ['me'],
+    queryFn: async () => {
+      return apiJson('/api/admins/me')
+    },
+  })
+  const isSuperAdmin = me?.role === 'super_admin'
 
   const { data: nodes, isLoading } = useQuery<Node[]>({
     queryKey: ['nodes'],
@@ -76,6 +91,23 @@ function NodesPage() {
     onError: (e: Error) => setError(e.message),
   })
 
+  // Re-issue the join command: the plaintext node token is only stored
+  // hashed, so showing it again means rotating to a fresh one. The old
+  // token stops working immediately — re-run the command on the node.
+  const rotateMutation = useMutation({
+    mutationFn: async (node: Node) => {
+      return apiJson<{ join_command: string; token: string }>(`/api/nodes/${node.id}/rotate-token`, {
+        method: 'POST',
+      })
+    },
+    onSuccess: (data: { join_command: string; token: string }, node: Node) => {
+      setJoin({ command: data.join_command, token: data.token, rotated: true, nodeName: node.name })
+      setCopied(false)
+      setError('')
+    },
+    onError: (e: Error) => setError(e.message),
+  })
+
   const copyJoin = async () => {
     if (!join) return
     try {
@@ -103,9 +135,12 @@ function NodesPage() {
       {error && <p className="text-red-400 text-sm mb-3">{error}</p>}
 
       <Modal
-        open={showAdd}
-        onClose={() => setShowAdd(false)}
-        title="Add Node"
+        open={showAdd || !!join}
+        onClose={() => {
+          setShowAdd(false)
+          setJoin(null)
+        }}
+        title={join && !showAdd ? `Join command — ${join.nodeName || ''}` : 'Add Node'}
         className="max-w-lg"
       >
         {!join ? (
@@ -150,10 +185,17 @@ function NodesPage() {
           </form>
         ) : (
           <div className="space-y-4">
-            <p className="text-sm text-zinc-400">
-              Run this one-liner on the node machine. It installs Docker (if needed), builds the
-              agent and connects to this console. No inbound ports required.
-            </p>
+            {join.rotated ? (
+              <p className="text-sm text-amber-300">
+                A new token was issued — the previous one stopped working. Run this on the node to
+                reconnect it with the fresh token.
+              </p>
+            ) : (
+              <p className="text-sm text-zinc-400">
+                Run this one-liner on the node machine. It installs Docker (if needed), builds the
+                agent and connects to this console. No inbound ports required.
+              </p>
+            )}
             <pre className="bg-zinc-950 border border-zinc-800 rounded-md p-4 text-xs text-zinc-300 overflow-x-auto whitespace-pre-wrap break-all">
               {join.command}
             </pre>
@@ -242,6 +284,18 @@ function NodesPage() {
                         {node.last_status || '—'}
                       </td>
                       <td className="px-5 py-3 text-right">
+                        {isSuperAdmin && (
+                          <ActionLink
+                            onClick={() => {
+                              setShowAdd(false)
+                              setCopied(false)
+                              rotateMutation.mutate(node)
+                            }}
+                          >
+                            <IconTerminal2 size={14} stroke={1.6} aria-hidden="true" />
+                            Join command
+                          </ActionLink>
+                        )}
                         <ActionLink
                           tone="danger"
                           onClick={() => {
