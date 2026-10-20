@@ -1,6 +1,9 @@
 package api
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNormalizeDomain(t *testing.T) {
 	valid := []struct{ in, want string }{
@@ -34,6 +37,47 @@ func TestNormalizeDomain(t *testing.T) {
 		if _, err := normalizeDomain(in); err == nil {
 			t.Errorf("normalizeDomain(%q): expected an error", in)
 		}
+	}
+}
+
+func TestNormalizeGroupName(t *testing.T) {
+	if got, err := normalizeGroupName("  YouTube  "); err != nil || got != "YouTube" {
+		t.Fatalf("normalizeGroupName trim = %q, %v; want YouTube, nil", got, err)
+	}
+	if _, err := normalizeGroupName("   "); err == nil {
+		t.Error("blank group name should be rejected")
+	}
+	if _, err := normalizeGroupName(strings.Repeat("a", 65)); err == nil {
+		t.Error("over-long group name should be rejected")
+	}
+	if _, err := normalizeGroupName("bad\nname"); err == nil {
+		t.Error("control characters in group name should be rejected")
+	}
+}
+
+func TestNormalizeDomainList(t *testing.T) {
+	got, err := normalizeDomainList([]string{
+		"youtube.com, googlevideo.com\nwww.ytimg.com",
+		"https://youtube.com/watch?v=x",
+		"YOUTUBE.COM",
+	})
+	if err != nil {
+		t.Fatalf("normalizeDomainList: %v", err)
+	}
+	want := []string{"youtube.com", "googlevideo.com", "ytimg.com"}
+	if len(got) != len(want) {
+		t.Fatalf("normalizeDomainList = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("normalizeDomainList = %v, want %v", got, want)
+		}
+	}
+	if _, err := normalizeDomainList(nil); err == nil {
+		t.Error("empty domain list should be rejected")
+	}
+	if _, err := normalizeDomainList([]string{"ok.com", "*.bad.com"}); err == nil {
+		t.Error("invalid domain in list should be rejected")
 	}
 }
 

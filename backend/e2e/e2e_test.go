@@ -1230,6 +1230,52 @@ func TestEndToEnd(t *testing.T) {
 	}
 	ruleResp.Body.Close()
 
+	// ---- Domain groups ----
+	e2eGroupResp, e2eGroupOut := api(t, "POST", "/api/domain-groups", token, map[string]interface{}{
+		"name":    "E2E YouTube",
+		"domains": []string{"youtube.com", "googlevideo.com\nwww.ytimg.com"},
+	})
+	expectStatus(t, e2eGroupResp, 201, "POST /api/domain-groups")
+	e2eGroupID, _ := e2eGroupOut["id"].(string)
+	if e2eGroupID == "" {
+		t.Fatal("domain group create returned no id")
+	}
+	if n, _ := e2eGroupOut["domain_count"].(float64); n != 3 {
+		t.Fatalf("domain_count = %v, want 3 (bulk newline normalization)", n)
+	}
+
+	e2eDupResp, _ := api(t, "POST", "/api/domain-groups", token, map[string]interface{}{
+		"name": "e2e youtube", "domains": []string{"example.org"},
+	})
+	expectStatus(t, e2eDupResp, 409, "POST /api/domain-groups duplicate")
+
+	e2eGroupRuleResp, _ := api(t, "POST", "/api/domain-rules", token, map[string]interface{}{
+		"scope": "global", "group_id": e2eGroupID,
+	})
+	expectStatus(t, e2eGroupRuleResp, 201, "POST /api/domain-rules (group)")
+
+	e2eBadRuleResp, _ := api(t, "POST", "/api/domain-rules", token, map[string]interface{}{
+		"scope": "global", "domain": "both.test", "group_id": e2eGroupID,
+	})
+	expectStatus(t, e2eBadRuleResp, 400, "POST /api/domain-rules (domain+group)")
+
+	e2eUpdResp, e2eUpdOut := api(t, "PATCH", "/api/domain-groups/"+e2eGroupID, token, map[string]interface{}{
+		"domains": []string{"youtube.com", "youtu.be"},
+	})
+	expectStatus(t, e2eUpdResp, 200, "PATCH /api/domain-groups/{id}")
+	if n, _ := e2eUpdOut["domain_count"].(float64); n != 2 {
+		t.Fatalf("updated domain_count = %v, want 2", n)
+	}
+
+	e2eDelResp, e2eDelOut := api(t, "DELETE", "/api/domain-groups/"+e2eGroupID, token, nil)
+	expectStatus(t, e2eDelResp, 200, "DELETE /api/domain-groups/{id}")
+	if n, _ := e2eDelOut["rules_removed"].(float64); n != 1 {
+		t.Fatalf("rules_removed = %v, want 1 (cascade)", n)
+	}
+	if remaining := rawGet(t, baseURL+"/api/domain-rules", token); strings.Contains(remaining, e2eGroupID) {
+		t.Fatalf("group rule still present after group deletion: %s", remaining)
+	}
+
 	// Cleanup: delete local server (cascade peers) must succeed
 	resp, _ = api(t, "DELETE", "/api/servers/"+serverID, token, map[string]string{
 		"code": actorCode(),

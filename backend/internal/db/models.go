@@ -77,10 +77,12 @@ type Server struct {
 }
 
 type DomainRule struct {
-	ID        uuid.UUID  `json:"id"`
-	Scope     string     `json:"scope"`
-	UserID    *uuid.UUID `json:"user_id"`
+	ID     uuid.UUID  `json:"id"`
+	Scope  string     `json:"scope"`
+	UserID *uuid.UUID `json:"user_id"`
+	// Domain is empty for group rules (see GroupID).
 	Domain    string     `json:"domain"`
+	GroupID   *uuid.UUID `json:"group_id,omitempty"`
 	CreatedBy *uuid.UUID `json:"created_by"`
 	CreatedAt time.Time  `json:"created_at"`
 }
