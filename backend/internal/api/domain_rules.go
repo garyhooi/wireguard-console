@@ -230,16 +230,7 @@ func recordSystemAudit(store *Store, action, detail string) {
 // blockingIP returns the address the console serves the branded block page on
 // (the tunnel gateway), or "" when no local server exists.
 func blockingIP(store *Store) string {
-	var ip string
-	err := store.pool.QueryRow(context.Background(), `
-		SELECT host(network(network_cidr)::inet + 1)
-		FROM servers WHERE status = 'active' AND managed_mode = 'local'
-		ORDER BY created_at LIMIT 1
-	`).Scan(&ip)
-	if err != nil {
-		return ""
-	}
-	return ip
+	return blockingIPForPool(context.Background(), store.pool)
 }
 
 func ListDomainRules(store *Store) http.HandlerFunc {

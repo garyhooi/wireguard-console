@@ -179,6 +179,7 @@ func main() {
 				r.Get("/debug/runtime", api.RuntimeStats(store))
 				// Force an immediate full rule sync (super_admin only).
 				r.Post("/domain-rules/sync", api.ResyncDomainRules(store))
+				r.Post("/ip-rules/sync", api.ResyncIPRules(store))
 			})
 
 			// User and peer management - admin and super_admin
@@ -250,6 +251,13 @@ func main() {
 				r.Post("/domain-groups", api.CreateDomainGroup(store))
 				r.Patch("/domain-groups/{id}", api.UpdateDomainGroup(store))
 				r.Delete("/domain-groups/{id}", api.DeleteDomainGroup(store))
+
+				// IP blocking: L3/L4 destination rules enforced by wg-helper
+				// nftables (IPv4 + IPv6, global and per-user).
+				r.Get("/ip-rules", api.ListIPRules(store))
+				r.Post("/ip-rules", api.CreateIPRule(store))
+				r.Delete("/ip-rules/{id}", api.DeleteIPRule(store))
+				r.Get("/ip-rules/status", api.IPRuleStatus(store))
 				// Is this domain actually blocked right now? Proxies AdGuard's
 				// check_host (read-only diagnostics).
 				r.Get("/domain-rules/check", api.CheckDomainRule(store))

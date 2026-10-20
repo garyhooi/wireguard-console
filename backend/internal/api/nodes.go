@@ -361,14 +361,15 @@ func GetNodeState(store *Store) http.HandlerFunc {
 		}
 
 		type serverState struct {
-			ID            string               `json:"id"`
-			InterfaceName string               `json:"interface_name"`
-			ListenPort    int                  `json:"listen_port"`
-			PrivateKey    string               `json:"private_key"`
-			Address       string               `json:"address"`
-			NatCIDR       string               `json:"nat_cidr"`
-			Endpoint      string               `json:"endpoint"`
-			Peers         []wgclient.ApplyPeer `json:"peers"`
+			ID            string                 `json:"id"`
+			InterfaceName string                 `json:"interface_name"`
+			ListenPort    int                    `json:"listen_port"`
+			PrivateKey    string                 `json:"private_key"`
+			Address       string                 `json:"address"`
+			NatCIDR       string                 `json:"nat_cidr"`
+			Endpoint      string                 `json:"endpoint"`
+			Peers         []wgclient.ApplyPeer   `json:"peers"`
+			IPBlockRules  []wgclient.IPBlockRule `json:"ip_block_rules"`
 		}
 
 		servers := []serverState{}
@@ -403,10 +404,17 @@ func GetNodeState(store *Store) http.HandlerFunc {
 			}
 			peerRows.Close()
 
+			// IP-blocking drop list for this node's servers (remote nodes have
+			// no local AdGuard, so no block-page conflict filter applies).
+			var ipBlockRules []wgclient.IPBlockRule
+			if srvUUID, err := uuid.Parse(id); err == nil {
+				ipBlockRules, _, _, _ = buildIPBlockPayload(ctx, store.pool, srvUUID)
+			}
+
 			servers = append(servers, serverState{
 				ID: id, InterfaceName: iface, ListenPort: port, PrivateKey: priv,
 				Address: fmt.Sprintf("%s/%d", gw, maskBits), NatCIDR: cidr, Endpoint: endpoint,
-				Peers: peers,
+				Peers: peers, IPBlockRules: ipBlockRules,
 			})
 		}
 

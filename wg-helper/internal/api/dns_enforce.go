@@ -128,6 +128,17 @@ var nftMu sync.Mutex
 // appended so two interfaces that sanitize to the same base name (for example
 // "Br-LAN!" and "Br_LAN!") can never collide.
 func sanitizeTableName(iface string) (v4, v6 string) {
+	return guardTableNames("wgc_dns_", "wgc_dns6_", iface)
+}
+
+// guardTableNames builds the per-family nft table names for one interface
+// using the given prefixes (one per address family). nft identifiers cannot
+// contain "-" or other punctuation and are case-sensitive, so the name is
+// lowercased and every character outside [a-z0-9_] is replaced with "_". When
+// sanitizing changed the name, a short deterministic sha256 suffix (first 8 hex
+// chars of the original name) is appended so two interfaces that sanitize to
+// the same base name (for example "Br-LAN!" and "Br_LAN!") can never collide.
+func guardTableNames(prefixV4, prefixV6, iface string) (v4, v6 string) {
 	var b strings.Builder
 	b.Grow(len(iface))
 	changed := false
@@ -151,7 +162,7 @@ func sanitizeTableName(iface string) (v4, v6 string) {
 		sum := sha256.Sum256([]byte(iface))
 		name += "_" + hex.EncodeToString(sum[:4])
 	}
-	return "wgc_dns_" + name, "wgc_dns6_" + name
+	return prefixV4 + name, prefixV6 + name
 }
 
 // nftSetElements renders a set element list, four elements per line, indented

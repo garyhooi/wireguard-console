@@ -1276,6 +1276,67 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatalf("group rule still present after group deletion: %s", remaining)
 	}
 
+	// ---- IP blocking ----
+	ipV4Resp, ipV4Out := api(t, "POST", "/api/ip-rules", token, map[string]interface{}{
+		"scope": "global", "cidr": "203.0.113.9/24", "note": "e2e v4",
+	})
+	expectStatus(t, ipV4Resp, 201, "POST /api/ip-rules (v4)")
+	ipV4ID, _ := ipV4Out["id"].(string)
+	if ipV4Out["cidr"] != "203.0.113.0/24" {
+		t.Fatalf("canonical CIDR = %v, want 203.0.113.0/24", ipV4Out["cidr"])
+	}
+
+	ipV6Resp, ipV6Out := api(t, "POST", "/api/ip-rules", token, map[string]interface{}{
+		"scope": "global", "cidr": "2001:DB8:bad::/48",
+	})
+	expectStatus(t, ipV6Resp, 201, "POST /api/ip-rules (v6)")
+	if ipV6Out["cidr"] != "2001:db8:bad::/48" {
+		t.Fatalf("canonical IPv6 CIDR = %v, want 2001:db8:bad::/48", ipV6Out["cidr"])
+	}
+
+	// Canonical duplicate (same /24) is a clear 409.
+	ipDupResp, _ := api(t, "POST", "/api/ip-rules", token, map[string]interface{}{
+		"scope": "global", "cidr": "203.0.113.0/24",
+	})
+	expectStatus(t, ipDupResp, 409, "POST /api/ip-rules duplicate")
+
+	// Default routes / loopback are rejected.
+	for _, bad := range []string{"0.0.0.0/0", "::/0", "127.0.0.1"} {
+		badResp, _ := api(t, "POST", "/api/ip-rules", token, map[string]interface{}{
+			"scope": "global", "cidr": bad,
+		})
+		expectStatus(t, badResp, 400, "POST /api/ip-rules invalid "+bad)
+	}
+
+	// User scope requires a user.
+	noUserResp, _ := api(t, "POST", "/api/ip-rules", token, map[string]interface{}{
+		"scope": "user", "cidr": "198.51.100.0/24",
+	})
+	expectStatus(t, noUserResp, 400, "POST /api/ip-rules (user without user)")
+
+	// Status reflects both global rules (wg-helper is absent in e2e, so the
+	// push is a logged no-op; CRUD/status must still work).
+	ipStatusResp, ipStatusOut := api(t, "GET", "/api/ip-rules/status", token, nil)
+	expectStatus(t, ipStatusResp, 200, "GET /api/ip-rules/status")
+	if n, _ := ipStatusOut["rules_total"].(float64); n != 2 {
+		t.Fatalf("ip status rules_total = %v, want 2", n)
+	}
+	if n, _ := ipStatusOut["global_rules"].(float64); n != 2 {
+		t.Fatalf("ip status global_rules = %v, want 2", n)
+	}
+	if enabled, ok := ipStatusOut["enabled"].(bool); !ok || !enabled {
+		t.Fatalf("ip status enabled = %v, want true", ipStatusOut["enabled"])
+	}
+
+	// List contains the IPv6 rule; delete works and is idempotent-safe (404).
+	if ipList := rawGet(t, baseURL+"/api/ip-rules", token); !strings.Contains(ipList, "2001:db8:bad::/48") {
+		t.Fatalf("ip list missing IPv6 rule: %s", ipList)
+	}
+	ipDelResp, _ := api(t, "DELETE", "/api/ip-rules/"+ipV4ID, token, nil)
+	expectStatus(t, ipDelResp, 200, "DELETE /api/ip-rules/{id}")
+	ipDelAgainResp, _ := api(t, "DELETE", "/api/ip-rules/"+ipV4ID, token, nil)
+	expectStatus(t, ipDelAgainResp, 404, "DELETE /api/ip-rules/{id} twice")
+
 	// Cleanup: delete local server (cascade peers) must succeed
 	resp, _ = api(t, "DELETE", "/api/servers/"+serverID, token, map[string]string{
 		"code": actorCode(),

@@ -33,6 +33,7 @@ A self-hosted web console for issuing, monitoring, and revoking company WireGuar
 - **VPN users** claim their own peer config via an emailed invite link
 - **Distributed nodes** — add VPN exit machines in any region in ~2 minutes
 - **DNS filtering** — global and per-user domain blocking (AdGuard) with reusable domain groups and a branded block page (HTTPS block pages need the console certificate installed once per device)
+- **IP blocking** — drop IPv4/IPv6 addresses and CIDR ranges for VPN peers, globally or per-user (enforced server-side before NAT)
 - **Web activity** — per-user browsing history, traffic charts and usage reports (CSV export)
 - **Backup & restore** — one-click, 2FA-gated
 
