@@ -7,6 +7,20 @@
 		reverse_proxy api:8080
 	}
 
+	# Root CA that signs the on-demand certificate for the branded block page
+	# (see the :443 catch-all below). Clients install it once, then HTTPS
+	# block pages render without a certificate warning — including
+	# HSTS-preloaded sites like youtube.com, whose browsers otherwise refuse
+	# to continue past the self-signed certificate warning.
+	handle /ca.crt {
+		root * /data/caddy/pki/authorities/local
+		rewrite * /root.crt
+		file_server
+		header Content-Type "application/x-x509-ca-cert"
+		header Content-Disposition "attachment; filename=wgconsole-block-page-ca.crt"
+		header Cache-Control "public, max-age=3600"
+	}
+	
 	# Everything else is the React SPA. try_files falls back to index.html
 	# so client-side routes (TanStack Router) survive a hard refresh.
 	handle {
