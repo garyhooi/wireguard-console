@@ -53,13 +53,17 @@ type syncRequest struct {
 // The console sends this after any server/peer change so the kernel
 // reflects the database automatically.
 type applyRequest struct {
-	DNSEnforcement bool        `json:"dns_enforcement"` // local-mode servers only
-	InterfaceName  string      `json:"interface_name"`
-	ListenPort     int         `json:"listen_port"`
-	PrivateKey     string      `json:"private_key"`
-	Address        string      `json:"address"`  // gateway address, e.g. 10.8.0.1/24
-	NatCIDR        string      `json:"nat_cidr"` // client subnet to masquerade, e.g. 10.8.0.0/24
-	Peers          []applyPeer `json:"peers"`
+	DNSEnforcement bool `json:"dns_enforcement"` // local-mode servers only
+	// IPBlockRules is nil when the sender does not manage IP blocking (old
+	// console/node agent): nil leaves kernel state alone, an empty list clears
+	// it, a non-empty list is the full desired drop set.
+	IPBlockRules  *[]ipBlockRule `json:"ip_block_rules"`
+	InterfaceName string         `json:"interface_name"`
+	ListenPort    int            `json:"listen_port"`
+	PrivateKey    string         `json:"private_key"`
+	Address       string         `json:"address"`  // gateway address, e.g. 10.8.0.1/24
+	NatCIDR       string         `json:"nat_cidr"` // client subnet to masquerade, e.g. 10.8.0.0/24
+	Peers         []applyPeer    `json:"peers"`
 }
 
 type applyPeer struct {
@@ -133,8 +137,10 @@ func run(cmd *exec.Cmd) error {
 // ruleset must never fail the reconcile pass.
 func (h *Handler) handleEnforce(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		InterfaceName string `json:"interface_name"`
-		NatCIDR       string `json:"nat_cidr"`
+		InterfaceName  string         `json:"interface_name"`
+		NatCIDR        string         `json:"nat_cidr"`
+		DNSEnforcement bool           `json:"dns_enforcement"`
+		IPBlockRules   *[]ipBlockRule `json:"ip_block_rules"`
 	}
 	warnings := []string{}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.InterfaceName == "" {
@@ -142,9 +148,21 @@ func (h *Handler) handleEnforce(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, enforceResponse{Status: "ok", Warnings: warnings})
 		return
 	}
-	if err := EnsureDNSEnforcement(req.InterfaceName, req.NatCIDR); err != nil {
-		log.Printf("wg-helper [%s]: dns enforcement: %v", req.InterfaceName, err)
-		warnings = append(warnings, err.Error())
+	// Legacy callers omit both fields and used to always install the DNS
+	// tables; keep that behaviour when the request predates IP blocking.
+	if req.DNSEnforcement || req.IPBlockRules == nil {
+		if err := EnsureDNSEnforcement(req.InterfaceName, req.NatCIDR); err != nil {
+			log.Printf("wg-helper [%s]: dns enforcement: %v", req.InterfaceName, err)
+			warnings = append(warnings, err.Error())
+		}
+	}
+	if req.IPBlockRules != nil {
+		blockWarnings, err := EnsureIPBlocking(req.InterfaceName, *req.IPBlockRules)
+		warnings = append(warnings, blockWarnings...)
+		if err != nil {
+			log.Printf("wg-helper [%s]: ip blocking: %v", req.InterfaceName, err)
+			warnings = append(warnings, err.Error())
+		}
 	}
 	writeJSON(w, http.StatusOK, enforceResponse{Status: "ok", Warnings: warnings})
 }
@@ -188,6 +206,18 @@ func (h *Handler) applyState(req applyRequest) []string {
 	if req.DNSEnforcement {
 		if err := EnsureDNSEnforcement(req.InterfaceName, req.NatCIDR); err != nil {
 			warn("dns enforcement: %v", err)
+		}
+	}
+	// IP blocking must be (re)installed even when the device already matches:
+	// a reboot/flush removes the tables while the WireGuard device stays
+	// healthy, which would silently re-open every blocked destination.
+	if req.IPBlockRules != nil {
+		blockWarnings, err := EnsureIPBlocking(req.InterfaceName, *req.IPBlockRules)
+		for _, w := range blockWarnings {
+			warn("ip blocking: %s", w)
+		}
+		if err != nil {
+			warn("ip blocking: %v", err)
 		}
 	}
 
@@ -346,6 +376,9 @@ func (h *Handler) removeInterface(iface string) []string {
 	}
 	if err := RemoveDNSEnforcement(iface); err != nil {
 		warnings = append(warnings, "dns enforcement cleanup: "+err.Error())
+	}
+	if err := RemoveIPBlocking(iface); err != nil {
+		warnings = append(warnings, "ip blocking cleanup: "+err.Error())
 	}
 	return warnings
 }

@@ -46,13 +46,14 @@ func (a *Agent) Run(ctx context.Context) {
 }
 
 type desiredServer struct {
-	ID            string `json:"id"`
-	InterfaceName string `json:"interface_name"`
-	ListenPort    int    `json:"listen_port"`
-	PrivateKey    string `json:"private_key"`
-	Address       string `json:"address"`
-	NatCIDR       string `json:"nat_cidr"`
-	Endpoint      string `json:"endpoint"`
+	ID            string        `json:"id"`
+	InterfaceName string        `json:"interface_name"`
+	ListenPort    int           `json:"listen_port"`
+	PrivateKey    string        `json:"private_key"`
+	Address       string        `json:"address"`
+	NatCIDR       string        `json:"nat_cidr"`
+	Endpoint      string        `json:"endpoint"`
+	IPBlockRules  []ipBlockRule `json:"ip_block_rules"`
 	Peers         []struct {
 		PublicKey string `json:"public_key"`
 		AllowedIP string `json:"allowed_ip"`
@@ -80,12 +81,16 @@ func (a *Agent) cycle() {
 		for _, p := range srv.Peers {
 			peers = append(peers, applyPeer{PublicKey: p.PublicKey, AllowedIP: p.AllowedIP})
 		}
+		// Always send an explicit list (possibly empty) so deleting the last
+		// IP rule clears the node's nftables tables too.
+		ipBlockRules := append([]ipBlockRule{}, srv.IPBlockRules...)
 		warnings := a.handler.applyState(applyRequest{
 			InterfaceName: srv.InterfaceName,
 			ListenPort:    srv.ListenPort,
 			PrivateKey:    srv.PrivateKey,
 			Address:       srv.Address,
 			NatCIDR:       srv.NatCIDR,
+			IPBlockRules:  &ipBlockRules,
 			Peers:         peers,
 		})
 		if len(warnings) > 0 {
