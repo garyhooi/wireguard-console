@@ -2,6 +2,7 @@ import { createFileRoute, Link, Outlet, redirect } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
+  IconBan,
   IconChartBar,
   IconDeviceDesktop,
   IconDots,
@@ -78,7 +79,10 @@ const NAV: NavGroup[] = [
   },
   {
     group: 'Security',
-    items: [{ label: 'Domain Rules', to: '/domain-rules', icon: IconShieldCheck }],
+    items: [
+      { label: 'Domain Blocking', to: '/domain-rules', icon: IconShieldCheck },
+      { label: 'IP Blocking', to: '/ip-rules', icon: IconBan },
+    ],
   },
   {
     group: 'System',
