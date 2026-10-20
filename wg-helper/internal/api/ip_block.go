@@ -103,86 +103,70 @@ func splitIPBlockRules(rules []ipBlockRule) (v4, v6 []ipBlockRule, warnings []st
 	return v4, v6, warnings
 }
 
+// sortIPBlockRules orders entries deterministically (source, then destination).
+func sortIPBlockRules(rules []ipBlockRule) {
+	sort.Slice(rules, func(i, j int) bool {
+		if rules[i].SourceIP != rules[j].SourceIP {
+			return rules[i].SourceIP < rules[j].SourceIP
+		}
+		return rules[i].CIDR < rules[j].CIDR
+	})
+}
+
 // renderIPBlockTable renders the complete nftables script for one family of
-// one interface (atomic add/delete/redefine). hasRules reports whether the
-// family has any entries — callers delete the table instead of applying an
-// empty ruleset so removing the last rule cleans the kernel state.
+// one interface (atomic add/delete/redefine).
+//
+// Each expanded (source, destination) entry becomes its own drop rule carrying
+// a comment ("wgc ipblk src=<peer|*> dst=<cidr>"). Per-rule nft counters are
+// what the hit-accounting worker samples: an aggregate set rule could not say
+// WHICH destination was hit. Global entries ("src=*") are still aggregated
+// across peers, but per-user entries attribute each hit to a peer.
+//
+// hasRules=false means the family has no entries — callers delete the table
+// instead of applying an empty ruleset so removing the last rule cleans the
+// kernel state.
 func renderIPBlockTable(iface string, v4 bool, rules []ipBlockRule) (script string, hasRules bool) {
 	tableV4, tableV6 := guardTableNames(ipBlockTablePrefixV4, ipBlockTablePrefixV6, iface)
 	table := tableV4
-	if !v4 {
-		table = tableV6
-	}
-
 	family := "ip"
-	setType := "ipv4_addr"
 	chain := "ipblk_forward"
 	if !v4 {
+		table = tableV6
 		family = "ip6"
-		setType = "ipv6_addr"
 		chain = "ipblk6_forward"
 	}
 	quotedIface := fmt.Sprintf("%q", iface)
 
-	global := []string{}
-	bySource := map[string][]string{}
-	for _, rule := range rules {
-		if rule.SourceIP == "" {
-			global = append(global, rule.CIDR)
-		} else {
-			bySource[rule.SourceIP] = append(bySource[rule.SourceIP], rule.CIDR)
-		}
-	}
-	sort.Strings(global)
-	sources := make([]string, 0, len(bySource))
-	for source := range bySource {
-		sort.Strings(bySource[source])
-		sources = append(sources, source)
-	}
-	sort.Strings(sources)
-	hasRules = len(global) > 0 || len(sources) > 0
-
+	hasRules = len(rules) > 0
 	lines := []string{
 		"# Managed by wg-helper; re-rendered on every apply. Do not edit by hand.",
 		"table " + family + " " + table,
 		"delete table " + family + " " + table,
 		"table " + family + " " + table + " {",
 	}
-	if len(global) > 0 {
+	if hasRules {
 		lines = append(lines,
-			"	set blocked {",
-			"		type "+setType,
-			"		flags interval",
-			"		elements = {",
+			"",
+			"	# Drop blocked destinations from peer traffic. priority -140 runs",
+			"	# after the DNS-enforcement chain (-150) and before ufw/docker (0);",
+			"	# a drop here is final. One rule per (source, destination) so the",
+			"	# counters can be attributed; comments are parsed by /ipblock-stats.",
+			"	chain "+chain+" {",
+			"		type filter hook forward priority -140; policy accept;",
 		)
-		lines = append(lines, nftSetElements(global)...)
-		lines = append(lines, "		}", "	}")
-	}
-	for _, source := range sources {
-		lines = append(lines,
-			"	set "+ipBlockSourceSetName(source)+" {",
-			"		type "+setType,
-			"		flags interval",
-			"		elements = {",
-		)
-		lines = append(lines, nftSetElements(bySource[source])...)
-		lines = append(lines, "		}", "	}")
-	}
-
-	lines = append(lines,
-		"",
-		"	# Drop blocked destinations from peer traffic. priority -140 runs",
-		"	# after the DNS-enforcement chain (-150) and before ufw/docker (0);",
-		"	# a drop here is final. Counters only (no packet logging).",
-		"	chain "+chain+" {",
-		"		type filter hook forward priority -140; policy accept;",
-	)
-	if len(global) > 0 {
-		lines = append(lines, "		iifname "+quotedIface+" "+family+" daddr @blocked counter drop")
-	}
-	for _, source := range sources {
-		lines = append(lines, "		iifname "+quotedIface+" "+family+" saddr "+source+
-			" "+family+" daddr @"+ipBlockSourceSetName(source)+" counter drop")
+		for _, rule := range rules {
+			match := ""
+			if rule.SourceIP != "" {
+				match = family + " saddr " + rule.SourceIP + " "
+			}
+			comment := "wgc ipblk src=*"
+			if rule.SourceIP != "" {
+				comment = "wgc ipblk src=" + rule.SourceIP
+			}
+			comment += " dst=" + rule.CIDR
+			lines = append(lines, "		iifname "+quotedIface+" "+match+family+
+				" daddr "+rule.CIDR+" counter drop comment "+fmt.Sprintf("%q", comment))
+		}
 	}
 	lines = append(lines, "	}", "}")
 	return strings.Join(lines, "\n") + "\n", hasRules
@@ -204,6 +188,8 @@ func EnsureIPBlocking(iface string, rules []ipBlockRule) ([]string, error) {
 	}
 
 	v4, v6, warnings := splitIPBlockRules(rules)
+	sortIPBlockRules(v4)
+	sortIPBlockRules(v6)
 	v4Script, v4HasRules := renderIPBlockTable(iface, true, v4)
 	v6Script, v6HasRules := renderIPBlockTable(iface, false, v6)
 	tableV4, tableV6 := guardTableNames(ipBlockTablePrefixV4, ipBlockTablePrefixV6, iface)

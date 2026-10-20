@@ -54,6 +54,7 @@ func TestRenderIPBlockTableV4(t *testing.T) {
 		{SourceIP: "10.8.0.2", CIDR: "198.51.100.0/24"},
 		{SourceIP: "10.8.0.3", CIDR: "10.0.0.0/8"},
 	}
+	sortIPBlockRules(rules)
 	script, hasRules := renderIPBlockTable("wg0", true, rules)
 	if !hasRules {
 		t.Fatal("hasRules = false, want true")
@@ -61,34 +62,23 @@ func TestRenderIPBlockTableV4(t *testing.T) {
 	for _, want := range []string{
 		"table ip wgc_ipblk_wg0",
 		"delete table ip wgc_ipblk_wg0",
-		"type ipv4_addr",
-		"flags interval",
-		"set blocked",
-		"203.0.113.0/24",
-		"198.51.100.0/24",
-		"10.0.0.0/8",
 		"priority -140",
-		"iifname \"wg0\" ip daddr @blocked counter drop",
-		"ip saddr 10.8.0.2 ip daddr @src_",
-		"ip saddr 10.8.0.3 ip daddr @src_",
+		"iifname \"wg0\" ip daddr 203.0.113.0/24 counter drop comment \"wgc ipblk src=* dst=203.0.113.0/24\"",
+		"iifname \"wg0\" ip saddr 10.8.0.2 ip daddr 198.51.100.0/24 counter drop comment \"wgc ipblk src=10.8.0.2 dst=198.51.100.0/24\"",
+		"iifname \"wg0\" ip saddr 10.8.0.3 ip daddr 10.0.0.0/8 counter drop comment \"wgc ipblk src=10.8.0.3 dst=10.0.0.0/8\"",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("script missing %q", want)
 		}
 	}
-	// Atomic ordering: "table ip X" then "delete table ip X" then definition.
 	if strings.Index(script, "delete table ip wgc_ipblk_wg0") > strings.Index(script, "table ip wgc_ipblk_wg0 {") {
 		t.Error("delete must come before the table definition")
 	}
-	// Sources are sorted, sets are deterministic, and no log rules exist.
 	if strings.Index(script, "10.8.0.2") > strings.Index(script, "10.8.0.3") {
 		t.Error("source rules are not sorted")
 	}
 	if strings.Contains(script, " log ") {
 		t.Error("IP blocking must use counters only, never nft log rules")
-	}
-	if !strings.Contains(script, ipBlockSourceSetName("10.8.0.2")) {
-		t.Error("per-source set name is not the deterministic helper value")
 	}
 }
 
@@ -103,9 +93,7 @@ func TestRenderIPBlockTableV6(t *testing.T) {
 	for _, want := range []string{
 		"table ip6 wgc_ipblk6_wg0",
 		"delete table ip6 wgc_ipblk6_wg0",
-		"type ipv6_addr",
-		"2001:db8:bad::/48",
-		"iifname \"wg0\" ip6 daddr @blocked counter drop",
+		"iifname \"wg0\" ip6 daddr 2001:db8:bad::/48 counter drop comment \"wgc ipblk src=* dst=2001:db8:bad::/48\"",
 		"priority -140",
 	} {
 		if !strings.Contains(script, want) {
@@ -237,5 +225,41 @@ func TestIPBlockTableNameSanitizesInterface(t *testing.T) {
 	}
 	if got := ipBlockSourceSetName("10.8.0.2"); got != ipBlockSourceSetName("10.8.0.2") {
 		t.Error("set names must be deterministic")
+	}
+}
+func TestParseIPBlockStats(t *testing.T) {
+	raw := []byte(`{"nftables":[
+		{"metainfo":{}},
+		{"table":{"family":"ip","name":"wgc_ipblk_wg0"}},
+		{"rule":{"expr":[
+			{"counter":{"packets":7,"bytes":420}},
+			{"comment":"wgc ipblk src=10.8.0.2 dst=203.0.113.0/24"},
+			{"drop":null}
+		]}},
+		{"rule":{"expr":[
+			{"counter":{"packets":3,"bytes":180}},
+			{"comment":"wgc ipblk src=* dst=2001:db8:bad::/48"},
+			{"drop":null}
+		]}},
+		{"rule":{"expr":[
+			{"counter":{"packets":99,"bytes":5940}},
+			{"accept":null}
+		]}}
+	]}`)
+	counters, err := parseIPBlockStats(raw, "ipv4")
+	if err != nil {
+		t.Fatalf("parseIPBlockStats: %v", err)
+	}
+	if len(counters) != 2 {
+		t.Fatalf("counters = %v, want 2 (rules without our comment are ignored)", counters)
+	}
+	if counters[0].SourceIP != "10.8.0.2" || counters[0].CIDR != "203.0.113.0/24" || counters[0].Packets != 7 {
+		t.Errorf("unexpected first counter: %+v", counters[0])
+	}
+	if counters[1].SourceIP != "" || counters[1].CIDR != "2001:db8:bad::/48" {
+		t.Errorf("global (src=*) counter should have an empty source: %+v", counters[1])
+	}
+	if _, err := parseIPBlockStats([]byte("not json"), "ipv4"); err == nil {
+		t.Error("invalid JSON should error")
 	}
 }

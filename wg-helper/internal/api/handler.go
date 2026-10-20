@@ -110,6 +110,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleSync(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/stats":
 		h.handleStats(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/ipblock-stats":
+		h.handleIPBlockStats(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/system":
 		h.handleSystem(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/health":
@@ -165,6 +167,24 @@ func (h *Handler) handleEnforce(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, enforceResponse{Status: "ok", Warnings: warnings})
+}
+
+// handleIPBlockStats returns the cumulative IP-block drop-rule counters for
+// one interface (both families). The console's hit worker samples and diffs
+// them to build the blocked-IP activity visible in Statistics/Web Activity.
+func (h *Handler) handleIPBlockStats(w http.ResponseWriter, r *http.Request) {
+	iface := r.URL.Query().Get("interface")
+	if iface == "" {
+		writeError(w, http.StatusBadRequest, "interface is required")
+		return
+	}
+	counters, err := IPBlockStats(iface)
+	if err != nil {
+		log.Printf("wg-helper [%s]: ip block stats: %v", iface, err)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"rules": counters})
 }
 
 func (h *Handler) handleApply(w http.ResponseWriter, r *http.Request) {
