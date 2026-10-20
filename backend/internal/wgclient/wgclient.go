@@ -24,8 +24,18 @@ type ApplyRequest struct {
 	// enforcement rules (redirect peer :53 to the local AdGuard, drop DoT and
 	// known DoH resolvers). Only local-mode servers set it: remote nodes have
 	// no local AdGuard, so forcing DNS there would break their peers.
-	DNSEnforcement bool        `json:"dns_enforcement"`
-	Peers          []ApplyPeer `json:"peers"`
+	DNSEnforcement bool `json:"dns_enforcement"`
+	// IPBlockRules are expanded destination blocks (global rules carry an
+	// empty SourceIP; per-user rules carry the peer's tunnel IP).
+	IPBlockRules []IPBlockRule `json:"ip_block_rules"`
+	Peers        []ApplyPeer   `json:"peers"`
+}
+
+// IPBlockRule is one expanded IP-blocking entry: drop traffic from SourceIP
+// ("" = every peer on the interface) to CIDR.
+type IPBlockRule struct {
+	SourceIP string `json:"source_ip"`
+	CIDR     string `json:"cidr"`
 }
 
 type ApplyPeer struct {
@@ -147,27 +157,49 @@ func Apply(interfaceName string, req *ApplyRequest) error {
 // interface without touching the interface itself. Used by the reconcile
 // worker to self-heal after a reboot, an nftables flush or a ufw reload.
 func EnforceDNS(interfaceName, natCIDR string) error {
+	return enforce(interfaceName, natCIDR, true, nil)
+}
+
+// EnforceGuards (re)installs both role guards — DNS enforcement and IP
+// blocking — for one interface without touching the WireGuard device. The
+// rules slice is always sent (empty means "no IP rules": wg-helper clears the
+// tables), so a deleted rule is removed from the kernel too.
+func EnforceGuards(interfaceName, natCIDR string, dnsEnforcement bool, rules []IPBlockRule) error {
+	if rules == nil {
+		rules = []IPBlockRule{}
+	}
+	return enforce(interfaceName, natCIDR, dnsEnforcement, &rules)
+}
+
+// enforce posts /enforce. A nil rules pointer keeps the field out of the
+// payload (legacy DNS-only callers), so wg-helper leaves IP-block state alone.
+func enforce(interfaceName, natCIDR string, dnsEnforcement bool, rules *[]IPBlockRule) error {
 	socket := Socket()
 	if socket == "" {
 		return nil
 	}
-	resp, err := post(socket, "/enforce", map[string]string{
-		"interface_name": interfaceName,
-		"nat_cidr":       natCIDR,
-	})
+	body := map[string]interface{}{
+		"interface_name":  interfaceName,
+		"nat_cidr":        natCIDR,
+		"dns_enforcement": dnsEnforcement,
+	}
+	if rules != nil {
+		body["ip_block_rules"] = *rules
+	}
+	resp, err := post(socket, "/enforce", body)
 	if err != nil {
-		return fmt.Errorf("wg-helper dns enforce: %w", err)
+		return fmt.Errorf("wg-helper enforce: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("wg-helper dns enforce: status %d", resp.StatusCode)
+		return fmt.Errorf("wg-helper enforce: status %d", resp.StatusCode)
 	}
 	var out struct {
 		Warnings []string `json:"warnings"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&out)
 	if len(out.Warnings) > 0 {
-		return fmt.Errorf("wg-helper dns enforce: %v", out.Warnings)
+		return fmt.Errorf("wg-helper enforce: %v", out.Warnings)
 	}
 	return nil
 }

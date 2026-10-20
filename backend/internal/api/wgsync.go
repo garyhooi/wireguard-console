@@ -82,6 +82,14 @@ func syncServerToKernel(ctx context.Context, pool *pgxpool.Pool, serverID uuid.U
 		peers = append(peers, wgclient.ApplyPeer{PublicKey: pub, AllowedIP: ip})
 	}
 
+	// IP-blocking drops for this server (expanded to per-peer source IPs).
+	// A payload failure is non-fatal: the reconcile worker keeps repairing the
+	// kernel state, and the server/peer apply below must not be blocked by it.
+	ipRules, _, _, ipErr := buildIPBlockPayload(ctx, pool, serverID)
+	if ipErr != nil {
+		log.Printf("ip-block payload for server %s: %v", serverID, ipErr)
+	}
+
 	req := &wgclient.ApplyRequest{
 		InterfaceName:  ifaceName,
 		ListenPort:     listenPort,
@@ -89,6 +97,7 @@ func syncServerToKernel(ctx context.Context, pool *pgxpool.Pool, serverID uuid.U
 		Address:        fmt.Sprintf("%s/%d", gw, maskBits),
 		NatCIDR:        cidr,
 		DNSEnforcement: true, // local servers share the host with AdGuard
+		IPBlockRules:   ipRules,
 		Peers:          peers,
 	}
 	if err := wgclient.Apply(ifaceName, req); err != nil {
@@ -228,5 +237,58 @@ func EnsureLocalDNSEnforcement(pool *pgxpool.Pool) error {
 			}
 		}
 	}
+	return firstErr
+}
+
+// EnsureLocalIPBlocking (re)installs the IP-blocking tables for every active
+// local server. Called on every reconcile tick: the kernel interface can stay
+// up while nftables state is lost (reboot, manual flush, ufw reload, partial
+// apply), which would silently drop every IP rule.
+func EnsureLocalIPBlocking(pool *pgxpool.Pool) error {
+	if os.Getenv("WG_HELPER_SOCKET") == "" {
+		return nil // local development without wg-helper
+	}
+
+	ipBlockSyncMu.Lock()
+	defer ipBlockSyncMu.Unlock()
+
+	ctx := context.Background()
+	rows, err := pool.Query(ctx, `
+		SELECT id, interface_name, network_cidr::text FROM servers
+		WHERE status = 'active' AND managed_mode = 'local'
+		ORDER BY created_at
+	`)
+	if err != nil {
+		recordIPBlockSync(err)
+		return fmt.Errorf("query local servers: %w", err)
+	}
+	defer rows.Close()
+
+	var firstErr error
+	for rows.Next() {
+		var serverID uuid.UUID
+		var iface, cidr string
+		if err := rows.Scan(&serverID, &iface, &cidr); err != nil {
+			recordIPBlockSync(err)
+			return err
+		}
+		entries, _, _, expandErr := buildIPBlockPayload(ctx, pool, serverID)
+		if expandErr == nil {
+			// dnsEnforcement=true is harmless here (idempotent) and keeps the
+			// /enforce contract simple: one call repairs both guards.
+			expandErr = wgclient.EnforceGuards(iface, cidr, true, entries)
+		}
+		recordIPBlockServerResult(serverID, expandErr)
+		if expandErr != nil {
+			log.Printf("ip-block enforcement failed for %s: %v", iface, expandErr)
+			if firstErr == nil {
+				firstErr = expandErr
+			}
+		}
+	}
+	if err := rows.Err(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	recordIPBlockSync(firstErr)
 	return firstErr
 }

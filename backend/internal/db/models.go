@@ -87,6 +87,16 @@ type DomainRule struct {
 	CreatedAt time.Time  `json:"created_at"`
 }
 
+type IPBlockRule struct {
+	ID        uuid.UUID  `json:"id"`
+	Scope     string     `json:"scope"`
+	UserID    *uuid.UUID `json:"user_id"`
+	CIDR      string     `json:"cidr"`
+	Note      string     `json:"note"`
+	CreatedBy *uuid.UUID `json:"created_by"`
+	CreatedAt time.Time  `json:"created_at"`
+}
+
 type AuditLog struct {
 	ID           int64          `json:"id"`
 	ActorAdminID *uuid.UUID     `json:"actor_admin_id"`

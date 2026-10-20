@@ -110,7 +110,13 @@ func (w *WGReconcileWorker) reconcile(ctx context.Context) bool {
 	if enforceErr != nil {
 		log.Printf("WG reconcile worker: DNS enforcement repair failed: %v", enforceErr)
 	}
+	// IP-blocking tables are repaired the same way: a nft flush or a lost
+	// table must never leave blocked destinations reachable.
+	ipBlockErr := api.EnsureLocalIPBlocking(w.pool)
+	if ipBlockErr != nil {
+		log.Printf("WG reconcile worker: IP-block enforcement repair failed: %v", ipBlockErr)
+	}
 	// n==0 means every local interface is already up (or none exist / no
 	// socket in dev) — a fully healthy state.
-	return err == nil && n == 0 && enforceErr == nil
+	return err == nil && n == 0 && enforceErr == nil && ipBlockErr == nil
 }

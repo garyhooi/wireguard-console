@@ -49,6 +49,9 @@ services:
       # leak triage (docker exec wget 127.0.0.1:6060/debug/pprof/...).
       GOMEMLIMIT: ${API_GOMEMLIMIT:-384MiB}
       PPROF_ADDR: ${API_PPROF_ADDR:-127.0.0.1:6060}
+      # Read by the IP-blocking status endpoint; the effective switch lives on
+      # the wg-helper service (same .env value).
+      WG_IP_BLOCK: ${WG_IP_BLOCK:-1}
       # Read by the backup service (pg_dump / psql).
       PGHOST: postgres
       POSTGRES_USER: wgconsole
@@ -95,6 +98,9 @@ services:
       # Server-side DNS enforcement for local peers (redirect :53 to AdGuard,
       # block DoT/DoH). 0 = advisory-only legacy behavior.
       WG_DNS_ENFORCE: ${WG_DNS_ENFORCE:-1}
+      # IP blocking for local peers (drop destinations in the forward hook).
+      # 0 = do not enforce; existing tables are removed on the next ensure.
+      WG_IP_BLOCK: ${WG_IP_BLOCK:-1}
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
