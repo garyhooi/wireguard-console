@@ -53,17 +53,25 @@ type syncRequest struct {
 // The console sends this after any server/peer change so the kernel
 // reflects the database automatically.
 type applyRequest struct {
-	InterfaceName string      `json:"interface_name"`
-	ListenPort    int         `json:"listen_port"`
-	PrivateKey    string      `json:"private_key"`
-	Address       string      `json:"address"`  // gateway address, e.g. 10.8.0.1/24
-	NatCIDR       string      `json:"nat_cidr"` // client subnet to masquerade, e.g. 10.8.0.0/24
-	Peers         []applyPeer `json:"peers"`
+	DNSEnforcement bool        `json:"dns_enforcement"` // local-mode servers only
+	InterfaceName  string      `json:"interface_name"`
+	ListenPort     int         `json:"listen_port"`
+	PrivateKey     string      `json:"private_key"`
+	Address        string      `json:"address"`  // gateway address, e.g. 10.8.0.1/24
+	NatCIDR        string      `json:"nat_cidr"` // client subnet to masquerade, e.g. 10.8.0.0/24
+	Peers          []applyPeer `json:"peers"`
 }
 
 type applyPeer struct {
 	PublicKey string `json:"public_key"`
 	AllowedIP string `json:"allowed_ip"` // bare IP, /32 applied
+}
+
+// enforceResponse is the /enforce reply: enforcement failures are warnings,
+// never errors, because a broken nft ruleset must not fail the reconcile pass.
+type enforceResponse struct {
+	Status   string   `json:"status"`
+	Warnings []string `json:"warnings"`
 }
 
 type applyResponse struct {
@@ -92,6 +100,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleApply(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/remove":
 		h.handleRemove(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/enforce":
+		h.handleEnforce(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/sync":
 		h.handleSync(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/stats":
@@ -114,6 +124,29 @@ func run(cmd *exec.Cmd) error {
 		return fmt.Errorf("%s: %v (%s)", cmd.String(), err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// handleEnforce (re)installs the DNS-enforcement tables for one interface.
+// It is idempotent and exists for the console reconcile loop so the rules
+// self-heal after a reboot, a manual nft flush or a failed apply. Problems
+// are returned as warnings and the endpoint always answers 200: a broken
+// ruleset must never fail the reconcile pass.
+func (h *Handler) handleEnforce(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		InterfaceName string `json:"interface_name"`
+		NatCIDR       string `json:"nat_cidr"`
+	}
+	warnings := []string{}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.InterfaceName == "" {
+		warnings = append(warnings, "interface_name is required")
+		writeJSON(w, http.StatusOK, enforceResponse{Status: "ok", Warnings: warnings})
+		return
+	}
+	if err := EnsureDNSEnforcement(req.InterfaceName, req.NatCIDR); err != nil {
+		log.Printf("wg-helper [%s]: dns enforcement: %v", req.InterfaceName, err)
+		warnings = append(warnings, err.Error())
+	}
+	writeJSON(w, http.StatusOK, enforceResponse{Status: "ok", Warnings: warnings})
 }
 
 func (h *Handler) handleApply(w http.ResponseWriter, r *http.Request) {
@@ -146,6 +179,16 @@ func (h *Handler) applyState(req applyRequest) []string {
 	warn := func(format string, a ...interface{}) {
 		warnings = append(warnings, fmt.Sprintf(format, a...))
 		log.Printf("wg-helper [%s]: %s", req.InterfaceName, fmt.Sprintf(format, a...))
+	}
+
+	// DNS enforcement must be (re)installed even when the device already
+	// matches: a reboot, a manual nft flush or a failed earlier apply leaves
+	// the WireGuard device healthy but removes the redirect/drop rules. A
+	// failure is a warning only - never abort the VPN apply.
+	if req.DNSEnforcement {
+		if err := EnsureDNSEnforcement(req.InterfaceName, req.NatCIDR); err != nil {
+			warn("dns enforcement: %v", err)
+		}
 	}
 
 	if h.deviceMatches(req) {
@@ -300,6 +343,9 @@ func (h *Handler) removeInterface(iface string) []string {
 		if !strings.Contains(err.Error(), "does not exist") {
 			warnings = append(warnings, err.Error())
 		}
+	}
+	if err := RemoveDNSEnforcement(iface); err != nil {
+		warnings = append(warnings, "dns enforcement cleanup: "+err.Error())
 	}
 	return warnings
 }

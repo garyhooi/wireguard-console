@@ -83,12 +83,13 @@ func syncServerToKernel(ctx context.Context, pool *pgxpool.Pool, serverID uuid.U
 	}
 
 	req := &wgclient.ApplyRequest{
-		InterfaceName: ifaceName,
-		ListenPort:    listenPort,
-		PrivateKey:    privKey,
-		Address:       fmt.Sprintf("%s/%d", gw, maskBits),
-		NatCIDR:       cidr,
-		Peers:         peers,
+		InterfaceName:  ifaceName,
+		ListenPort:     listenPort,
+		PrivateKey:     privKey,
+		Address:        fmt.Sprintf("%s/%d", gw, maskBits),
+		NatCIDR:        cidr,
+		DNSEnforcement: true, // local servers share the host with AdGuard
+		Peers:          peers,
 	}
 	if err := wgclient.Apply(ifaceName, req); err != nil {
 		return err
@@ -192,4 +193,40 @@ func removeServerFromKernel(ctx context.Context, pool *pgxpool.Pool, serverID uu
 		return err
 	}
 	return wgclient.Remove(ifaceName)
+}
+
+// EnsureLocalDNSEnforcement re-applies the DNS enforcement rules for every
+// active local server. Called on every reconcile tick: the kernel interface
+// can stay up while nftables state is lost (reboot, manual flush, ufw reload,
+// partial apply), which would silently re-open the client-DNS bypass.
+func EnsureLocalDNSEnforcement(pool *pgxpool.Pool) error {
+	if os.Getenv("WG_HELPER_SOCKET") == "" {
+		return nil // local development without wg-helper
+	}
+
+	ctx := context.Background()
+	rows, err := pool.Query(ctx, `
+		SELECT interface_name, network_cidr::text FROM servers
+		WHERE status = 'active' AND managed_mode = 'local'
+		ORDER BY created_at
+	`)
+	if err != nil {
+		return fmt.Errorf("query local servers: %w", err)
+	}
+	defer rows.Close()
+
+	var firstErr error
+	for rows.Next() {
+		var iface, cidr string
+		if err := rows.Scan(&iface, &cidr); err != nil {
+			return err
+		}
+		if err := wgclient.EnforceDNS(iface, cidr); err != nil {
+			log.Printf("dns enforcement failed for %s: %v", iface, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
 }
