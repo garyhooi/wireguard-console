@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -170,6 +172,9 @@ func main() {
 				// records grow with peer traffic; nightly auto-purge keeps the
 				// retention window, this allows an immediate manual cleanup).
 				r.Delete("/web-activity", api.PurgeWebActivity(store))
+				// Live Go runtime counters (goroutines / heap / fds) for leak
+				// triage. super_admin only; pprof is on the loopback listener.
+				r.Get("/debug/runtime", api.RuntimeStats(store))
 			})
 
 			// User and peer management - admin and super_admin
@@ -284,8 +289,10 @@ func main() {
 
 	// Start HTTP server in background
 	server := &http.Server{
-		Addr:    fmt.Sprintf(":%s", port),
-		Handler: r,
+		Addr:              fmt.Sprintf(":%s", port),
+		Handler:           r,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	go func() {
@@ -293,6 +300,17 @@ func main() {
 			log.Fatalf("Server failed: %v", err)
 		}
 	}()
+
+	// Loopback-only pprof listener (goroutine/heap dumps during leak triage).
+	// Enabled by PPROF_ADDR (compose sets 127.0.0.1:6060); never published.
+	if addr := strings.TrimSpace(os.Getenv("PPROF_ADDR")); addr != "" {
+		go func() {
+			log.Printf("pprof/debug listener on %s", addr)
+			if err := http.ListenAndServe(addr, nil); err != nil {
+				log.Printf("pprof listener stopped: %v", err)
+			}
+		}()
+	}
 
 	// Graceful shutdown
 	quit := make(chan os.Signal, 1)

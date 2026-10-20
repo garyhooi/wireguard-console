@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -92,13 +93,17 @@ func (w *TrafficWorker) pollTraffic(ctx context.Context) error {
 		servers = append(servers, s)
 	}
 
+	polledServers := make(map[string]bool)
+	reported := make(map[string]bool)
 	for _, srv := range servers {
 		stats, err := wgclient.Stats(srv.iface)
 		if err != nil || stats == nil {
 			continue // interface may not exist yet, or wg-helper offline
 		}
+		polledServers[srv.id] = true
 		for _, st := range stats {
 			key := srv.id + "|" + st.PublicKey
+			reported[key] = true
 			prev, seen := w.lastValues[key]
 
 			rx := uint64(st.ReceiveBytes)
@@ -126,6 +131,16 @@ func (w *TrafficWorker) pollTraffic(ctx context.Context) error {
 						WHERE server_id = $2 AND public_key = $3
 					`, t, srv.id, st.PublicKey)
 				}
+			}
+		}
+	}
+
+	// Drop cached counters for peers that no longer exist on a server we just
+	// polled, so removed/re-created peers don't accumulate in this map forever.
+	for key := range w.lastValues {
+		if i := strings.IndexByte(key, '|'); i > 0 {
+			if polledServers[key[:i]] && !reported[key] {
+				delete(w.lastValues, key)
 			}
 		}
 	}

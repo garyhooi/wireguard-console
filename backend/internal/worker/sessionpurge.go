@@ -26,7 +26,7 @@ func (w *SessionPurgeWorker) Start(ctx context.Context) {
 	if w.interval <= 0 {
 		w.interval = time.Hour
 	}
-	log.Println("Session purge worker started (expired admin_sessions)")
+	log.Println("Session purge worker started (expired sessions + housekeeping)")
 
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
@@ -43,15 +43,28 @@ func (w *SessionPurgeWorker) Start(ctx context.Context) {
 	}
 }
 
+// purge removes rows that would otherwise grow without bound: expired
+// sessions/invites/access tokens (they are dead on arrival once the expiry
+// passes) plus long-finished email jobs and old audit-log rows. Runs hourly.
 func (w *SessionPurgeWorker) purge(ctx context.Context) {
-	tag, err := w.pool.Exec(ctx, `
-		DELETE FROM admin_sessions WHERE expires_at <= now()
-	`)
-	if err != nil {
-		log.Printf("Session purge worker: failed to purge expired sessions: %v", err)
-		return
+	queries := []struct {
+		name string
+		sql  string
+	}{
+		{"expired session(s)", `DELETE FROM admin_sessions WHERE expires_at <= now()`},
+		{"expired invite(s)", `DELETE FROM invites WHERE expires_at <= now()`},
+		{"expired peer access token(s)", `DELETE FROM peer_access_tokens WHERE expires_at <= now()`},
+		{"finished email job(s)", `DELETE FROM jobs WHERE (completed_at IS NOT NULL OR failed_at IS NOT NULL) AND created_at < now() - interval '7 days'`},
+		{"old audit log row(s)", `DELETE FROM audit_logs WHERE created_at < now() - interval '90 days'`},
 	}
-	if n := tag.RowsAffected(); n > 0 {
-		log.Printf("Session purge worker: removed %d expired session(s)", n)
+	for _, q := range queries {
+		tag, err := w.pool.Exec(ctx, q.sql)
+		if err != nil {
+			log.Printf("Session purge worker: failed to purge %s: %v", q.name, err)
+			continue
+		}
+		if n := tag.RowsAffected(); n > 0 {
+			log.Printf("Session purge worker: removed %d %s", n, q.name)
+		}
 	}
 }
