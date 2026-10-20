@@ -30,7 +30,7 @@ func NewDomainRuleWorker(pool *pgxpool.Pool, interval time.Duration) *DomainRule
 
 func (w *DomainRuleWorker) Start(ctx context.Context) {
 	if w.interval <= 0 {
-		w.interval = 5 * time.Minute
+		w.interval = time.Minute
 	}
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()

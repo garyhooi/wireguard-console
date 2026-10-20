@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 
 vi.mock('@tanstack/react-router', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@tanstack/react-router')>()
@@ -8,7 +8,7 @@ vi.mock('@tanstack/react-router', async (importOriginal) => {
     Link: ({ children }: { children: React.ReactNode }) => <a>{children}</a>,
   }
 })
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { DomainRulesPage } from '../_authenticated/domain-rules'
 
@@ -78,6 +78,11 @@ describe('DomainRulesPage', () => {
     )
   })
 
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
+
   it('shows the actual user for user-scoped rules instead of the literal "User"', async () => {
     renderWithClient(<DomainRulesPage />)
     await waitFor(() => expect(screen.getByText('||tracker.io^')).toBeTruthy())
@@ -95,5 +100,110 @@ describe('DomainRulesPage', () => {
     // Global rule has no user → em dash.
     const globalRow = screen.getByText('||global-block.example^').closest('tr')!
     expect(within(globalRow).getByText('—')).toBeTruthy()
+  })
+
+  it('shows a red protection-paused banner when AdGuard protection is paused', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url.includes('/api/domain-rules/status')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              ...status,
+              protection_enabled: false,
+              protection_disabled_duration: 10 * 60 * 1000,
+            }),
+          } as Response
+        }
+        if (url.includes('/api/domain-rules')) {
+          return { ok: true, status: 200, json: async () => rules } as Response
+        }
+        throw new Error(`unexpected fetch: ${url}`)
+      }),
+    )
+
+    renderWithClient(<DomainRulesPage />)
+    const paused = await screen.findByText(/AdGuard protection is paused — blocking is disabled/)
+    expect(paused.textContent).toContain('~10 min')
+    expect(paused.closest('[role="status"]')?.className).toContain('bg-red-500/10')
+    expect(screen.queryByText(/AdGuard reachable —/)).toBeNull()
+  })
+
+  it('tests a domain and shows a blocked result with the matched rule', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.includes('/api/domain-rules/check')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            domain: 'youtube.com',
+            blocked: true,
+            reachable: true,
+            protection_enabled: true,
+            filtering_enabled: true,
+            reason: 'FilteredBlackList',
+            rules: [{ text: '||youtube.com^', filter_list_id: 1 }],
+          }),
+        } as Response
+      }
+      if (url.includes('/api/domain-rules/status')) {
+        return { ok: true, status: 200, json: async () => status } as Response
+      }
+      if (url.includes('/api/domain-rules')) {
+        return { ok: true, status: 200, json: async () => rules } as Response
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderWithClient(<DomainRulesPage />)
+    const input = await screen.findByLabelText('Test domain')
+    fireEvent.change(input, { target: { value: 'youtube.com' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Test' }))
+
+    await waitFor(() => expect(screen.getByText('Blocked (FilteredBlackList)')).toBeTruthy())
+    expect(screen.getByText('||youtube.com^')).toBeTruthy()
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/domain-rules/check?domain=youtube.com'),
+      expect.anything(),
+    )
+  })
+
+  it('tests a domain and shows an allowed result', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url.includes('/api/domain-rules/check')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              domain: 'example.org',
+              blocked: false,
+              reachable: true,
+              protection_enabled: true,
+              filtering_enabled: true,
+            }),
+          } as Response
+        }
+        if (url.includes('/api/domain-rules/status')) {
+          return { ok: true, status: 200, json: async () => status } as Response
+        }
+        if (url.includes('/api/domain-rules')) {
+          return { ok: true, status: 200, json: async () => rules } as Response
+        }
+        throw new Error(`unexpected fetch: ${url}`)
+      }),
+    )
+
+    renderWithClient(<DomainRulesPage />)
+    const input = await screen.findByLabelText('Test domain')
+    fireEvent.change(input, { target: { value: 'example.org' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Test' }))
+
+    await waitFor(() => expect(screen.getByText('Allowed by AdGuard')).toBeTruthy())
+    expect(screen.queryByText(/^Blocked/)).toBeNull()
   })
 })

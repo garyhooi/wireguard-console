@@ -15,12 +15,17 @@ import (
 
 // ApplyRequest mirrors the wg-helper /apply endpoint.
 type ApplyRequest struct {
-	InterfaceName string      `json:"interface_name"`
-	ListenPort    int         `json:"listen_port"`
-	PrivateKey    string      `json:"private_key"`
-	Address       string      `json:"address"`
-	NatCIDR       string      `json:"nat_cidr"`
-	Peers         []ApplyPeer `json:"peers"`
+	InterfaceName string `json:"interface_name"`
+	ListenPort    int    `json:"listen_port"`
+	PrivateKey    string `json:"private_key"`
+	Address       string `json:"address"`
+	NatCIDR       string `json:"nat_cidr"`
+	// DNSEnforcement tells wg-helper to install the server-side DNS
+	// enforcement rules (redirect peer :53 to the local AdGuard, drop DoT and
+	// known DoH resolvers). Only local-mode servers set it: remote nodes have
+	// no local AdGuard, so forcing DNS there would break their peers.
+	DNSEnforcement bool        `json:"dns_enforcement"`
+	Peers          []ApplyPeer `json:"peers"`
 }
 
 type ApplyPeer struct {
@@ -134,6 +139,35 @@ func Apply(interfaceName string, req *ApplyRequest) error {
 	}
 	if len(out.Warnings) > 0 {
 		return fmt.Errorf("wg-helper warnings: %v", out.Warnings)
+	}
+	return nil
+}
+
+// EnforceDNS asks wg-helper to (re)install the DNS enforcement rules for an
+// interface without touching the interface itself. Used by the reconcile
+// worker to self-heal after a reboot, an nftables flush or a ufw reload.
+func EnforceDNS(interfaceName, natCIDR string) error {
+	socket := Socket()
+	if socket == "" {
+		return nil
+	}
+	resp, err := post(socket, "/enforce", map[string]string{
+		"interface_name": interfaceName,
+		"nat_cidr":       natCIDR,
+	})
+	if err != nil {
+		return fmt.Errorf("wg-helper dns enforce: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("wg-helper dns enforce: status %d", resp.StatusCode)
+	}
+	var out struct {
+		Warnings []string `json:"warnings"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if len(out.Warnings) > 0 {
+		return fmt.Errorf("wg-helper dns enforce: %v", out.Warnings)
 	}
 	return nil
 }

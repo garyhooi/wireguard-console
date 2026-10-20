@@ -40,7 +40,117 @@ interface SyncStatus {
   expected_rules: number
   missing_rules: number
   block_page_ip: string
+  /** AdGuard's live "Pause protection" state (not the filtering setting). */
+  protection_enabled?: boolean
+  /** AdGuard's filtering-settings switch. */
+  filtering_enabled?: boolean
+  /** Remaining protection pause, in milliseconds. */
+  protection_disabled_duration?: number
+  /** Stored rules AdGuard would ignore (invalid after normalization). */
+  invalid_rules?: number
+  /** Rules AdGuard actually has for this console. */
+  actual_rules?: number
+  last_sync_at?: string
+  last_sync_error?: string
 }
+
+type BannerTone = 'red' | 'amber' | 'teal'
+
+interface SyncBanner {
+  tone: BannerTone
+  message: string
+}
+
+const BANNER_TONE_CLASS: Record<BannerTone, string> = {
+  red: 'bg-red-500/10 border-red-500/30 text-red-300',
+  amber: 'bg-amber-500/10 border-amber-500/30 text-amber-300',
+  teal: 'bg-teal-500/10 border-teal-500/30 text-teal-300',
+}
+
+/**
+ * One mutually-exclusive status message for AdGuard — first matching state
+ * wins, so the strip never stacks contradictory claims (e.g. "reachable" while
+ * protection is paused).
+ */
+function describeSyncStatus(status: SyncStatus): SyncBanner {
+  if (!status.reachable) {
+    return { tone: 'red', message: 'AdGuard unreachable — rules are not enforced.' }
+  }
+  // protection_enabled is the live pause state. Fall back to the legacy
+  // protection_on flag when talking to an API that predates it.
+  const protectionPaused =
+    status.protection_enabled === false ||
+    (status.protection_enabled === undefined && status.protection_on === false)
+  if (protectionPaused) {
+    const minutes =
+      status.protection_disabled_duration && status.protection_disabled_duration > 0
+        ? Math.max(1, Math.ceil(status.protection_disabled_duration / 60_000))
+        : 0
+    return {
+      tone: 'red',
+      message:
+        minutes > 0
+          ? `AdGuard protection is paused — blocking is disabled for another ~${minutes} min.`
+          : 'AdGuard protection is paused — blocking is disabled.',
+    }
+  }
+  if (status.filtering_enabled === false) {
+    return { tone: 'amber', message: 'AdGuard filtering is disabled — rules are not enforced.' }
+  }
+  const invalidRules = status.invalid_rules ?? 0
+  if (invalidRules > 0) {
+    return {
+      tone: 'amber',
+      message: `${invalidRules} stored rule(s) are not valid and are not enforced.`,
+    }
+  }
+  if (status.missing_rules > 0) {
+    return {
+      tone: 'amber',
+      message: `${status.missing_rules} rule(s) missing in AdGuard — re-syncing shortly.`,
+    }
+  }
+  if (status.last_sync_error) {
+    return { tone: 'amber', message: `Last AdGuard sync failed: ${status.last_sync_error}` }
+  }
+  const synced = status.actual_rules ?? status.expected_rules
+  return { tone: 'teal', message: `AdGuard reachable — ${synced} rule(s) synced.` }
+}
+
+interface DomainCheckRule {
+  text: string
+  filter_list_id?: number
+}
+
+interface DomainCheck {
+  domain: string
+  blocked: boolean
+  reachable: boolean
+  protection_enabled?: boolean
+  filtering_enabled?: boolean
+  reason?: string
+  rule?: string
+  rules?: DomainCheckRule[]
+  error?: string
+}
+
+/** Rule text(s) that matched the tested domain. */
+function matchedRuleTexts(result: DomainCheck): string[] {
+  const texts = (result.rules ?? []).map((rule) => rule.text).filter(Boolean)
+  if (texts.length === 0 && result.rule) texts.push(result.rule)
+  return texts
+}
+
+/** Enforcement problems that make a "blocked/allowed" answer misleading. */
+function enforcementProblems(result: DomainCheck): string[] {
+  const problems: string[] = []
+  if (result.protection_enabled === false) problems.push('protection is paused')
+  if (result.filtering_enabled === false) problems.push('filtering is disabled')
+  return problems
+}
+
+const smallButtonCls =
+  'inline-flex shrink-0 items-center justify-center gap-1.5 rounded-md border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-300 transition-colors hover:border-zinc-500 hover:text-zinc-100 active:translate-y-[1px] disabled:pointer-events-none disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500'
 
 export const Route = createFileRoute('/_authenticated/domain-rules')({
   component: DomainRulesPage,
@@ -51,6 +161,7 @@ export function DomainRulesPage() {
   const [scope, setScope] = useState<'global' | 'user'>('global')
   const [domain, setDomain] = useState('')
   const [userId, setUserId] = useState('')
+  const [testDomain, setTestDomain] = useState('')
 
   const { data: rules, isLoading, refetch } = useQuery<DomainRule[]>({
     queryKey: ['domain-rules'],
@@ -62,7 +173,6 @@ export function DomainRulesPage() {
   const {
     data: status,
     refetch: refetchStatus,
-    isFetching: statusLoading,
   } = useQuery<SyncStatus>({
     queryKey: ['domain-rules-status'],
     queryFn: async () => {
@@ -102,6 +212,34 @@ export function DomainRulesPage() {
     },
   })
 
+  // Force a full push to AdGuard, then re-read the status it reports.
+  const syncMutation = useMutation({
+    mutationFn: async () => {
+      return apiJson<{ status: string }>('/api/domain-rules/sync', { method: 'POST' })
+    },
+    onSuccess: () => {
+      refetchStatus()
+      refetch()
+    },
+  })
+
+  // "Would AdGuard block this domain?" — GET /api/domain-rules/check.
+  const checkMutation = useMutation({
+    mutationFn: async (value: string) => {
+      return apiJson<DomainCheck>(`/api/domain-rules/check?domain=${encodeURIComponent(value)}`)
+    },
+  })
+
+  const openAddModal = () => {
+    addMutation.reset()
+    setShowAddModal(true)
+  }
+
+  const closeAddModal = () => {
+    addMutation.reset()
+    setShowAddModal(false)
+  }
+
   const handleAdd = (e: React.FormEvent) => {
     e.preventDefault()
     const data: { scope: string; user_id?: string; domain: string } = {
@@ -114,7 +252,18 @@ export function DomainRulesPage() {
     addMutation.mutate(data)
   }
 
+  const handleTestDomain = (e: React.FormEvent) => {
+    e.preventDefault()
+    const value = testDomain.trim()
+    if (!value) return
+    checkMutation.mutate(value)
+  }
+
   const active = Array.isArray(rules) ? rules : []
+  const banner = status ? describeSyncStatus(status) : null
+  const checkResult = checkMutation.data
+  const checkRuleTexts = checkResult ? matchedRuleTexts(checkResult) : []
+  const checkProblems = checkResult ? enforcementProblems(checkResult) : []
 
   return (
     <div>
@@ -122,57 +271,132 @@ export function DomainRulesPage() {
         title="Domain Blocking"
         description="AdGuard Home rules that block domains for all users or specific users. Changes sync to AdGuard immediately."
         actions={
-          <PrimaryButton onClick={() => setShowAddModal(true)}>
+          <PrimaryButton onClick={openAddModal}>
             <IconPlus size={16} stroke={1.6} aria-hidden="true" />
             Add Rule
           </PrimaryButton>
         }
       />
 
-      {/* AdGuard sync / health status */}
-      {status && (
-        <div
-          className={`mb-5 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm rounded-lg border px-4 py-3 ${
-            !status.reachable
-              ? 'bg-red-500/10 border-red-500/30 text-red-300'
-              : status.missing_rules > 0 || !status.protection_on
-                ? 'bg-amber-500/10 border-amber-500/30 text-amber-300'
-                : 'bg-teal-500/10 border-teal-500/30 text-teal-300'
-          }`}
-        >
-          {!status.reachable ? (
-            <span className="font-medium">AdGuard unreachable — rules are not being enforced.</span>
-          ) : status.missing_rules > 0 ? (
-            <span className="font-medium">
-              {status.missing_rules} rule(s) missing in AdGuard (out of {status.expected_rules}) —
-              re-syncing shortly.
-            </span>
-          ) : status.protection_on === false ? (
-            <span className="font-medium">AdGuard protection is paused — rules are stored but not enforced.</span>
-          ) : (
-            <span className="font-medium">AdGuard reachable — {status.expected_rules} rule(s) synced.</span>
-          )}
-          {status.reachable && (
-            <span className="opacity-80">
-              block mode: <code className="font-mono">{status.blocking_mode}</code>
-              {status.blocking_ipv4 ? ` → ${status.blocking_ipv4}` : ''}
-            </span>
-          )}
-          {status.error && <span className="opacity-80 font-mono text-xs break-all">{status.error}</span>}
-          <button
-            onClick={() => refetchStatus()}
-            disabled={statusLoading}
-            className="ml-auto inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors disabled:opacity-50 hover:bg-white/10"
+      {/* AdGuard sync / health status — one mutually-exclusive state. */}
+      {status && banner && (
+        <div className="mb-5 flex flex-wrap items-start gap-2">
+          <div
+            role="status"
+            className={`flex min-w-0 flex-1 flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border px-4 py-3 text-sm ${BANNER_TONE_CLASS[banner.tone]}`}
           >
-            <IconRefresh size={13} stroke={1.6} className={statusLoading ? 'animate-spin' : ''} aria-hidden="true" />
-            Check
-          </button>
+            <span className="font-medium">{banner.message}</span>
+            {status.reachable && (
+              <span className="opacity-80">
+                block mode: <code className="font-mono">{status.blocking_mode}</code>
+                {status.blocking_ipv4 ? ` → ${status.blocking_ipv4}` : ''}
+              </span>
+            )}
+            {status.error && (
+              <span className="opacity-80 font-mono text-xs break-all">{status.error}</span>
+            )}
+          </div>
+          {status.reachable && (
+            <button
+              type="button"
+              onClick={() => syncMutation.mutate()}
+              disabled={syncMutation.isPending}
+              className={smallButtonCls}
+            >
+              <IconRefresh
+                size={13}
+                stroke={1.6}
+                className={syncMutation.isPending ? 'animate-spin' : ''}
+                aria-hidden="true"
+              />
+              {syncMutation.isPending ? 'Resyncing…' : 'Resync now'}
+            </button>
+          )}
         </div>
       )}
+      {syncMutation.isError && (
+        <p role="alert" className="mb-5 text-sm text-red-400">
+          {syncMutation.error?.message || 'AdGuard sync failed.'}
+        </p>
+      )}
+
+      {/* Would AdGuard actually block this domain? */}
+      <form
+        onSubmit={handleTestDomain}
+        className="mb-6 rounded-lg border border-zinc-800 bg-zinc-900/50 px-4 py-3"
+      >
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <label
+            htmlFor="test-domain"
+            className="text-xs font-medium uppercase tracking-wider text-zinc-500"
+          >
+            Test domain
+          </label>
+          <div className="w-60 max-w-full">
+            <input
+              id="test-domain"
+              type="text"
+              className={`${inputCls} font-mono`}
+              placeholder="example.com"
+              value={testDomain}
+              onChange={(e) => {
+                setTestDomain(e.target.value)
+                checkMutation.reset()
+              }}
+            />
+          </div>
+          <button
+            type="submit"
+            disabled={checkMutation.isPending || !testDomain.trim()}
+            className={smallButtonCls}
+          >
+            {checkMutation.isPending ? 'Testing…' : 'Test'}
+          </button>
+          {checkMutation.isError && (
+            <span role="alert" className="text-xs text-red-400">
+              {checkMutation.error?.message || 'Domain check failed.'}
+            </span>
+          )}
+        </div>
+        {checkResult && (
+          <div
+            aria-live="polite"
+            className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-zinc-800/60 pt-2 text-xs"
+          >
+            {checkResult.error ? (
+              <span className="text-red-400">{checkResult.error}</span>
+            ) : checkResult.reachable === false ? (
+              <span className="font-medium text-red-300">
+                AdGuard unreachable — blocking could not be verified.
+              </span>
+            ) : (
+              <>
+                <span
+                  className={`font-medium ${checkResult.blocked ? 'text-red-300' : 'text-teal-300'}`}
+                >
+                  {checkResult.blocked
+                    ? `Blocked${checkResult.reason ? ` (${checkResult.reason})` : ''}`
+                    : 'Allowed by AdGuard'}
+                </span>
+                {checkResult.blocked && checkRuleTexts.length > 0 && (
+                  <span className="font-mono text-zinc-400 break-all">
+                    {checkRuleTexts.join(' · ')}
+                  </span>
+                )}
+                {checkProblems.length > 0 && (
+                  <span className="text-amber-300">
+                    {checkProblems.join('; ')} — blocking is not enforced.
+                  </span>
+                )}
+              </>
+            )}
+          </div>
+        )}
+      </form>
 
       <Modal
         open={showAddModal}
-        onClose={() => setShowAddModal(false)}
+        onClose={closeAddModal}
         title="Add Domain Rule"
         className="max-w-md"
       >
@@ -224,15 +448,26 @@ export function DomainRulesPage() {
               className={inputCls + ' font-mono'}
               placeholder="example.com"
               value={domain}
-              onChange={(e) => setDomain(e.target.value)}
+              onChange={(e) => {
+                setDomain(e.target.value)
+                // Clear a previous server rejection as soon as the input changes.
+                addMutation.reset()
+              }}
             />
             <p className="text-zinc-500 text-xs mt-1">
               Enter domain without protocol (e.g., <code className="bg-zinc-800 px-1 rounded">example.com</code>)
             </p>
           </div>
 
+          {/* Server-side validation / duplicate rejection from POST /api/domain-rules. */}
+          {addMutation.isError && (
+            <p role="alert" className="text-red-400 text-sm">
+              {addMutation.error?.message || 'Failed to add rule.'}
+            </p>
+          )}
+
           <div className="flex justify-end gap-3 pt-2">
-            <GhostButton type="button" onClick={() => setShowAddModal(false)}>
+            <GhostButton type="button" onClick={closeAddModal}>
               Cancel
             </GhostButton>
             <PrimaryButton type="submit" disabled={addMutation.isPending || !domain}>
@@ -263,7 +498,7 @@ export function DomainRulesPage() {
           <EmptyState
             title="No domain rules yet"
             hint="Add a rule to block domains via AdGuard Home for all users or a specific user."
-            action={<PrimaryButton onClick={() => setShowAddModal(true)}><IconPlus size={16} stroke={1.6} aria-hidden="true" />Add Rule</PrimaryButton>}
+            action={<PrimaryButton onClick={openAddModal}><IconPlus size={16} stroke={1.6} aria-hidden="true" />Add Rule</PrimaryButton>}
           />
         ) : (
           <div className="overflow-x-auto">

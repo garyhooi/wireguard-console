@@ -103,7 +103,14 @@ func (w *WGReconcileWorker) reconcile(ctx context.Context) bool {
 	if n > 0 {
 		log.Printf("WG reconcile worker: applied %d local server(s)", n)
 	}
+	// DNS enforcement can be lost while the interface stays up (nft flush,
+	// ufw reload, wg-helper restart). Re-apply unconditionally — it is
+	// idempotent and cheap, and this is the only self-heal path for rules.
+	enforceErr := api.EnsureLocalDNSEnforcement(w.pool)
+	if enforceErr != nil {
+		log.Printf("WG reconcile worker: DNS enforcement repair failed: %v", enforceErr)
+	}
 	// n==0 means every local interface is already up (or none exist / no
 	// socket in dev) — a fully healthy state.
-	return err == nil && n == 0
+	return err == nil && n == 0 && enforceErr == nil
 }

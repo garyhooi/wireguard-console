@@ -92,6 +92,9 @@ services:
       # see the host's real filesystems through /host).
       WG_HOST_ROOT: /host
       GOMEMLIMIT: ${WG_HELPER_GOMEMLIMIT:-256MiB}
+      # Server-side DNS enforcement for local peers (redirect :53 to AdGuard,
+      # block DoT/DoH). 0 = advisory-only legacy behavior.
+      WG_DNS_ENFORCE: ${WG_DNS_ENFORCE:-1}
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
