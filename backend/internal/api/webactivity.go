@@ -66,7 +66,9 @@ func ListWebActivity(store *Store) http.HandlerFunc {
 			}
 		}
 
-		where := []string{"b.queried_at >= $1 AND b.queried_at < $2"}
+		// Soft-removed peers (and therefore their users' history) are excluded:
+		// the VPN user is gone, so their old DNS rows must not resurface here.
+		where := []string{"b.queried_at >= $1 AND b.queried_at < $2", "p.status <> 'removed'"}
 		args := []interface{}{from, to}
 		if v := q.Get("user_id"); v != "" {
 			if _, err := uuid.Parse(v); err == nil {
@@ -187,6 +189,7 @@ func GetWebActivitySummary(store *Store) http.HandlerFunc {
 				JOIN peers p ON p.id = b.peer_id
 				LEFT JOIN users u ON u.id = p.user_id
 				WHERE b.queried_at >= $1 AND b.queried_at < $2
+				  AND p.status <> 'removed'
 				GROUP BY p.id, p.name, u.email
 				ORDER BY (COUNT(*) FILTER (WHERE b.blocked = FALSE) +
 				          COUNT(*) FILTER (WHERE b.blocked = TRUE)) DESC`
@@ -201,8 +204,10 @@ func GetWebActivitySummary(store *Store) http.HandlerFunc {
 				       MAX(b.queried_at) AS last_seen
 				FROM browsing_records b
 				JOIN peers p ON p.id = b.peer_id
-				LEFT JOIN users u ON u.id = p.user_id
+				JOIN users u ON u.id = p.user_id
 				WHERE b.queried_at >= $1 AND b.queried_at < $2
+				  AND p.status <> 'removed'
+				  AND u.status <> 'removed'
 				GROUP BY u.id, u.full_name, u.email
 				ORDER BY (COUNT(*) FILTER (WHERE b.blocked = FALSE) +
 				          COUNT(*) FILTER (WHERE b.blocked = TRUE)) DESC`

@@ -20,12 +20,22 @@ func ListUsers(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := context.Background()
 
-		users := []db.User{}
-		rows, err := store.pool.Query(ctx, `
+		// Removed users are soft-deleted rows (history/audit keep their id) and
+		// must not leak into pickers such as Domain/IP rule user scope or the
+		// Web Activity filter. The VPN Users page asks for them explicitly so
+		// its "Removed" tab keeps working.
+		includeRemoved := r.URL.Query().Get("include_removed") == "1"
+		query := `
 			SELECT id, email, full_name, status, invited_by, invited_at, activated_at, created_at, updated_at
 			FROM users
-			ORDER BY created_at DESC
-		`)
+		`
+		if !includeRemoved {
+			query += ` WHERE status <> 'removed'`
+		}
+		query += ` ORDER BY created_at DESC`
+
+		users := []db.User{}
+		rows, err := store.pool.Query(ctx, query)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to query users")
 			return

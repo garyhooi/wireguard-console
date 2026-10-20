@@ -1138,6 +1138,16 @@ func TestEndToEnd(t *testing.T) {
 	lifeResp, _ = api(t, "DELETE", "/api/users/"+userID, token, nil)
 	expectStatus(t, lifeResp, 200, "DELETE /api/users/{id}")
 
+	// Soft-removed users must disappear from the default list (rule pickers and
+	// the Web Activity filter use it) while the VPN Users page can still ask
+	// for them to render its "Removed" tab.
+	if list := rawGet(t, baseURL+"/api/users", token); strings.Contains(list, "user@example.com") {
+		t.Fatalf("removed user still listed by default: %s", list)
+	}
+	if list := rawGet(t, baseURL+"/api/users?include_removed=1", token); !strings.Contains(list, "user@example.com") {
+		t.Fatalf("removed user missing from include_removed list")
+	}
+
 	// ---- Email reuse after removal ----
 	// The lifecycle test above removed user@example.com; inviting the same
 	// address again must succeed (reactivation, not a unique violation).

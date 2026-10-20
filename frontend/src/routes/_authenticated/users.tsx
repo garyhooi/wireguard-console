@@ -68,7 +68,8 @@ function UsersPage() {
   const { data: users, isLoading, refetch } = useQuery<User[]>({
     queryKey: ['users'],
     queryFn: async () => {
-      return apiJson<User[]>('/api/users')
+      // The "Removed" tab intentionally lists soft-deleted users.
+      return apiJson<User[]>('/api/users?include_removed=1')
     },
   })
 

@@ -78,6 +78,7 @@ func IPBlockedActivity(store *Store) http.HandlerFunc {
 				FROM ip_block_hits h
 				LEFT JOIN users u ON u.id = h.user_id
 				WHERE h.sampled_at >= $1
+				  AND (h.user_id IS NULL OR u.status <> 'removed')
 				ORDER BY h.sampled_at DESC
 				LIMIT $2
 			`, from, limit)
