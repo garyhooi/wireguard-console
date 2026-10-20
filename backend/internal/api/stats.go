@@ -242,13 +242,16 @@ func GetTrafficUsage(store *Store) http.HandlerFunc {
 }
 
 func queryUsage(store *Store, ctx context.Context, byUser bool, from, to time.Time) ([]map[string]interface{}, error) {
+	// Half-open timestamp range on sampled_at (instead of sampled_at::date)
+	// so the time index is used; the daily rollup keeps its date bounds.
+	toExclusive := to.AddDate(0, 0, 1)
 	cte := `
 		WITH t AS (
 			SELECT peer_id, rx_bytes, tx_bytes
-			FROM peer_traffic_samples WHERE sampled_at::date BETWEEN $1 AND $2
+			FROM peer_traffic_samples WHERE sampled_at >= $1 AND sampled_at < $2
 			UNION ALL
 			SELECT peer_id, rx_bytes, tx_bytes
-			FROM peer_traffic_daily WHERE date BETWEEN $1 AND $2
+			FROM peer_traffic_daily WHERE date BETWEEN $1::date AND $3::date
 		)`
 	if byUser {
 		rows, err := store.pool.Query(ctx, cte+`
@@ -260,7 +263,7 @@ func queryUsage(store *Store, ctx context.Context, byUser bool, from, to time.Ti
 			JOIN users u ON u.id = p.user_id
 			GROUP BY u.id, u.email, u.full_name
 			ORDER BY (COALESCE(SUM(t.rx_bytes),0) + COALESCE(SUM(t.tx_bytes),0)) DESC
-		`, from, to)
+		`, from, toExclusive, to)
 		if err != nil {
 			return nil, err
 		}
@@ -289,7 +292,7 @@ func queryUsage(store *Store, ctx context.Context, byUser bool, from, to time.Ti
 		LEFT JOIN users u ON u.id = p.user_id
 		GROUP BY p.id, p.name, p.allowed_ip, u.email, u.full_name
 		ORDER BY (COALESCE(SUM(t.rx_bytes),0) + COALESCE(SUM(t.tx_bytes),0)) DESC
-	`, from, to)
+	`, from, toExclusive, to)
 	if err != nil {
 		return nil, err
 	}

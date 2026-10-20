@@ -37,7 +37,7 @@ func NewClient() *Client {
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		user:       user,
 		password:   password,
-		httpClient: &http.Client{},
+		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}
 }
 

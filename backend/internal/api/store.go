@@ -558,6 +558,7 @@ type rateLimiter struct {
 	attempts    map[string][]time.Time
 	window      time.Duration
 	maxAttempts int
+	lastSweep   time.Time
 }
 
 func newRateLimiter(window time.Duration, maxAttempts int) *rateLimiter {
@@ -565,6 +566,26 @@ func newRateLimiter(window time.Duration, maxAttempts int) *rateLimiter {
 		attempts:    make(map[string][]time.Time),
 		window:      window,
 		maxAttempts: maxAttempts,
+		lastSweep:   time.Now(),
+	}
+}
+
+// sweepLocked drops every key whose attempts have all aged out of the window.
+// Without it a key per unique source IP (every login attempt, including bot
+// scans of the public login endpoint) stays in the map forever.
+func (rl *rateLimiter) sweepLocked(cutoff time.Time) {
+	for key, times := range rl.attempts {
+		valid := times[:0]
+		for _, t := range times {
+			if t.After(cutoff) {
+				valid = append(valid, t)
+			}
+		}
+		if len(valid) == 0 {
+			delete(rl.attempts, key)
+			continue
+		}
+		rl.attempts[key] = valid
 	}
 }
 
@@ -575,14 +596,24 @@ func (rl *rateLimiter) isLimited(key string) bool {
 	now := time.Now()
 	cutoff := now.Add(-rl.window)
 
+	// Periodically evict idle keys; per-key trimming alone leaves the map
+	// growing with every IP that only ever tried once.
+	if now.Sub(rl.lastSweep) >= rl.window {
+		rl.sweepLocked(cutoff)
+		rl.lastSweep = now
+	}
+
 	var valid []time.Time
 	for _, t := range rl.attempts[key] {
 		if t.After(cutoff) {
 			valid = append(valid, t)
 		}
 	}
-
-	rl.attempts[key] = valid
+	if len(valid) == 0 {
+		delete(rl.attempts, key)
+	} else {
+		rl.attempts[key] = valid
+	}
 
 	if len(valid) >= rl.maxAttempts {
 		return true
