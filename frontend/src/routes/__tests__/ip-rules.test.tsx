@@ -48,6 +48,17 @@ const rules = [
   },
 ]
 
+const ipGroups = [
+  {
+    id: 'g1',
+    name: 'YouTube',
+    cidrs: ['203.0.113.0/24', '2001:db8:bad::/48', '198.51.100.0/24'],
+    range_count: 3,
+    rule_count: 1,
+    created_at: '2026-10-20T09:00:00Z',
+  },
+]
+
 const status = {
   enabled: true,
   rules_total: 2,
@@ -71,6 +82,7 @@ describe('IPBlockingPage', () => {
         if (url.includes('/api/ip-rules/status')) {
           return jsonRes(status)
         }
+        if (url === '/api/ip-groups') return jsonRes([])
         if (url === '/api/ip-rules') {
           return jsonRes(rules)
         }
@@ -120,6 +132,7 @@ describe('IPBlockingPage', () => {
           201,
         )
       }
+      if (url === '/api/ip-groups') return jsonRes([])
       if (url.includes('/api/ip-rules/status')) return jsonRes(status)
       if (url === '/api/ip-rules') return jsonRes([])
       throw new Error(`unexpected fetch: ${url}`)
@@ -152,6 +165,7 @@ describe('IPBlockingPage', () => {
       if (url === '/api/ip-rules' && init?.method === 'POST') {
         return errRes('invalid CIDR: default routes are not allowed', 400)
       }
+      if (url === '/api/ip-groups') return jsonRes([])
       if (url.includes('/api/ip-rules/status')) return jsonRes(status)
       if (url === '/api/ip-rules') return jsonRes([])
       throw new Error(`unexpected fetch: ${url}`)
@@ -177,6 +191,7 @@ describe('IPBlockingPage', () => {
     let listCalls = 0
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       if (init?.method === 'DELETE') return jsonRes({ status: 'deleted' })
+      if (url === '/api/ip-groups') return jsonRes([])
       if (url.includes('/api/ip-rules/status')) return jsonRes(status)
       if (url === '/api/ip-rules') {
         listCalls += 1
@@ -204,6 +219,7 @@ describe('IPBlockingPage', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (url: string) => {
+        if (url === '/api/ip-groups') return jsonRes([])
         if (url.includes('/api/ip-rules/status')) return jsonRes({ ...status, enabled: false })
         if (url === '/api/ip-rules') return jsonRes(rules)
         throw new Error(`unexpected fetch: ${url}`)
@@ -216,5 +232,147 @@ describe('IPBlockingPage', () => {
     )
     expect(disabled.closest('[role="status"]')?.className).toContain('bg-red-500/10')
     expect(screen.queryByText(/Applied on/)).toBeNull()
+  })
+
+  it('lists IP groups and renders group-targeted rules as a chip', async () => {
+    const groupRule = {
+      ...rules[0],
+      id: 'r-group',
+      cidr: '',
+      group_id: 'g1',
+      group_name: 'YouTube',
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url === '/api/ip-groups') return jsonRes(ipGroups)
+        if (url.includes('/api/ip-rules/status')) return jsonRes(status)
+        if (url === '/api/ip-rules') return jsonRes([...rules, groupRule])
+        throw new Error(`unexpected fetch: ${url}`)
+      }),
+    )
+
+    renderWithClient(<IPBlockingPage />)
+    await screen.findByText('used by 1 rule')
+
+    // Group row: range/rule counts plus edit/delete actions.
+    expect(screen.getByText('3 ranges')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Edit YouTube' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Delete YouTube' })).toBeTruthy()
+
+    // The group-targeted rule renders a chip instead of a CIDR/family badge.
+    const ruleRow = (await screen.findByText('Group:')).closest('tr')!
+    expect(within(ruleRow).getByText('YouTube')).toBeTruthy()
+    expect(within(ruleRow).getByText('· 3 ranges')).toBeTruthy()
+    expect(within(ruleRow).queryByText('IPv6')).toBeNull()
+
+    // Expanding a group reveals its CIDRs as compact mono chips.
+    fireEvent.click(screen.getByRole('button', { name: 'YouTube' }))
+    expect(await screen.findByText('198.51.100.0/24')).toBeTruthy()
+  })
+
+  it('creates a group from the modal with parsed and de-duplicated ranges', async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === '/api/ip-groups' && init?.method === 'POST') {
+        return jsonRes(
+          {
+            id: 'g-new',
+            name: 'YouTube',
+            cidrs: [],
+            range_count: 0,
+            rule_count: 0,
+            created_at: '',
+          },
+          201,
+        )
+      }
+      if (url === '/api/ip-groups') return jsonRes([])
+      if (url.includes('/api/ip-rules/status')) return jsonRes(status)
+      if (url === '/api/ip-rules') return jsonRes([])
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderWithClient(<IPBlockingPage />)
+    fireEvent.click(await screen.findByRole('button', { name: 'New group' }))
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.change(within(dialog).getByLabelText('Name'), {
+      target: { value: 'YouTube' },
+    })
+    fireEvent.change(within(dialog).getByLabelText('IP addresses / CIDRs'), {
+      target: { value: '203.0.113.0/24, 2001:DB8::/48\n\n203.0.113.0/24' },
+    })
+
+    // Live count: trimmed, blank lines dropped, case-insensitive de-dupe.
+    expect(within(dialog).getByText('2 ranges')).toBeTruthy()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Create group' }))
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(
+        ([url, init]) => url === '/api/ip-groups' && init?.method === 'POST',
+      )
+      expect(call).toBeTruthy()
+      expect(JSON.parse(String(call![1]?.body))).toEqual({
+        name: 'YouTube',
+        // De-duped case-insensitively, keeping the first spelling.
+        cidrs: ['203.0.113.0/24', '2001:DB8::/48'],
+      })
+    })
+  })
+
+  it('adds a rule for an IP group by sending group_id', async () => {
+    const singleGroup = [{ ...ipGroups[0], rule_count: 0 }]
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === '/api/ip-rules' && init?.method === 'POST') {
+        return jsonRes(
+          {
+            id: 'r-new',
+            scope: 'global',
+            user_id: null,
+            user_email: '',
+            user_full_name: '',
+            cidr: '',
+            note: '',
+            group_id: 'g1',
+            group_name: 'YouTube',
+            created_at: '',
+          },
+          201,
+        )
+      }
+      if (url === '/api/ip-groups') return jsonRes(singleGroup)
+      if (url.includes('/api/ip-rules/status')) return jsonRes(status)
+      if (url === '/api/ip-rules') return jsonRes([])
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderWithClient(<IPBlockingPage />)
+    // Wait for the groups query so the selector has its option.
+    await screen.findByText('used by 0 rules')
+    fireEvent.click(await screen.findByRole('button', { name: 'Add IP rule' }))
+    const dialog = await screen.findByRole('dialog')
+
+    // Group target replaces the CIDR input with a group selector.
+    fireEvent.change(within(dialog).getByLabelText('Target'), {
+      target: { value: 'group' },
+    })
+    expect(within(dialog).queryByLabelText('IP address or CIDR')).toBeNull()
+    fireEvent.change(within(dialog).getByLabelText('IP group'), {
+      target: { value: 'g1' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add rule' }))
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(
+        ([url, init]) => url === '/api/ip-rules' && init?.method === 'POST',
+      )
+      expect(call).toBeTruthy()
+      // Exactly one of cidr / group_id: group rules never send cidr.
+      expect(JSON.parse(String(call![1]?.body))).toEqual({
+        scope: 'global',
+        group_id: 'g1',
+      })
+    })
   })
 })

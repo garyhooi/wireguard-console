@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 
 vi.mock('@tanstack/react-router', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@tanstack/react-router')>()
@@ -8,7 +8,7 @@ vi.mock('@tanstack/react-router', async (importOriginal) => {
     Link: ({ children }: { children: React.ReactNode }) => <a>{children}</a>,
   }
 })
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { WebActivityPage } from '../_authenticated/web-activity'
 
@@ -84,29 +84,45 @@ const records = {
   ],
 }
 
+const emptyBlockedIPs = { days: 7, total_hits: 0, top: [], records: [] }
+
+/** Default API mock; pass overrides for endpoint payloads a test cares about. */
+function mockApi(overrides: { blockedIps?: unknown } = {}) {
+  return vi.fn(async (url: string) => {
+    if (url.includes('/api/admins/me')) {
+      return { ok: true, status: 200, json: async () => ({ id: 'a1', role: 'super_admin' }) } as Response
+    }
+    if (url.includes('/api/users')) {
+      return { ok: true, status: 200, json: async () => [] } as Response
+    }
+    if (url.includes('/api/peers')) {
+      return { ok: true, status: 200, json: async () => [] } as Response
+    }
+    if (url.includes('/api/web-activity/summary')) {
+      return { ok: true, status: 200, json: async () => summary } as Response
+    }
+    if (url.includes('/api/web-activity/ip-blocked')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => overrides.blockedIps ?? emptyBlockedIPs,
+      } as Response
+    }
+    if (url.includes('/api/web-activity')) {
+      return { ok: true, status: 200, json: async () => records } as Response
+    }
+    throw new Error(`unexpected fetch: ${url}`)
+  })
+}
+
 describe('WebActivityPage', () => {
   beforeEach(() => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (url: string) => {
-        if (url.includes('/api/admins/me')) {
-          return { ok: true, status: 200, json: async () => ({ id: 'a1', role: 'super_admin' }) } as Response
-        }
-        if (url.includes('/api/users')) {
-          return { ok: true, status: 200, json: async () => [] } as Response
-        }
-        if (url.includes('/api/peers')) {
-          return { ok: true, status: 200, json: async () => [] } as Response
-        }
-        if (url.includes('/api/web-activity/summary')) {
-          return { ok: true, status: 200, json: async () => summary } as Response
-        }
-        if (url.includes('/api/web-activity')) {
-          return { ok: true, status: 200, json: async () => records } as Response
-        }
-        throw new Error(`unexpected fetch: ${url}`)
-      }),
-    )
+    vi.stubGlobal('fetch', mockApi())
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
   })
 
   it('renders the per-user summary table', async () => {
@@ -133,5 +149,52 @@ describe('WebActivityPage', () => {
     await waitFor(() => expect(screen.getByText('www.youtube.com')).toBeTruthy())
     expect(screen.getByText(/Blocked · FilteredBlackList/)).toBeTruthy()
     expect(screen.getByText('www.google.com')).toBeTruthy()
+  })
+
+  it('renders blocked-IP attempts with the per-user label and packet count', async () => {
+    vi.stubGlobal(
+      'fetch',
+      mockApi({
+        blockedIps: {
+          days: 7,
+          total_hits: 2,
+          top: [{ dest_cidr: '203.0.113.0/24', hits: 2 }],
+          records: [
+            {
+              id: 1,
+              user_name: 'Alice Tan',
+              user_email: 'alice@example.com',
+              client_ip: '10.8.0.2',
+              dest_cidr: '203.0.113.0/24',
+              packets: 1234,
+              sampled_at: '2026-01-08T09:30:00Z',
+            },
+            {
+              id: 2,
+              user_name: '',
+              user_email: '',
+              client_ip: '10.8.0.3',
+              dest_cidr: '2001:db8:bad::/48',
+              packets: 7,
+              sampled_at: '2026-01-08T09:31:00Z',
+            },
+          ],
+        },
+      }),
+    )
+
+    renderWithClient(<WebActivityPage />)
+    expect(await screen.findByText('Blocked IP attempts · last 7 days')).toBeTruthy()
+    await waitFor(() => expect(screen.getByText('203.0.113.0/24')).toBeTruthy())
+
+    // Per-user record: user name, mono destination, thousands-separated packets.
+    const userRow = screen.getByText('203.0.113.0/24').closest('tr')!
+    expect(within(userRow).getByText('Alice Tan')).toBeTruthy()
+    expect(within(userRow).getByText('1,234')).toBeTruthy()
+
+    // A hit with no owning user comes from a global rule → "All peers".
+    const globalRow = screen.getByText('2001:db8:bad::/48').closest('tr')!
+    expect(within(globalRow).getByText('All peers')).toBeTruthy()
+    expect(within(globalRow).getByText('7')).toBeTruthy()
   })
 })

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 
 vi.mock('@tanstack/react-router', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@tanstack/react-router')>()
@@ -8,7 +8,7 @@ vi.mock('@tanstack/react-router', async (importOriginal) => {
     Link: ({ children }: { children: React.ReactNode }) => <a>{children}</a>,
   }
 })
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { StatisticsPage, clampSeries, clampTop } from '../_authenticated/statistics'
 
@@ -74,43 +74,59 @@ const usagePeers = {
   ],
 }
 
+const emptyIPBlocked = { days: 7, total_hits: 0, top: [] }
+
+/** Default API mock; pass overrides for endpoint payloads a test cares about. */
+function mockApi(overrides: { ipBlocked?: unknown } = {}) {
+  return vi.fn(async (url: string) => {
+    if (url.includes('/api/stats/overview')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          total_rx_bytes: 0,
+          total_tx_bytes: 0,
+          connected_peers: 0,
+          total_peers: 2,
+        }),
+      } as Response
+    }
+    if (url.includes('/api/stats/traffic')) {
+      return { ok: true, status: 200, json: async () => ({ series: [], top: [] }) } as Response
+    }
+    if (url.includes('/api/web-activity/ip-blocked')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => overrides.ipBlocked ?? emptyIPBlocked,
+      } as Response
+    }
+    if (url.includes('/api/web-activity/top-domains')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ days: 7, allowed: [], blocked: [] }),
+      } as Response
+    }
+    if (url.includes('/api/peers')) {
+      return { ok: true, status: 200, json: async () => [] } as Response
+    }
+    if (url.includes('/api/stats/usage')) {
+      const body = url.includes('scope=peer') ? usagePeers : usageUsers
+      return { ok: true, status: 200, json: async () => body } as Response
+    }
+    throw new Error(`unexpected fetch: ${url}`)
+  })
+}
+
 describe('StatisticsPage', () => {
   beforeEach(() => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (url: string) => {
-        if (url.includes('/api/stats/overview')) {
-          return {
-            ok: true,
-            status: 200,
-            json: async () => ({
-              total_rx_bytes: 0,
-              total_tx_bytes: 0,
-              connected_peers: 0,
-              total_peers: 2,
-            }),
-          } as Response
-        }
-        if (url.includes('/api/stats/traffic')) {
-          return { ok: true, status: 200, json: async () => ({ series: [], top: [] }) } as Response
-        }
-        if (url.includes('/api/web-activity/top-domains')) {
-          return {
-            ok: true,
-            status: 200,
-            json: async () => ({ days: 7, allowed: [], blocked: [] }),
-          } as Response
-        }
-        if (url.includes('/api/peers')) {
-          return { ok: true, status: 200, json: async () => [] } as Response
-        }
-        if (url.includes('/api/stats/usage')) {
-          const body = url.includes('scope=peer') ? usagePeers : usageUsers
-          return { ok: true, status: 200, json: async () => body } as Response
-        }
-        throw new Error(`unexpected fetch: ${url}`)
-      }),
-    )
+    vi.stubGlobal('fetch', mockApi())
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
   })
 
   // The peer-state table (above) has no tfoot; only the usage table does, so
@@ -135,6 +151,38 @@ describe('StatisticsPage', () => {
     expect(tfoot().textContent).toContain('5 MB') // total download 4+1
     expect(tfoot().textContent).toContain('3 MB') // total upload 2+1
     expect(tfoot().textContent).toContain('8 MB') // grand total
+  })
+
+  it('renders the blocked-IP attempts panel with top destinations and hit total', async () => {
+    vi.stubGlobal(
+      'fetch',
+      mockApi({
+        ipBlocked: {
+          days: 7,
+          total_hits: 42,
+          top: [
+            { dest_cidr: '203.0.113.0/24', hits: 30 },
+            { dest_cidr: '2001:db8:bad::/48', hits: 12 },
+          ],
+        },
+      }),
+    )
+
+    renderWithClient(<StatisticsPage />)
+    expect(await screen.findByText('Blocked IP attempts · last 7 days')).toBeTruthy()
+    await waitFor(() => expect(screen.getByText('203.0.113.0/24')).toBeTruthy())
+    expect(screen.getByText('2001:db8:bad::/48')).toBeTruthy()
+    expect(screen.getByText('42 dropped hits')).toBeTruthy()
+  })
+
+  it('shows the blocked-IP empty hint when nothing has been dropped yet', async () => {
+    renderWithClient(<StatisticsPage />)
+    expect(
+      await screen.findByText(
+        'No blocked-IP attempts recorded yet. Add IP rules on the IP Blocking page and blocked connections will surface here.',
+      ),
+    ).toBeTruthy()
+    expect(screen.getByText('0 dropped hits')).toBeTruthy()
   })
 })
 

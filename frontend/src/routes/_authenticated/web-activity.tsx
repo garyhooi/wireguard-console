@@ -57,6 +57,24 @@ interface RecordsResponse {
   rows: WebRecord[]
 }
 
+/** One destination IP/CIDR dropped by an L3/L4 IP rule, sampled per peer. */
+interface BlockedIPRecord {
+  id: number
+  user_name: string
+  user_email: string
+  client_ip: string
+  dest_cidr: string
+  packets: number
+  sampled_at: string
+}
+
+interface BlockedIPResponse {
+  days: number
+  total_hits: number
+  top: { dest_cidr: string; hits: number }[]
+  records: BlockedIPRecord[]
+}
+
 interface Me {
   id: string
   role: string
@@ -160,6 +178,15 @@ export function WebActivityPage() {
       return apiJson<RecordsResponse>(`/api/web-activity?${new URLSearchParams(p)}`)
     },
     refetchInterval: 30000,
+  })
+
+  // L3/L4 blocks from IP rules — independent of the DNS-level records above.
+  const { data: blockedIps, isLoading: blockedIpsLoading } = useQuery<BlockedIPResponse>({
+    queryKey: ['web-activity-ip-blocked', 7, 100],
+    queryFn: async () => {
+      return apiJson<BlockedIPResponse>('/api/web-activity/ip-blocked?days=7&limit=100')
+    },
+    refetchInterval: 60000,
   })
 
   const purgeMutation = useMutation({
@@ -377,6 +404,52 @@ export function WebActivityPage() {
                     />
                   )
                 })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Panel>
+
+      {/* Blocked-IP attempts: destinations dropped by IP rules (not DNS). */}
+      <Panel title="Blocked IP attempts · last 7 days" className="mt-6">
+        {blockedIpsLoading ? (
+          <div className="p-5 space-y-3">
+            <Skeleton className="h-10 w-full" />
+            <Skeleton className="h-10 w-full" />
+          </div>
+        ) : (blockedIps?.records?.length ?? 0) === 0 ? (
+          <EmptyState
+            title="No blocked-IP attempts recorded yet"
+            hint="Add IP rules on the IP Blocking page and blocked connections will surface here."
+          />
+        ) : (
+          <div className="overflow-x-auto">
+            <table className={tableCls}>
+              <thead>
+                <tr className="bg-zinc-800/40 text-left text-[11px] uppercase tracking-wider text-zinc-500">
+                  <th className={thCls}>Time</th>
+                  <th className={thCls}>User</th>
+                  <th className={thCls}>Destination</th>
+                  <th className={thCls + ' text-right'}>Packets</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-800/60">
+                {blockedIps?.records.map((rec) => (
+                  <tr key={rec.id} className="transition-colors hover:bg-zinc-800/30">
+                    <td className="whitespace-nowrap px-5 py-3 font-mono text-xs tabular-nums text-zinc-500">
+                      {fmtDateTime(rec.sampled_at)}
+                    </td>
+                    <td className="px-5 py-3 text-sm text-zinc-300">
+                      {rec.user_name || rec.user_email || 'All peers'}
+                    </td>
+                    <td className="px-5 py-3 text-sm text-zinc-400">
+                      <span className="font-mono">{rec.dest_cidr}</span>
+                    </td>
+                    <td className="px-5 py-3 text-right font-mono text-sm tabular-nums text-zinc-300">
+                      {rec.packets.toLocaleString()}
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>

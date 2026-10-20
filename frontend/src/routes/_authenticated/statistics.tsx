@@ -51,6 +51,12 @@ interface TopDomainsResponse {
   blocked: { domain: string; count: number }[]
 }
 
+interface IPBlockedTopResponse {
+  days: number
+  total_hits: number
+  top: { dest_cidr: string; hits: number }[]
+}
+
 interface Peer {
   id: string
   name: string
@@ -146,13 +152,13 @@ function AngleTopTick({ x, y, payload }: { x?: number; y?: number; payload?: { v
   )
 }
 
-// Ranked list of domains with counts (top-10 panel).
-function DomainRankList({
+// Ranked list of names with counts (top-N panels: domains and blocked IPs).
+function TopList({
   items,
   tone,
   emptyHint,
 }: {
-  items?: { domain: string; count: number }[]
+  items?: { name: string; count: number }[]
   tone: 'allowed' | 'blocked'
   emptyHint: string
 }) {
@@ -167,13 +173,13 @@ function DomainRankList({
           {list.map((d, i) => {
             const pct = Math.max(4, Math.round((d.count / max) * 100))
             return (
-              <li key={d.domain} className="flex items-center gap-3 px-1 py-2">
+              <li key={d.name} className="flex items-center gap-3 px-1 py-2">
                 <span className="w-5 text-right text-xs text-zinc-600 font-mono tabular-nums">
                   {i + 1}
                 </span>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-baseline justify-between gap-3">
-                    <span className="text-sm text-zinc-200 font-mono truncate">{d.domain}</span>
+                    <span className="text-sm text-zinc-200 font-mono truncate">{d.name}</span>
                     <span className="text-xs text-zinc-500 font-mono tabular-nums shrink-0">
                       {d.count.toLocaleString()}
                     </span>
@@ -219,6 +225,16 @@ export function StatisticsPage() {
     queryKey: ['web-activity-top-domains', 7],
     queryFn: async () => {
       return apiJson<TopDomainsResponse>('/api/web-activity/top-domains?days=7')
+    },
+    refetchInterval: 60000,
+  })
+
+  // IP-level blocks (L3/L4 IP rules), last 7 days. limit=0 keeps the payload
+  // to the aggregate/top list — the detailed records live on Web Activity.
+  const { data: blockedIps } = useQuery<IPBlockedTopResponse>({
+    queryKey: ['web-activity-ip-blocked', 7],
+    queryFn: async () => {
+      return apiJson<IPBlockedTopResponse>('/api/web-activity/ip-blocked?days=7&limit=0')
     },
     refetchInterval: 60000,
   })
@@ -311,13 +327,13 @@ export function StatisticsPage() {
       </Panel>
 
       {/* Top domains (allowed + blocked attempts) · last 7 days */}
-      <div className="mt-8 grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="mt-8 grid grid-cols-1 lg:grid-cols-3 gap-6">
         <Panel
           title="Top domains browsed · last 7 days"
           description="Most-resolved domains (allowed by the DNS filter), across all VPN users."
         >
-          <DomainRankList
-            items={topDomains?.allowed}
+          <TopList
+            items={topDomains?.allowed?.map((d) => ({ name: d.domain, count: d.count }))}
             tone="allowed"
             emptyHint="No allowed lookups recorded yet — browsing records appear once peers pass DNS through the tunnel filter."
           />
@@ -326,11 +342,24 @@ export function StatisticsPage() {
           title="Blocked domain attempts · last 7 days"
           description="Domains users tried to reach that the DNS filter refused (across all VPN users)."
         >
-          <DomainRankList
-            items={topDomains?.blocked}
+          <TopList
+            items={topDomains?.blocked?.map((d) => ({ name: d.domain, count: d.count }))}
             tone="blocked"
             emptyHint="No blocked-domain attempts recorded yet. Add domain rules on the Domain Blocking page and blocked lookups will surface here."
           />
+        </Panel>
+        <Panel
+          title="Blocked IP attempts · last 7 days"
+          description="IP destinations dropped by IP rules, across all VPN users."
+        >
+          <TopList
+            items={blockedIps?.top?.map((x) => ({ name: x.dest_cidr, count: x.hits }))}
+            tone="blocked"
+            emptyHint="No blocked-IP attempts recorded yet. Add IP rules on the IP Blocking page and blocked connections will surface here."
+          />
+          <p className="px-5 pb-4 text-xs text-zinc-500">
+            {(blockedIps?.total_hits ?? 0).toLocaleString()} dropped hits
+          </p>
         </Panel>
       </div>
 
