@@ -2,11 +2,13 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -88,7 +90,7 @@ func RequestDomainRuleSync(store *Store) {
 
 func loadDomainRules(ctx context.Context, store *Store) ([]db.DomainRule, error) {
 	rows, err := store.pool.Query(ctx, `
-		SELECT id, scope, user_id, domain, created_by, created_at
+		SELECT id, scope, user_id, domain, group_id, created_by, created_at
 		FROM domain_block_rules
 		ORDER BY created_at DESC
 	`)
@@ -100,10 +102,12 @@ func loadDomainRules(ctx context.Context, store *Store) ([]db.DomainRule, error)
 	var rules []db.DomainRule
 	for rows.Next() {
 		var rule db.DomainRule
-		if err := rows.Scan(&rule.ID, &rule.Scope, &rule.UserID, &rule.Domain,
+		var domain sql.NullString
+		if err := rows.Scan(&rule.ID, &rule.Scope, &rule.UserID, &domain, &rule.GroupID,
 			&rule.CreatedBy, &rule.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan domain rule: %w", err)
 		}
+		rule.Domain = domain.String
 		rules = append(rules, rule)
 	}
 	if err := rows.Err(); err != nil {
@@ -248,13 +252,15 @@ func ListDomainRules(store *Store) http.HandlerFunc {
 			db.DomainRule
 			UserEmail    string `json:"user_email"`
 			UserFullName string `json:"user_full_name"`
+			GroupName    string `json:"group_name,omitempty"`
 		}
 		var rules []domainRuleRow
 		rows, err := store.pool.Query(ctx, `
-			SELECT dr.id, dr.scope, dr.user_id, dr.domain, dr.created_by, dr.created_at,
-			       COALESCE(u.email, ''), COALESCE(u.full_name, '')
+			SELECT dr.id, dr.scope, dr.user_id, dr.domain, dr.group_id, dr.created_by, dr.created_at,
+			       COALESCE(u.email, ''), COALESCE(u.full_name, ''), COALESCE(g.name, '')
 			FROM domain_block_rules dr
 			LEFT JOIN users u ON u.id = dr.user_id
+			LEFT JOIN domain_groups g ON g.id = dr.group_id
 			ORDER BY dr.created_at DESC
 		`)
 		if err != nil {
@@ -265,11 +271,13 @@ func ListDomainRules(store *Store) http.HandlerFunc {
 
 		for rows.Next() {
 			var rule domainRuleRow
-			if err := rows.Scan(&rule.ID, &rule.Scope, &rule.UserID, &rule.Domain,
-				&rule.CreatedBy, &rule.CreatedAt, &rule.UserEmail, &rule.UserFullName); err != nil {
+			var domain sql.NullString
+			if err := rows.Scan(&rule.ID, &rule.Scope, &rule.UserID, &domain, &rule.GroupID,
+				&rule.CreatedBy, &rule.CreatedAt, &rule.UserEmail, &rule.UserFullName, &rule.GroupName); err != nil {
 				writeError(w, http.StatusInternalServerError, "Failed to scan domain rule")
 				return
 			}
+			rule.Domain = domain.String
 			rules = append(rules, rule)
 		}
 
@@ -280,9 +288,10 @@ func ListDomainRules(store *Store) http.HandlerFunc {
 func CreateDomainRule(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Scope  string     `json:"scope"`
-			UserID *uuid.UUID `json:"user_id"`
-			Domain string     `json:"domain"`
+			Scope   string     `json:"scope"`
+			UserID  *uuid.UUID `json:"user_id"`
+			Domain  string     `json:"domain"`
+			GroupID *uuid.UUID `json:"group_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
@@ -301,56 +310,113 @@ func CreateDomainRule(store *Store) http.HandlerFunc {
 			req.UserID = nil
 		}
 
-		domain, err := normalizeDomain(req.Domain)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
+		hasDomain := strings.TrimSpace(req.Domain) != ""
+		hasGroup := req.GroupID != nil
+		if hasDomain == hasGroup {
+			writeError(w, http.StatusBadRequest, "Provide either a domain or a domain group (exactly one)")
 			return
 		}
 
 		ctx := context.Background()
 		adminID := getAdminID(r)
 
-		// Dedupe deliberately (the DB has a unique index too, but a clear 409
-		// is nicer than a constraint-violation error).
-		var exists bool
-		err = store.pool.QueryRow(ctx, `
-			SELECT true FROM domain_block_rules
-			WHERE scope = $1
-			  AND COALESCE(user_id, '00000000-0000-0000-0000-000000000000'::uuid)
-			    = COALESCE($2::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
-			  AND domain = $3
-			LIMIT 1
-		`, req.Scope, req.UserID, domain).Scan(&exists)
-		if err == nil {
-			writeError(w, http.StatusConflict, fmt.Sprintf("%s is already blocked for this scope", domain))
-			return
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusInternalServerError, "Failed to check existing rules")
-			return
+		var domain string
+		if hasDomain {
+			var err error
+			domain, err = normalizeDomain(req.Domain)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+
+			// Dedupe deliberately (the DB has a unique index too, but a clear
+			// 409 is nicer than a constraint-violation error).
+			var exists bool
+			err = store.pool.QueryRow(ctx, `
+				SELECT true FROM domain_block_rules
+				WHERE scope = $1
+				  AND COALESCE(user_id, '00000000-0000-0000-0000-000000000000'::uuid)
+				    = COALESCE($2::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
+				  AND domain = $3
+				LIMIT 1
+			`, req.Scope, req.UserID, domain).Scan(&exists)
+			if err == nil {
+				writeError(w, http.StatusConflict, fmt.Sprintf("%s is already blocked for this scope", domain))
+				return
+			}
+			if !errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, http.StatusInternalServerError, "Failed to check existing rules")
+				return
+			}
+		} else {
+			// Validate that the group exists (and grab its name for the audit
+			// message + clear 409 text).
+			var groupName string
+			err := store.pool.QueryRow(ctx, `SELECT name FROM domain_groups WHERE id = $1`, *req.GroupID).Scan(&groupName)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					writeError(w, http.StatusNotFound, "Domain group not found")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "Failed to check domain group")
+				return
+			}
+
+			var exists bool
+			err = store.pool.QueryRow(ctx, `
+				SELECT true FROM domain_block_rules
+				WHERE scope = $1
+				  AND COALESCE(user_id, '00000000-0000-0000-0000-000000000000'::uuid)
+				    = COALESCE($2::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
+				  AND group_id = $3
+				LIMIT 1
+			`, req.Scope, req.UserID, *req.GroupID).Scan(&exists)
+			if err == nil {
+				writeError(w, http.StatusConflict, fmt.Sprintf("group %q is already blocked for this scope", groupName))
+				return
+			}
+			if !errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, http.StatusInternalServerError, "Failed to check existing rules")
+				return
+			}
+			domain = "" // group rules keep domain NULL
 		}
 
-		_, err = store.pool.Exec(ctx, `
-			INSERT INTO domain_block_rules (scope, user_id, domain, created_by)
-			VALUES ($1, $2, $3, $4)
-		`, req.Scope, req.UserID, domain, adminID)
+		var domainArg *string
+		if hasDomain {
+			domainArg = &domain
+		}
+		_, err := store.pool.Exec(ctx, `
+			INSERT INTO domain_block_rules (scope, user_id, domain, group_id, created_by)
+			VALUES ($1, $2, $3, $4, $5)
+		`, req.Scope, req.UserID, domainArg, req.GroupID, adminID)
 		if err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-				writeError(w, http.StatusConflict, fmt.Sprintf("%s is already blocked for this scope", domain))
+				writeError(w, http.StatusConflict, "This rule already exists for this scope")
 				return
 			}
 			writeError(w, http.StatusInternalServerError, "Failed to create domain rule")
 			return
 		}
 
-		logAudit(ctx, store, adminID, "domain_rule.create", "domain_rule", "", nil)
+		targetID := domain
+		if hasGroup {
+			targetID = req.GroupID.String()
+		}
+		logAudit(ctx, store, adminID, "domain_rule.create", "domain_rule", targetID, nil)
 
 		// Push asynchronously (coalesced) so the API stays fast when AdGuard is
 		// slow/unreachable; the status endpoint reports sync failures.
 		RequestDomainRuleSync(store)
 
-		writeJSON(w, http.StatusCreated, map[string]string{"status": "created", "domain": domain})
+		resp := map[string]string{"status": "created"}
+		if hasDomain {
+			resp["domain"] = domain
+		} else {
+			resp["group_id"] = req.GroupID.String()
+		}
+		writeJSON(w, http.StatusCreated, resp)
 	}
 }
 
@@ -420,7 +486,7 @@ func DomainRuleSyncStatus(store *Store) http.HandlerFunc {
 			"missing_rules":                missing,
 			"unexpected_rules":             unexpected,
 			"invalid_rules":                len(built.Invalid),
-			"unexpanded_rules":             len(built.Unexpanded),
+			"unexpanded_rules":             built.Unexpanded,
 			"db_rules":                     built.AdGuard,
 			"ag_rules":                     ag.UserRules,
 			"block_page_ip":                blockingIP(store),

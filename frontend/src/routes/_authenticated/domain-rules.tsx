@@ -1,7 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { IconPlus, IconRefresh } from '@tabler/icons-react'
+import { IconChevronRight, IconPencil, IconPlus, IconRefresh, IconTrash } from '@tabler/icons-react'
 import { apiJson } from '../../lib/api'
 import { fmtDate } from '../../lib/timezone'
 import {
@@ -10,6 +10,7 @@ import {
   GhostButton,
   Modal,
   PageHeader,
+  Panel,
   PrimaryButton,
   Skeleton,
   tableCls,
@@ -27,8 +28,25 @@ interface DomainRule {
   user_email?: string
   user_full_name?: string
   domain: string
+  /** Set for group-targeted rules: domain is "" and group_name is filled. */
+  group_id?: string | null
+  group_name?: string | null
   created_by: string | null
   created_at: string
+}
+
+interface DomainGroup {
+  id: string
+  name: string
+  domains: string[]
+  domain_count: number
+  rule_count: number
+  created_at: string
+}
+
+interface DeleteGroupResult {
+  status: string
+  rules_removed: number
 }
 
 interface SyncStatus {
@@ -149,8 +167,29 @@ function enforcementProblems(result: DomainCheck): string[] {
   return problems
 }
 
+/**
+ * Parse the group domains textarea: one domain per line (commas and whitespace
+ * also work). Trims, drops empties, and de-dupes case-insensitively.
+ */
+function parseDomains(text: string): string[] {
+  const seen = new Set<string>()
+  const domains: string[] = []
+  for (const raw of text.split(/[\s,]+/)) {
+    const value = raw.trim()
+    if (!value) continue
+    const key = value.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    domains.push(value)
+  }
+  return domains
+}
+
 const smallButtonCls =
   'inline-flex shrink-0 items-center justify-center gap-1.5 rounded-md border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-300 transition-colors hover:border-zinc-500 hover:text-zinc-100 active:translate-y-[1px] disabled:pointer-events-none disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500'
+
+const iconButtonCls =
+  'inline-flex items-center justify-center rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500'
 
 export const Route = createFileRoute('/_authenticated/domain-rules')({
   component: DomainRulesPage,
@@ -159,9 +198,22 @@ export const Route = createFileRoute('/_authenticated/domain-rules')({
 export function DomainRulesPage() {
   const [showAddModal, setShowAddModal] = useState(false)
   const [scope, setScope] = useState<'global' | 'user'>('global')
+  const [target, setTarget] = useState<'domain' | 'group'>('domain')
   const [domain, setDomain] = useState('')
+  const [groupId, setGroupId] = useState('')
   const [userId, setUserId] = useState('')
   const [testDomain, setTestDomain] = useState('')
+
+  // Domain groups card + create/edit modal.
+  const [showGroupModal, setShowGroupModal] = useState(false)
+  const [editingGroup, setEditingGroup] = useState<DomainGroup | null>(null)
+  const [groupName, setGroupName] = useState('')
+  const [groupDomainsText, setGroupDomainsText] = useState('')
+  const [expandedGroupId, setExpandedGroupId] = useState<string | null>(null)
+  const [deleteGroupResult, setDeleteGroupResult] = useState<{
+    name: string
+    rulesRemoved: number
+  } | null>(null)
 
   const { data: rules, isLoading, refetch } = useQuery<DomainRule[]>({
     queryKey: ['domain-rules'],
@@ -169,6 +221,20 @@ export function DomainRulesPage() {
       return apiJson<DomainRule[]>('/api/domain-rules')
     },
   })
+
+  const {
+    data: groupsData,
+    isLoading: groupsLoading,
+    isError: groupsError,
+    refetch: refetchGroups,
+  } = useQuery<DomainGroup[]>({
+    queryKey: ['domain-groups'],
+    queryFn: async () => {
+      return apiJson<DomainGroup[]>('/api/domain-groups')
+    },
+  })
+  const groups = Array.isArray(groupsData) ? groupsData : []
+  const groupById = new Map(groups.map((group) => [group.id, group]))
 
   const {
     data: status,
@@ -190,14 +256,22 @@ export function DomainRulesPage() {
   })
 
   const addMutation = useMutation({
-    mutationFn: async (data: { scope: string; user_id?: string; domain: string }) => {
+    mutationFn: async (data: {
+      scope: string
+      user_id?: string
+      domain?: string
+      group_id?: string
+    }) => {
       return apiJson('/api/domain-rules', { method: 'POST', body: data })
     },
     onSuccess: () => {
       setShowAddModal(false)
       setDomain('')
+      setGroupId('')
+      setTarget('domain')
       setUserId('')
       refetch()
+      refetchGroups()
       refetchStatus()
     },
   })
@@ -207,6 +281,45 @@ export function DomainRulesPage() {
       return apiJson(`/api/domain-rules/${id}`, { method: 'DELETE' })
     },
     onSuccess: () => {
+      refetch()
+      refetchGroups()
+      refetchStatus()
+    },
+  })
+
+  // Create / edit a reusable domain group (domains replaces the whole list).
+  const groupMutation = useMutation({
+    mutationFn: async () => {
+      const body = { name: groupName.trim(), domains: parseDomains(groupDomainsText) }
+      return editingGroup
+        ? apiJson<DomainGroup>(`/api/domain-groups/${editingGroup.id}`, {
+            method: 'PATCH',
+            body,
+          })
+        : apiJson<DomainGroup>('/api/domain-groups', { method: 'POST', body })
+    },
+    onSuccess: () => {
+      setShowGroupModal(false)
+      setEditingGroup(null)
+      refetchGroups()
+      refetch()
+    },
+  })
+
+  // Deleting a group cascades its rules server-side (rules_removed).
+  const deleteGroupMutation = useMutation({
+    mutationFn: async (group: DomainGroup) => {
+      return apiJson<DeleteGroupResult>(`/api/domain-groups/${group.id}`, {
+        method: 'DELETE',
+      })
+    },
+    onSuccess: (result, group) => {
+      setDeleteGroupResult({
+        name: group.name,
+        rulesRemoved: result?.rules_removed ?? 0,
+      })
+      if (expandedGroupId === group.id) setExpandedGroupId(null)
+      refetchGroups()
       refetch()
       refetchStatus()
     },
@@ -232,6 +345,8 @@ export function DomainRulesPage() {
 
   const openAddModal = () => {
     addMutation.reset()
+    setTarget('domain')
+    setGroupId('')
     setShowAddModal(true)
   }
 
@@ -242,12 +357,18 @@ export function DomainRulesPage() {
 
   const handleAdd = (e: React.FormEvent) => {
     e.preventDefault()
-    const data: { scope: string; user_id?: string; domain: string } = {
+    // The API accepts exactly one of domain / group_id.
+    const data: { scope: string; user_id?: string; domain?: string; group_id?: string } = {
       scope,
-      domain,
     }
     if (scope === 'user' && userId) {
       data.user_id = userId
+    }
+    if (target === 'group') {
+      if (!groupId) return
+      data.group_id = groupId
+    } else {
+      data.domain = domain
     }
     addMutation.mutate(data)
   }
@@ -259,7 +380,46 @@ export function DomainRulesPage() {
     checkMutation.mutate(value)
   }
 
+  const openNewGroupModal = () => {
+    groupMutation.reset()
+    setEditingGroup(null)
+    setGroupName('')
+    setGroupDomainsText('')
+    setDeleteGroupResult(null)
+    setShowGroupModal(true)
+  }
+
+  const openEditGroupModal = (group: DomainGroup) => {
+    groupMutation.reset()
+    setEditingGroup(group)
+    setGroupName(group.name)
+    setGroupDomainsText(group.domains.join('\n'))
+    setDeleteGroupResult(null)
+    setShowGroupModal(true)
+  }
+
+  const closeGroupModal = () => {
+    groupMutation.reset()
+    setShowGroupModal(false)
+    setEditingGroup(null)
+  }
+
+  const handleSaveGroup = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!groupName.trim() || groupDomains.length === 0) return
+    groupMutation.mutate()
+  }
+
+  const confirmDeleteGroup = (group: DomainGroup) => {
+    const cascade =
+      group.rule_count > 0 ? ` ${group.rule_count} rule(s) using it will be removed too.` : ''
+    if (confirm(`Delete group "${group.name}"?${cascade}`)) {
+      deleteGroupMutation.mutate(group)
+    }
+  }
+
   const active = Array.isArray(rules) ? rules : []
+  const groupDomains = parseDomains(groupDomainsText)
   const banner = status ? describeSyncStatus(status) : null
   const checkResult = checkMutation.data
   const checkRuleTexts = checkResult ? matchedRuleTexts(checkResult) : []
@@ -438,26 +598,74 @@ export function DomainRulesPage() {
           )}
 
           <div>
-            <label htmlFor="domain" className={labelCls}>
-              Domain
+            <label htmlFor="target" className={labelCls}>
+              Target
             </label>
-            <input
-              id="domain"
-              type="text"
-              required
-              className={inputCls + ' font-mono'}
-              placeholder="example.com"
-              value={domain}
+            <select
+              id="target"
+              className={inputCls}
+              value={target}
               onChange={(e) => {
-                setDomain(e.target.value)
-                // Clear a previous server rejection as soon as the input changes.
+                setTarget(e.target.value as 'domain' | 'group')
                 addMutation.reset()
               }}
-            />
-            <p className="text-zinc-500 text-xs mt-1">
-              Enter domain without protocol (e.g., <code className="bg-zinc-800 px-1 rounded">example.com</code>)
-            </p>
+            >
+              <option value="domain">Domain</option>
+              <option value="group">Domain group</option>
+            </select>
           </div>
+
+          {target === 'domain' ? (
+            <div>
+              <label htmlFor="domain" className={labelCls}>
+                Domain
+              </label>
+              <input
+                id="domain"
+                type="text"
+                required
+                className={inputCls + ' font-mono'}
+                placeholder="example.com"
+                value={domain}
+                onChange={(e) => {
+                  setDomain(e.target.value)
+                  // Clear a previous server rejection as soon as the input changes.
+                  addMutation.reset()
+                }}
+              />
+              <p className="text-zinc-500 text-xs mt-1">
+                Enter domain without protocol (e.g., <code className="bg-zinc-800 px-1 rounded">example.com</code>)
+              </p>
+            </div>
+          ) : (
+            <div>
+              <label htmlFor="groupId" className={labelCls}>
+                Domain group
+              </label>
+              <select
+                id="groupId"
+                className={inputCls}
+                value={groupId}
+                onChange={(e) => {
+                  setGroupId(e.target.value)
+                  addMutation.reset()
+                }}
+              >
+                <option value="">Select a group</option>
+                {groups.map((group) => (
+                  <option key={group.id} value={group.id}>
+                    {group.name} ({group.domain_count} domain
+                    {group.domain_count === 1 ? '' : 's'})
+                  </option>
+                ))}
+              </select>
+              {!groupsLoading && groups.length === 0 && (
+                <p className="text-zinc-500 text-xs mt-1">
+                  No groups yet — create one to block many domains at once.
+                </p>
+              )}
+            </div>
+          )}
 
           {/* Server-side validation / duplicate rejection from POST /api/domain-rules. */}
           {addMutation.isError && (
@@ -470,8 +678,93 @@ export function DomainRulesPage() {
             <GhostButton type="button" onClick={closeAddModal}>
               Cancel
             </GhostButton>
-            <PrimaryButton type="submit" disabled={addMutation.isPending || !domain}>
+            <PrimaryButton
+              type="submit"
+              disabled={
+                addMutation.isPending || (target === 'group' ? !groupId : !domain)
+              }
+            >
               {addMutation.isPending ? 'Adding…' : 'Add Rule'}
+            </PrimaryButton>
+          </div>
+        </form>
+      </Modal>
+
+      {/* Create / edit a reusable group of domains. */}
+      <Modal
+        open={showGroupModal}
+        onClose={closeGroupModal}
+        title={editingGroup ? 'Edit domain group' : 'New domain group'}
+        className="max-w-md"
+      >
+        <form onSubmit={handleSaveGroup} className="space-y-4">
+          <div>
+            <label htmlFor="group-name" className={labelCls}>
+              Name
+            </label>
+            <input
+              id="group-name"
+              type="text"
+              required
+              className={inputCls}
+              placeholder="YouTube"
+              value={groupName}
+              onChange={(e) => {
+                setGroupName(e.target.value)
+                groupMutation.reset()
+              }}
+            />
+          </div>
+
+          <div>
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <label htmlFor="group-domains" className={labelCls + ' mb-0'}>
+                Domains
+              </label>
+              <span className="text-xs text-zinc-500 tabular-nums">
+                {groupDomains.length} domain{groupDomains.length === 1 ? '' : 's'}
+              </span>
+            </div>
+            <textarea
+              id="group-domains"
+              rows={6}
+              className={inputCls + ' font-mono text-xs'}
+              placeholder={'googlevideo.com\nytimg.com\nyoutube.com'}
+              value={groupDomainsText}
+              onChange={(e) => {
+                setGroupDomainsText(e.target.value)
+                groupMutation.reset()
+              }}
+            />
+            <p className="text-zinc-500 text-xs mt-1">
+              One domain per line (commas also work). e.g.{' '}
+              <code className="bg-zinc-800 px-1 rounded">googlevideo.com</code>,{' '}
+              <code className="bg-zinc-800 px-1 rounded">ytimg.com</code>…
+            </p>
+          </div>
+
+          {/* Server-side 400 (invalid name/domain) or 409 (duplicate name). */}
+          {groupMutation.isError && (
+            <p role="alert" className="text-red-400 text-sm">
+              {groupMutation.error?.message || 'Failed to save group.'}
+            </p>
+          )}
+
+          <div className="flex justify-end gap-3 pt-2">
+            <GhostButton type="button" onClick={closeGroupModal}>
+              Cancel
+            </GhostButton>
+            <PrimaryButton
+              type="submit"
+              disabled={
+                groupMutation.isPending || !groupName.trim() || groupDomains.length === 0
+              }
+            >
+              {groupMutation.isPending
+                ? 'Saving…'
+                : editingGroup
+                  ? 'Save group'
+                  : 'Create group'}
             </PrimaryButton>
           </div>
         </form>
@@ -482,11 +775,114 @@ export function DomainRulesPage() {
         <ul className="text-zinc-400 text-sm space-y-1.5 leading-relaxed">
           <li>• <strong className="text-zinc-200">Global rules</strong> block domains for all users</li>
           <li>• <strong className="text-zinc-200">User rules</strong> block domains for specific users only</li>
+          <li>• <strong className="text-zinc-200">Domain groups</strong> block many domains with one rule</li>
           <li>• Rules use adblock-style syntax: <code className="bg-zinc-800 px-1 rounded">||example.com^</code></li>
           <li>• Subdomains are blocked automatically (e.g., <code className="bg-zinc-800 px-1 rounded">||example.com^</code> blocks example.com and *.example.com)</li>
           <li>• Changes are synced to AdGuard Home immediately</li>
         </ul>
       </div>
+
+      {/* Reusable groups: one rule can block every domain in a group. */}
+      <Panel
+        title="Domain groups"
+        className="mb-6"
+        right={
+          <button type="button" onClick={openNewGroupModal} className={smallButtonCls}>
+            <IconPlus size={13} stroke={1.6} aria-hidden="true" />
+            New group
+          </button>
+        }
+      >
+        {deleteGroupResult && (
+          <p role="status" className="px-5 pb-2 text-xs text-zinc-500">
+            Deleted "{deleteGroupResult.name}" — {deleteGroupResult.rulesRemoved} rule
+            {deleteGroupResult.rulesRemoved === 1 ? '' : 's'} removed.
+          </p>
+        )}
+        {groupsLoading ? (
+          <div className="px-5 pb-4">
+            <Skeleton className="h-8 w-full" />
+          </div>
+        ) : groupsError ? (
+          <p role="alert" className="px-5 pb-4 text-sm text-red-400">
+            Failed to load domain groups.
+          </p>
+        ) : groups.length === 0 ? (
+          <p className="px-5 pb-4 text-sm text-zinc-500">
+            No groups yet — create one to block many domains at once.
+          </p>
+        ) : (
+          <ul className="divide-y divide-zinc-800/60 border-t border-zinc-800/60">
+            {groups.map((group) => {
+              const expanded = expandedGroupId === group.id
+              return (
+                <li key={group.id}>
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-5 py-2.5">
+                    <button
+                      type="button"
+                      onClick={() => setExpandedGroupId(expanded ? null : group.id)}
+                      aria-expanded={expanded}
+                      className="group flex min-w-0 flex-1 items-center gap-2 rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
+                    >
+                      <IconChevronRight
+                        size={13}
+                        stroke={1.8}
+                        aria-hidden="true"
+                        className={`shrink-0 text-zinc-500 transition-transform ${expanded ? 'rotate-90' : ''}`}
+                      />
+                      <span className="truncate text-sm font-medium text-zinc-200 group-hover:text-zinc-100">
+                        {group.name}
+                      </span>
+                    </button>
+                    <span className="text-xs text-zinc-500 tabular-nums">
+                      {group.domain_count} domain{group.domain_count === 1 ? '' : 's'}
+                    </span>
+                    <span className="text-xs text-zinc-500 tabular-nums">
+                      used by {group.rule_count} rule{group.rule_count === 1 ? '' : 's'}
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => openEditGroupModal(group)}
+                        aria-label={`Edit ${group.name}`}
+                        title="Edit group"
+                        className={iconButtonCls}
+                      >
+                        <IconPencil size={14} stroke={1.6} aria-hidden="true" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => confirmDeleteGroup(group)}
+                        aria-label={`Delete ${group.name}`}
+                        title="Delete group"
+                        className={`${iconButtonCls} hover:bg-red-500/10 hover:text-red-300`}
+                      >
+                        <IconTrash size={14} stroke={1.6} aria-hidden="true" />
+                      </button>
+                    </div>
+                  </div>
+                  {expanded && (
+                    <div className="flex flex-wrap gap-1.5 px-5 pb-3 pl-10">
+                      {group.domains.length === 0 ? (
+                        <span className="text-xs text-zinc-500">No domains.</span>
+                      ) : (
+                        group.domains.map((groupDomain) => (
+                          <code
+                            key={groupDomain}
+                            className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[11px] text-zinc-400"
+                          >
+                            {groupDomain}
+                          </code>
+                        ))
+                      )}
+                    </div>
+                  )}
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </Panel>
 
       <div className={tableWrapCls}>
         {isLoading ? (
@@ -505,7 +901,7 @@ export function DomainRulesPage() {
             <table className={tableCls}>
               <thead>
                 <tr className="text-left text-[11px] uppercase tracking-wider text-zinc-500 bg-zinc-800/40">
-                  <th className={thCls}>Domain</th>
+                  <th className={thCls}>Target</th>
                   <th className={thCls}>Scope</th>
                   <th className={thCls}>User</th>
                   <th className={thCls}>Created</th>
@@ -513,28 +909,48 @@ export function DomainRulesPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800/60">
-                {active.map((rule) => (
-                  <tr key={rule.id} className="hover:bg-zinc-800/30 transition-colors">
-                    <td className={tdCls + ' font-mono'}>{`||${rule.domain}^`}</td>
-                    <td className="px-5 py-3.5 whitespace-nowrap">
-                      <Badge tone={rule.scope === 'global' ? 'accent' : 'info'}>{rule.scope}</Badge>
-                    </td>
-                    <td className={tdCls}>
-                      {rule.user_full_name || rule.user_email || '—'}
-                    </td>
-                    <td className={tdCls}>
-                      {fmtDate(rule.created_at)}
-                    </td>
-                    <td className="px-5 py-3.5 whitespace-nowrap text-right text-sm font-medium">
-                      <button
-                        onClick={() => deleteMutation.mutate(rule.id)}
-                        className="inline-flex items-center text-sm rounded-md px-2 py-1 text-red-400 hover:text-red-300 hover:bg-red-500/10 transition-colors"
-                      >
-                        Delete
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                {active.map((rule) => {
+                  const group = rule.group_id ? groupById.get(rule.group_id) : undefined
+                  return (
+                    <tr key={rule.id} className="hover:bg-zinc-800/30 transition-colors">
+                      <td className={tdCls}>
+                        {rule.group_id ? (
+                          <span className="inline-flex flex-wrap items-center gap-1.5">
+                            <span className="text-xs text-zinc-500">Group:</span>
+                            <Badge tone="accent">
+                              {rule.group_name || group?.name || 'group'}
+                            </Badge>
+                            {group && (
+                              <span className="text-xs text-zinc-500">
+                                {group.domain_count} domain
+                                {group.domain_count === 1 ? '' : 's'}
+                              </span>
+                            )}
+                          </span>
+                        ) : (
+                          <span className="font-mono">{`||${rule.domain}^`}</span>
+                        )}
+                      </td>
+                      <td className="px-5 py-3.5 whitespace-nowrap">
+                        <Badge tone={rule.scope === 'global' ? 'accent' : 'info'}>
+                          {rule.scope}
+                        </Badge>
+                      </td>
+                      <td className={tdCls}>
+                        {rule.user_full_name || rule.user_email || '—'}
+                      </td>
+                      <td className={tdCls}>{fmtDate(rule.created_at)}</td>
+                      <td className="px-5 py-3.5 whitespace-nowrap text-right text-sm font-medium">
+                        <button
+                          onClick={() => deleteMutation.mutate(rule.id)}
+                          className="inline-flex items-center text-sm rounded-md px-2 py-1 text-red-400 hover:text-red-300 hover:bg-red-500/10 transition-colors"
+                        >
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>

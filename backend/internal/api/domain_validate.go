@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"golang.org/x/net/idna"
@@ -97,27 +98,95 @@ func validateHostname(host string) error {
 	return nil
 }
 
+// normalizeGroupName trims and validates a domain-group name.
+func normalizeGroupName(raw string) (string, error) {
+	name := strings.TrimSpace(raw)
+	if name == "" {
+		return "", fmt.Errorf("group name is required")
+	}
+	if utf8.RuneCountInString(name) > 64 {
+		return "", fmt.Errorf("group name is too long (max 64 characters)")
+	}
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return "", fmt.Errorf("group name contains control characters")
+		}
+	}
+	return name, nil
+}
+
+// expandDomainInput flattens the UI/API domain list. The frontend sends one
+// entry per pasted line, but the API also accepts a single comma/space
+// separated string for convenience.
+func expandDomainInput(input []string) []string {
+	var out []string
+	for _, item := range input {
+		fields := strings.FieldsFunc(item, func(r rune) bool {
+			switch r {
+			case '\n', '\r', ',', ';', ' ', '\t':
+				return true
+			}
+			return false
+		})
+		out = append(out, fields...)
+	}
+	return out
+}
+
+// normalizeDomainList normalizes + de-duplicates a pasted domain list.
+func normalizeDomainList(input []string) ([]string, error) {
+	raw := expandDomainInput(input)
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("at least one domain is required")
+	}
+	if len(raw) > 500 {
+		return nil, fmt.Errorf("too many domains (max 500 per group)")
+	}
+
+	seen := make(map[string]bool, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		domain, err := normalizeDomain(item)
+		if err != nil {
+			return nil, err
+		}
+		if seen[domain] {
+			continue
+		}
+		seen[domain] = true
+		out = append(out, domain)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("at least one domain is required")
+	}
+	return out, nil
+}
+
 // builtRules is the result of expanding the DB rule set into the exact rule
 // strings AdGuard must hold.
 type builtRules struct {
-	// AdGuard is the final, deduplicated, sorted user-rule list (global rules
-	// plus per-peer $client= expansions).
+	// AdGuard is the final, deduplicated, sorted user-rule list (single-domain
+	// rules, group rules and per-peer $client= expansions).
 	AdGuard []string
-	// Invalid holds stored rules that cannot be normalized (legacy/pasted
-	// URLs). They are never sent to AdGuard and are surfaced in the status.
-	Invalid []db.DomainRule
-	// Unexpanded holds user-scoped rules whose user currently has no active
-	// peer on an active server, so there is no client IP to expand to.
-	Unexpanded []db.DomainRule
+	// Invalid holds raw domain values that cannot be normalized (legacy rows
+	// or group domains entered before validation existed).
+	Invalid []string
+	// Unexpanded counts group rules with no domains and user-scoped rules
+	// whose user currently has no active peer on an active server.
+	Unexpanded int
 }
 
-// buildAdGuardRules expands every stored rule into the AdGuard user-rule array.
-// The same builder is used by the sync and by the status comparison, so
-// "expected" and "sent" can never diverge.
+// buildAdGuardRules expands every stored rule (single domain or domain group)
+// into the AdGuard user-rule array. The same builder is used by the sync and
+// by the status comparison, so "expected" and "sent" can never diverge.
 func buildAdGuardRules(ctx context.Context, store *Store, rules []db.DomainRule) (builtRules, error) {
 	out := builtRules{AdGuard: []string{}}
-	seen := make(map[string]bool, len(rules))
+	groups, err := loadGroupDomains(ctx, store)
+	if err != nil {
+		return out, err
+	}
 
+	seen := make(map[string]bool, len(rules))
 	add := func(rule string) {
 		if seen[rule] {
 			return
@@ -127,32 +196,77 @@ func buildAdGuardRules(ctx context.Context, store *Store, rules []db.DomainRule)
 	}
 
 	for _, rule := range rules {
-		domain, err := normalizeDomain(rule.Domain)
-		if err != nil {
-			out.Invalid = append(out.Invalid, rule)
+		// Resolve the rule's domain list: a single domain or every domain in
+		// its group.
+		var domains []string
+		if rule.GroupID != nil {
+			domains = groups[*rule.GroupID]
+			if len(domains) == 0 {
+				out.Unexpanded++
+				continue
+			}
+		} else {
+			domains = []string{rule.Domain}
+		}
+
+		valid := make([]string, 0, len(domains))
+		for _, raw := range domains {
+			domain, err := normalizeDomain(raw)
+			if err != nil {
+				out.Invalid = append(out.Invalid, raw)
+				continue
+			}
+			valid = append(valid, domain)
+		}
+		if len(valid) == 0 {
 			continue
 		}
 
-		agRule := "||" + domain + "^"
 		if rule.Scope == "user" && rule.UserID != nil {
 			ips, err := userPeerIPs(ctx, store, *rule.UserID)
 			if err != nil {
 				return out, fmt.Errorf("expand user rule %s: %w", rule.ID, err)
 			}
 			if len(ips) == 0 {
-				out.Unexpanded = append(out.Unexpanded, rule)
+				out.Unexpanded++
 				continue
 			}
 			for _, ip := range ips {
-				add(agRule + "$client=" + ip)
+				for _, domain := range valid {
+					add("||" + domain + "^$client=" + ip)
+				}
 			}
 			continue
 		}
-		add(agRule)
+		for _, domain := range valid {
+			add("||" + domain + "^")
+		}
 	}
 
 	sort.Strings(out.AdGuard)
 	return out, nil
+}
+
+// loadGroupDomains returns every group's domain list keyed by group id.
+func loadGroupDomains(ctx context.Context, store *Store) (map[uuid.UUID][]string, error) {
+	rows, err := store.pool.Query(ctx, `
+		SELECT group_id, domain FROM domain_group_domains ORDER BY group_id, domain
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query domain group domains: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[uuid.UUID][]string)
+	for rows.Next() {
+		var groupID uuid.UUID
+		var domain string
+		if err := rows.Scan(&groupID, &domain); err != nil {
+			return nil, err
+		}
+		out[groupID] = append(out[groupID], domain)
+	}
+	return out, rows.Err()
 }
 
 // userPeerIPs returns the tunnel IPs of a user's active peers on active

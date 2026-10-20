@@ -242,6 +242,14 @@ func main() {
 				r.Post("/domain-rules", api.CreateDomainRule(store))
 				r.Delete("/domain-rules/{id}", api.DeleteDomainRule(store))
 				r.Get("/domain-rules/status", api.DomainRuleSyncStatus(store))
+
+				// Reusable domain groups (e.g. "YouTube" = youtube.com +
+				// googlevideo.com + ...). A single blocking rule can target a
+				// whole group, and editing the group updates every rule using it.
+				r.Get("/domain-groups", api.ListDomainGroups(store))
+				r.Post("/domain-groups", api.CreateDomainGroup(store))
+				r.Patch("/domain-groups/{id}", api.UpdateDomainGroup(store))
+				r.Delete("/domain-groups/{id}", api.DeleteDomainGroup(store))
 				// Is this domain actually blocked right now? Proxies AdGuard's
 				// check_host (read-only diagnostics).
 				r.Get("/domain-rules/check", api.CheckDomainRule(store))

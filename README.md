@@ -32,7 +32,7 @@ A self-hosted web console for issuing, monitoring, and revoking company WireGuar
 - **Admins** (invited, mandatory 2FA) manage everything from the web UI
 - **VPN users** claim their own peer config via an emailed invite link
 - **Distributed nodes** — add VPN exit machines in any region in ~2 minutes
-- **DNS filtering** — global and per-user domain blocking (AdGuard) with a branded block page
+- **DNS filtering** — global and per-user domain blocking (AdGuard) with reusable domain groups and a branded block page
 - **Web activity** — per-user browsing history, traffic charts and usage reports (CSV export)
 - **Backup & restore** — one-click, 2FA-gated
 
