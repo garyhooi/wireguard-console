@@ -1,6 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { apiJson } from '../../lib/api'
-import { userLabel } from '../../lib/userLabel'
 import { fmtDateTime } from '../../lib/timezone'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
@@ -66,8 +65,10 @@ export function UsersPage() {
   const [inviteName, setInviteName] = useState('')
   const [inviteDepartmentId, setInviteDepartmentId] = useState('')
   const [inviteLink, setInviteLink] = useState('')
-  // Per-user department edit (small modal opened from the row action).
+  // Per-user edit modal (name, email, department) opened from the row action.
   const [editingUser, setEditingUser] = useState<User | null>(null)
+  const [editName, setEditName] = useState('')
+  const [editEmail, setEditEmail] = useState('')
   const [editDepartmentId, setEditDepartmentId] = useState('')
   const [resendLink, setResendLink] = useState('')
   const [resendTarget, setResendTarget] = useState('')
@@ -167,17 +168,23 @@ export function UsersPage() {
     onSuccess: () => refetch(),
   })
 
-  // Update only the department; null clears it server-side.
-  const editDepartmentMutation = useMutation({
+  // One PATCH for all editable profile fields; null clears the department.
+  const editUserMutation = useMutation({
     mutationFn: async () => {
       if (!editingUser) return
       return apiJson(`/api/users/${editingUser.id}`, {
         method: 'PATCH',
-        body: { department_id: editDepartmentId || null },
+        body: {
+          full_name: editName.trim(),
+          email: editEmail.trim(),
+          department_id: editDepartmentId || null,
+        },
       })
     },
     onSuccess: () => {
       setEditingUser(null)
+      setEditName('')
+      setEditEmail('')
       setEditDepartmentId('')
       refetch()
     },
@@ -192,22 +199,26 @@ export function UsersPage() {
     })
   }
 
-  const openEditDepartment = (user: User) => {
-    editDepartmentMutation.reset()
+  const openEditUser = (user: User) => {
+    editUserMutation.reset()
     setEditingUser(user)
+    setEditName(user.full_name || '')
+    setEditEmail(user.email)
     setEditDepartmentId(user.department_id || '')
   }
 
-  const closeEditDepartment = () => {
-    editDepartmentMutation.reset()
+  const closeEditUser = () => {
+    editUserMutation.reset()
     setEditingUser(null)
+    setEditName('')
+    setEditEmail('')
     setEditDepartmentId('')
   }
 
-  const handleSaveDepartment = (e: React.FormEvent) => {
+  const handleSaveUser = (e: React.FormEvent) => {
     e.preventDefault()
     if (!editingUser) return
-    editDepartmentMutation.mutate()
+    editUserMutation.mutate()
   }
 
   const copyLink = async () => {
@@ -401,19 +412,46 @@ export function UsersPage() {
         </div>
       </Modal>
 
-      {/* Department edit — a single-field PATCH; null unassigns the user. */}
+      {/* Edit user — name, email and department in one PATCH. */}
       <Modal
         open={editingUser !== null}
-        onClose={closeEditDepartment}
-        title="Edit department"
+        onClose={closeEditUser}
+        title="Edit VPN user"
         className="max-w-md"
       >
-        <form onSubmit={handleSaveDepartment} className="space-y-4">
-          {editingUser && (
-            <p className="text-sm text-zinc-400">
-              {userLabel(editingUser.full_name, editingUser.email, editingUser.department_name)}
-            </p>
-          )}
+        <form onSubmit={handleSaveUser} className="space-y-4">
+          <div>
+            <label htmlFor="editName" className={labelCls}>
+              Name
+            </label>
+            <input
+              id="editName"
+              type="text"
+              required
+              className={inputCls}
+              value={editName}
+              onChange={(e) => {
+                setEditName(e.target.value)
+                editUserMutation.reset()
+              }}
+            />
+          </div>
+          <div>
+            <label htmlFor="editEmail" className={labelCls}>
+              Email
+            </label>
+            <input
+              id="editEmail"
+              type="email"
+              required
+              className={inputCls}
+              value={editEmail}
+              onChange={(e) => {
+                setEditEmail(e.target.value)
+                editUserMutation.reset()
+              }}
+            />
+          </div>
           <div>
             <label htmlFor="editDepartment" className={labelCls}>
               Department
@@ -424,7 +462,7 @@ export function UsersPage() {
               value={editDepartmentId}
               onChange={(e) => {
                 setEditDepartmentId(e.target.value)
-                editDepartmentMutation.reset()
+                editUserMutation.reset()
               }}
             >
               <option value="">No department</option>
@@ -436,18 +474,18 @@ export function UsersPage() {
             </select>
           </div>
 
-          {editDepartmentMutation.isError && (
+          {editUserMutation.isError && (
             <p role="alert" className="text-sm text-red-400">
-              {editDepartmentMutation.error?.message || 'Failed to update department.'}
+              {editUserMutation.error?.message || 'Failed to update user.'}
             </p>
           )}
 
           <div className="flex justify-end gap-3 pt-2">
-            <GhostButton type="button" onClick={closeEditDepartment}>
+            <GhostButton type="button" onClick={closeEditUser}>
               Cancel
             </GhostButton>
-            <PrimaryButton type="submit" disabled={editDepartmentMutation.isPending}>
-              {editDepartmentMutation.isPending ? 'Saving…' : 'Save'}
+            <PrimaryButton type="submit" disabled={editUserMutation.isPending}>
+              {editUserMutation.isPending ? 'Saving…' : 'Save changes'}
             </PrimaryButton>
           </div>
         </form>
@@ -520,10 +558,10 @@ export function UsersPage() {
                         {user.status !== 'removed' && (
                           <button
                             type="button"
-                            onClick={() => openEditDepartment(user)}
+                            onClick={() => openEditUser(user)}
                             className={iconButtonCls}
-                            title="Edit department"
-                            aria-label={`Edit department for ${user.email}`}
+                            title="Edit user"
+                            aria-label={`Edit user for ${user.email}`}
                           >
                             <IconPencil size={14} stroke={1.6} aria-hidden="true" />
                           </button>

@@ -15,6 +15,16 @@ function jsonRes(data: unknown, status = 200): Response {
   return { ok: status >= 200 && status < 300, status, json: async () => data } as Response
 }
 
+/** Non-2xx response: apiJson reads text() to surface the {error} message. */
+function errRes(error: string, status: number): Response {
+  return {
+    ok: false,
+    status,
+    json: async () => ({ error }),
+    text: async () => JSON.stringify({ error }),
+  } as Response
+}
+
 const departments = [
   { id: 'd1', name: 'Engineering', user_count: 1, created_at: '2026-10-20T09:00:00Z' },
   { id: 'd2', name: 'Sales', user_count: 0, created_at: '2026-10-19T09:00:00Z' },
@@ -115,10 +125,85 @@ describe('UsersPage departments', () => {
     })
   })
 
-  it('updates and clears a user department via PATCH', async () => {
+  it('edits name, email and department in one PATCH and refetches', async () => {
+    let listCalls = 0
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       if (url === '/api/users/u1' && init?.method === 'PATCH') {
         return jsonRes({ status: 'updated' })
+      }
+      if (url.includes('/api/config/smtp')) return jsonRes({ configured: false })
+      if (url === '/api/departments') return jsonRes(departments)
+      if (url.includes('/api/users')) {
+        listCalls += 1
+        return jsonRes(users)
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderWithClient(<UsersPage />)
+    await waitFor(() => expect(screen.getByText('Alice Tan')).toBeTruthy())
+    expect(listCalls).toBe(1)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit user for alice@example.com' }))
+    const dialog = await screen.findByRole('dialog')
+
+    // Prefilled from the row.
+    expect((within(dialog).getByLabelText('Name') as HTMLInputElement).value).toBe('Alice Tan')
+    expect((within(dialog).getByLabelText('Email') as HTMLInputElement).value).toBe(
+      'alice@example.com',
+    )
+
+    fireEvent.change(within(dialog).getByLabelText('Name'), {
+      target: { value: 'Alice Tan-Updated' },
+    })
+    fireEvent.change(within(dialog).getByLabelText('Email'), {
+      target: { value: 'alice.updated@example.com' },
+    })
+    fireEvent.change(within(dialog).getByLabelText('Department'), {
+      target: { value: 'd2' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(
+        ([url, init]) => url === '/api/users/u1' && init?.method === 'PATCH',
+      )
+      expect(call).toBeTruthy()
+      expect(JSON.parse(String(call![1]?.body))).toEqual({
+        full_name: 'Alice Tan-Updated',
+        email: 'alice.updated@example.com',
+        department_id: 'd2',
+      })
+      // Success closes the modal and refetches the list.
+      expect(listCalls).toBe(2)
+    })
+
+    // "No department" is sent as JSON null so the API unassigns the user.
+    fireEvent.click(screen.getByRole('button', { name: 'Edit user for alice@example.com' }))
+    const reopened = await screen.findByRole('dialog')
+    fireEvent.change(within(reopened).getByLabelText('Department'), {
+      target: { value: '' },
+    })
+    fireEvent.click(within(reopened).getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() => {
+      const patches = fetchMock.mock.calls.filter(
+        ([url, init]) => url === '/api/users/u1' && init?.method === 'PATCH',
+      )
+      expect(patches.length).toBe(2)
+      expect(JSON.parse(String(patches[1][1]?.body))).toEqual({
+        full_name: 'Alice Tan',
+        email: 'alice@example.com',
+        department_id: null,
+      })
+    })
+  })
+
+  it('shows a duplicate-email error inline when the server rejects the change', async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === '/api/users/u1' && init?.method === 'PATCH') {
+        return errRes('email already used by another user', 409)
       }
       if (url.includes('/api/config/smtp')) return jsonRes({ configured: false })
       if (url === '/api/departments') return jsonRes(departments)
@@ -130,36 +215,16 @@ describe('UsersPage departments', () => {
     renderWithClient(<UsersPage />)
     await waitFor(() => expect(screen.getByText('Alice Tan')).toBeTruthy())
 
-    // Assign Sales.
-    fireEvent.click(screen.getByRole('button', { name: 'Edit department for alice@example.com' }))
-    let dialog = await screen.findByRole('dialog')
-    fireEvent.change(within(dialog).getByLabelText('Department'), {
-      target: { value: 'd2' },
+    fireEvent.click(screen.getByRole('button', { name: 'Edit user for alice@example.com' }))
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.change(within(dialog).getByLabelText('Email'), {
+      target: { value: 'bob@example.com' },
     })
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }))
 
-    await waitFor(() => {
-      const call = fetchMock.mock.calls.find(
-        ([url, init]) => url === '/api/users/u1' && init?.method === 'PATCH',
-      )
-      expect(call).toBeTruthy()
-      expect(JSON.parse(String(call![1]?.body))).toEqual({ department_id: 'd2' })
-    })
-
-    // Re-open and clear it: null is sent so the API unassigns the user.
-    fireEvent.click(screen.getByRole('button', { name: 'Edit department for alice@example.com' }))
-    dialog = await screen.findByRole('dialog')
-    fireEvent.change(within(dialog).getByLabelText('Department'), {
-      target: { value: '' },
-    })
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
-
-    await waitFor(() => {
-      const patches = fetchMock.mock.calls.filter(
-        ([url, init]) => url === '/api/users/u1' && init?.method === 'PATCH',
-      )
-      expect(patches.length).toBe(2)
-      expect(JSON.parse(String(patches[1][1]?.body))).toEqual({ department_id: null })
-    })
+    const alert = await within(dialog).findByRole('alert')
+    expect(alert.textContent).toContain('email already used by another user')
+    // The modal stays open so the admin can correct the address.
+    expect(screen.getByRole('dialog')).toBeTruthy()
   })
 })
