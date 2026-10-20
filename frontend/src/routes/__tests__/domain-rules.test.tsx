@@ -62,6 +62,10 @@ const status = {
   block_page_ip: '10.8.0.1',
 }
 
+function jsonRes(data: unknown, status = 200): Response {
+  return { ok: status >= 200 && status < 300, status, json: async () => data } as Response
+}
+
 describe('DomainRulesPage', () => {
   beforeEach(() => {
     vi.stubGlobal(
@@ -69,6 +73,9 @@ describe('DomainRulesPage', () => {
       vi.fn(async (url: string) => {
         if (url.includes('/api/domain-rules/status')) {
           return { ok: true, status: 200, json: async () => status } as Response
+        }
+        if (url.includes('/api/domain-groups')) {
+          return { ok: true, status: 200, json: async () => [] } as Response
         }
         if (url.includes('/api/domain-rules')) {
           return { ok: true, status: 200, json: async () => rules } as Response
@@ -117,6 +124,9 @@ describe('DomainRulesPage', () => {
             }),
           } as Response
         }
+        if (url.includes('/api/domain-groups')) {
+          return { ok: true, status: 200, json: async () => [] } as Response
+        }
         if (url.includes('/api/domain-rules')) {
           return { ok: true, status: 200, json: async () => rules } as Response
         }
@@ -150,6 +160,9 @@ describe('DomainRulesPage', () => {
       }
       if (url.includes('/api/domain-rules/status')) {
         return { ok: true, status: 200, json: async () => status } as Response
+      }
+      if (url.includes('/api/domain-groups')) {
+        return { ok: true, status: 200, json: async () => [] } as Response
       }
       if (url.includes('/api/domain-rules')) {
         return { ok: true, status: 200, json: async () => rules } as Response
@@ -191,6 +204,9 @@ describe('DomainRulesPage', () => {
         if (url.includes('/api/domain-rules/status')) {
           return { ok: true, status: 200, json: async () => status } as Response
         }
+        if (url.includes('/api/domain-groups')) {
+          return { ok: true, status: 200, json: async () => [] } as Response
+        }
         if (url.includes('/api/domain-rules')) {
           return { ok: true, status: 200, json: async () => rules } as Response
         }
@@ -205,5 +221,158 @@ describe('DomainRulesPage', () => {
 
     await waitFor(() => expect(screen.getByText('Allowed by AdGuard')).toBeTruthy())
     expect(screen.queryByText(/^Blocked/)).toBeNull()
+  })
+
+  it('lists domain groups and shows group-targeted rules as a group chip', async () => {
+    const groupRule = {
+      ...rules[0],
+      id: 'r-group',
+      domain: '',
+      group_id: 'g1',
+      group_name: 'YouTube',
+    }
+    const groups = [
+      {
+        id: 'g1',
+        name: 'YouTube',
+        domains: ['youtube.com', 'ytimg.com', 'googlevideo.com'],
+        domain_count: 3,
+        rule_count: 1,
+        created_at: '2026-01-08T09:00:00Z',
+      },
+      {
+        id: 'g2',
+        name: 'Social',
+        domains: ['facebook.com'],
+        domain_count: 1,
+        rule_count: 0,
+        created_at: '2026-01-09T09:00:00Z',
+      },
+    ]
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url.includes('/api/domain-groups')) return jsonRes(groups)
+        if (url.includes('/api/domain-rules/status')) return jsonRes(status)
+        if (url.includes('/api/domain-rules')) return jsonRes([...rules, groupRule])
+        throw new Error(`unexpected fetch: ${url}`)
+      }),
+    )
+
+    renderWithClient(<DomainRulesPage />)
+    await screen.findByText('used by 1 rule')
+
+    // Group row: name, domain count, rule count, and edit/delete actions.
+    expect(screen.getByText('Social')).toBeTruthy()
+    expect(screen.getByText('used by 0 rules')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Edit YouTube' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Delete YouTube' })).toBeTruthy()
+
+    // The group-targeted rule renders a chip instead of an empty ||^ domain.
+    const ruleRow = (await screen.findByText('Group:')).closest('tr')!
+    expect(within(ruleRow).getByText('YouTube')).toBeTruthy()
+    expect(within(ruleRow).getByText('3 domains')).toBeTruthy()
+    expect(within(ruleRow).queryByText('||^')).toBeNull()
+
+    // Expanding a group reveals its domains as compact chips.
+    fireEvent.click(screen.getByRole('button', { name: 'YouTube' }))
+    expect(await screen.findByText('ytimg.com')).toBeTruthy()
+  })
+
+  it('creates a group from the modal with parsed and de-duplicated domains', async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === '/api/domain-groups' && init?.method === 'POST') {
+        return jsonRes(
+          {
+            id: 'g-new',
+            name: 'YouTube',
+            domains: [],
+            domain_count: 0,
+            rule_count: 0,
+            created_at: '',
+          },
+          201,
+        )
+      }
+      if (url.includes('/api/domain-groups')) return jsonRes([])
+      if (url.includes('/api/domain-rules/status')) return jsonRes(status)
+      if (url.includes('/api/domain-rules')) return jsonRes(rules)
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderWithClient(<DomainRulesPage />)
+    fireEvent.click(await screen.findByRole('button', { name: 'New group' }))
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.change(within(dialog).getByLabelText('Name'), {
+      target: { value: 'YouTube' },
+    })
+    fireEvent.change(within(dialog).getByLabelText('Domains'), {
+      target: { value: 'youtube.com\n YTIMG.com, youtube.com\n\ngooglevideo.com' },
+    })
+
+    // Live count: trimmed, blank lines dropped, case-insensitive de-dupe.
+    expect(within(dialog).getByText('3 domains')).toBeTruthy()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Create group' }))
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(
+        ([url, init]) => url === '/api/domain-groups' && init?.method === 'POST',
+      )
+      expect(call).toBeTruthy()
+      expect(JSON.parse(String(call![1]?.body))).toEqual({
+        name: 'YouTube',
+        // De-duped case-insensitively, keeping the first spelling.
+        domains: ['youtube.com', 'YTIMG.com', 'googlevideo.com'],
+      })
+    })
+  })
+
+  it('adds a rule for a domain group by sending group_id', async () => {
+    const groups = [
+      {
+        id: 'g1',
+        name: 'YouTube',
+        domains: ['youtube.com'],
+        domain_count: 1,
+        rule_count: 0,
+        created_at: '2026-01-08T09:00:00Z',
+      },
+    ]
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === '/api/domain-rules' && init?.method === 'POST') return jsonRes({}, 201)
+      if (url.includes('/api/domain-groups')) return jsonRes(groups)
+      if (url.includes('/api/domain-rules/status')) return jsonRes(status)
+      if (url.includes('/api/domain-rules')) return jsonRes(rules)
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderWithClient(<DomainRulesPage />)
+    // Wait for the groups query so the selector has its option.
+    await screen.findByText('used by 0 rules')
+    fireEvent.click(await screen.findByRole('button', { name: 'Add Rule' }))
+    const dialog = await screen.findByRole('dialog')
+
+    // Group target replaces the domain input with a group selector.
+    fireEvent.change(within(dialog).getByLabelText('Target'), {
+      target: { value: 'group' },
+    })
+    expect(within(dialog).queryByLabelText('Domain')).toBeNull()
+    fireEvent.change(within(dialog).getByLabelText('Domain group'), {
+      target: { value: 'g1' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add Rule' }))
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(
+        ([url, init]) => url === '/api/domain-rules' && init?.method === 'POST',
+      )
+      expect(call).toBeTruthy()
+      expect(JSON.parse(String(call![1]?.body))).toEqual({
+        scope: 'global',
+        group_id: 'g1',
+      })
+    })
   })
 })
