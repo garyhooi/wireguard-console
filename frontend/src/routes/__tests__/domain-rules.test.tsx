@@ -396,6 +396,16 @@ describe('DomainRulesPage', () => {
 
     // Switching platforms swaps in that platform's steps.
     fireEvent.click(within(dialog).getByRole('tab', { name: 'Windows' }))
-    expect(within(dialog).getByText(/Trusted Root Certification Authorities/)).toBeTruthy()
+    expect(
+      within(dialog).getAllByText(/Trusted Root Certification Authorities/).length,
+    ).toBeGreaterThan(0)
+    expect(within(dialog).getByText(/certutil -addstore/)).toBeTruthy()
+
+    // macOS: a copyable terminal command (import + trust in one step) plus the
+    // -25294 / "untrusted" troubleshooting note.
+    fireEvent.click(within(dialog).getByRole('tab', { name: 'macOS' }))
+    expect(within(dialog).getByText(/security add-trusted-cert/)).toBeTruthy()
+    expect(within(dialog).getByText(/error -25294/)).toBeTruthy()
+    expect(within(dialog).getByRole('button', { name: 'Copy' })).toBeTruthy()
   })
 })

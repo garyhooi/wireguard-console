@@ -205,8 +205,18 @@ const certDownloadCls =
 
 type CertPlatform = 'ios' | 'android' | 'macos' | 'windows'
 
-/** Per-platform, one-time steps to trust the block page's internal root CA. */
-const CERT_PLATFORMS: Array<{ id: CertPlatform; label: string; steps: string[] }> = [
+/** Per-platform, one-time steps to trust the block page's internal root CA.
+ *  macOS and Windows also get a terminal command: the macOS GUI importer can
+ *  fail with "unable to import … error -25294" when Keychain Access targets the
+ *  iCloud "Local Items" keychain, and importing into System alone leaves the
+ *  certificate explicitly untrusted — security(1)/certutil do both in one step. */
+const CERT_PLATFORMS: Array<{
+  id: CertPlatform
+  label: string
+  steps: string[]
+  command?: string
+  note?: string
+}> = [
   {
     id: 'ios',
     label: 'iOS/iPadOS',
@@ -230,18 +240,23 @@ const CERT_PLATFORMS: Array<{ id: CertPlatform; label: string; steps: string[] }
     label: 'macOS',
     steps: [
       'Download the certificate.',
-      'Double-click the file to add it to Keychain.',
-      'Keychain Access → System → find the certificate → Trust → "Always Trust".',
+      'Open Terminal and run the command below — it imports the certificate into the System keychain AND marks it trusted in one step (no Keychain Access, no "untrusted" state).',
+      'Quit and reopen Chrome, then reload the blocked site. Verify the import with: security find-certificate -c "Caddy Local Authority" /Library/Keychains/System.keychain',
     ],
+    command:
+      'sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/Downloads/wgconsole-block-page-ca.crt',
+    note: 'Do not import into the iCloud keychain through Keychain Access — it can hang or fail with "unable to import … error -25294" (a macOS Keychain bug, not a bad certificate). If you use the GUI instead: import into the System keychain, then double-click "Caddy Local Authority", expand Trust, and set "When using this certificate: Always Trust" — an imported but untrusted certificate will not fix Chrome.',
   },
   {
     id: 'windows',
     label: 'Windows',
     steps: [
       'Download the certificate.',
-      'Right-click the file → Install Certificate → Local Machine.',
-      'Place all certificates in "Trusted Root Certification Authorities".',
+      'Open Command Prompt as Administrator and run the command below (it adds it to Trusted Root Certification Authorities).',
+      'Restart Chrome, then reload the blocked site. Or use the GUI: right-click the file → Install Certificate → Local Machine → Trusted Root Certification Authorities.',
     ],
+    command:
+      'certutil -addstore -f Root "%USERPROFILE%\\Downloads\\wgconsole-block-page-ca.crt"',
   },
 ]
 
@@ -261,6 +276,19 @@ export function DomainRulesPage() {
   // Block page certificate install-instructions modal.
   const [showCertModal, setShowCertModal] = useState(false)
   const [certPlatform, setCertPlatform] = useState<CertPlatform>('ios')
+  const [copiedCertCommand, setCopiedCertCommand] = useState('')
+
+  const copyCertCommand = async (command: string) => {
+    try {
+      await navigator.clipboard?.writeText(command)
+      setCopiedCertCommand(command)
+      window.setTimeout(() => setCopiedCertCommand(''), 2000)
+    } catch {
+      // Clipboard unavailable (or permission denied) — the command is selectable.
+    }
+  }
+
+  const activeCertPlatform = CERT_PLATFORMS.find((platform) => platform.id === certPlatform)
 
   // Domain groups card + create/edit modal.
   const [showGroupModal, setShowGroupModal] = useState(false)
@@ -895,12 +923,29 @@ export function DomainRulesPage() {
           </div>
 
           <ol className="list-decimal space-y-1.5 pl-5 text-sm text-zinc-400 leading-relaxed">
-            {(CERT_PLATFORMS.find((platform) => platform.id === certPlatform)?.steps ?? []).map(
-              (step) => (
-                <li key={step}>{step}</li>
-              ),
-            )}
+            {(activeCertPlatform?.steps ?? []).map((step) => (
+              <li key={step}>{step}</li>
+            ))}
           </ol>
+
+          {activeCertPlatform?.command && (
+            <div className="relative">
+              <pre className="overflow-x-auto rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 pr-20 text-xs leading-relaxed text-zinc-300">
+                <code>{activeCertPlatform.command}</code>
+              </pre>
+              <button
+                type="button"
+                onClick={() => copyCertCommand(activeCertPlatform.command!)}
+                className="absolute right-2 top-2 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
+              >
+                {copiedCertCommand === activeCertPlatform.command ? 'Copied' : 'Copy'}
+              </button>
+            </div>
+          )}
+
+          {activeCertPlatform?.note && (
+            <p className="text-xs leading-relaxed text-zinc-500">{activeCertPlatform.note}</p>
+          )}
 
           <p className="text-xs text-zinc-500 leading-relaxed">
             Chrome/Edge use the OS certificate store; Firefox desktop has its own store
