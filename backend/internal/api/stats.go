@@ -255,13 +255,14 @@ func queryUsage(store *Store, ctx context.Context, byUser bool, from, to time.Ti
 		)`
 	if byUser {
 		rows, err := store.pool.Query(ctx, cte+`
-			SELECT u.id::text, u.email, COALESCE(u.full_name, ''),
+			SELECT u.id::text, u.email, COALESCE(u.full_name, ''), COALESCE(d.name, ''),
 			       COALESCE(SUM(t.rx_bytes), 0), COALESCE(SUM(t.tx_bytes), 0),
 			       COUNT(DISTINCT t.peer_id)
 			FROM t
 			JOIN peers p ON p.id = t.peer_id
 			JOIN users u ON u.id = p.user_id
-			GROUP BY u.id, u.email, u.full_name
+			LEFT JOIN departments d ON d.id = u.department_id
+			GROUP BY u.id, u.email, u.full_name, d.name
 			ORDER BY (COALESCE(SUM(t.rx_bytes),0) + COALESCE(SUM(t.tx_bytes),0)) DESC
 		`, from, toExclusive, to)
 		if err != nil {
@@ -270,14 +271,15 @@ func queryUsage(store *Store, ctx context.Context, byUser bool, from, to time.Ti
 		defer rows.Close()
 		out := []map[string]interface{}{}
 		for rows.Next() {
-			var id, email, full string
+			var id, email, full, department string
 			var rx, tx, peers int64
-			if err := rows.Scan(&id, &email, &full, &rx, &tx, &peers); err != nil {
+			if err := rows.Scan(&id, &email, &full, &department, &rx, &tx, &peers); err != nil {
 				return nil, err
 			}
 			out = append(out, map[string]interface{}{
 				"id": id, "name": full, "email": email, "full_name": full,
-				"rx_bytes": rx, "tx_bytes": tx, "peers": peers,
+				"department_name": department,
+				"rx_bytes":        rx, "tx_bytes": tx, "peers": peers,
 			})
 		}
 		return out, nil

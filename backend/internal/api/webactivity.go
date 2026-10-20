@@ -97,11 +97,12 @@ func ListWebActivity(store *Store) http.HandlerFunc {
 
 		sql := `
 			SELECT b.id, b.peer_id, p.name, p.user_id, COALESCE(u.full_name, u.email, ''),
-			       COALESCE(u.email, ''), host(b.client_ip), b.host, b.base_domain,
-			       b.blocked, b.reason, b.queried_at
+			       COALESCE(u.email, ''), COALESCE(d.name, ''), host(b.client_ip),
+			       b.host, b.base_domain, b.blocked, b.reason, b.queried_at
 			FROM browsing_records b
 			JOIN peers p ON p.id = b.peer_id
 			LEFT JOIN users u ON u.id = p.user_id
+			LEFT JOIN departments d ON d.id = u.department_id
 			WHERE ` + strings.Join(where, " AND ") + `
 			ORDER BY b.queried_at DESC
 			LIMIT ` + limitPh
@@ -113,24 +114,25 @@ func ListWebActivity(store *Store) http.HandlerFunc {
 		defer rows.Close()
 
 		type record struct {
-			ID         int64      `json:"id"`
-			PeerID     uuid.UUID  `json:"peer_id"`
-			PeerName   string     `json:"peer_name"`
-			UserID     *uuid.UUID `json:"user_id"`
-			UserName   string     `json:"user_name"`
-			UserEmail  string     `json:"user_email"`
-			ClientIP   string     `json:"client_ip"`
-			Host       string     `json:"host"`
-			BaseDomain string     `json:"base_domain"`
-			Blocked    bool       `json:"blocked"`
-			Reason     *string    `json:"reason"`
-			QueriedAt  time.Time  `json:"queried_at"`
+			ID             int64      `json:"id"`
+			PeerID         uuid.UUID  `json:"peer_id"`
+			PeerName       string     `json:"peer_name"`
+			UserID         *uuid.UUID `json:"user_id"`
+			UserName       string     `json:"user_name"`
+			UserEmail      string     `json:"user_email"`
+			DepartmentName string     `json:"department_name"`
+			ClientIP       string     `json:"client_ip"`
+			Host           string     `json:"host"`
+			BaseDomain     string     `json:"base_domain"`
+			Blocked        bool       `json:"blocked"`
+			Reason         *string    `json:"reason"`
+			QueriedAt      time.Time  `json:"queried_at"`
 		}
 		out := []record{}
 		for rows.Next() {
 			var rc record
 			if err := rows.Scan(&rc.ID, &rc.PeerID, &rc.PeerName, &rc.UserID, &rc.UserName,
-				&rc.UserEmail, &rc.ClientIP, &rc.Host, &rc.BaseDomain,
+				&rc.UserEmail, &rc.DepartmentName, &rc.ClientIP, &rc.Host, &rc.BaseDomain,
 				&rc.Blocked, &rc.Reason, &rc.QueriedAt); err != nil {
 				writeError(w, http.StatusInternalServerError, "Failed to scan web activity")
 				return
@@ -152,14 +154,15 @@ func ListWebActivity(store *Store) http.HandlerFunc {
 // records table on the Web Activity page.
 type WebActivitySummary struct {
 	// Scope is "user" or "peer".
-	Scope    string     `json:"scope"`
-	ID       string     `json:"id"`
-	Name     string     `json:"name"`
-	Email    string     `json:"email"`
-	Peers    int64      `json:"peers"`
-	Allowed  int64      `json:"allowed"`
-	Blocked  int64      `json:"blocked"`
-	LastSeen *time.Time `json:"last_seen"`
+	Scope          string     `json:"scope"`
+	ID             string     `json:"id"`
+	Name           string     `json:"name"`
+	Email          string     `json:"email"`
+	DepartmentName string     `json:"department_name"`
+	Peers          int64      `json:"peers"`
+	Allowed        int64      `json:"allowed"`
+	Blocked        int64      `json:"blocked"`
+	LastSeen       *time.Time `json:"last_seen"`
 }
 
 // GetWebActivitySummary groups counts by VPN user or peer in a date range:
@@ -181,6 +184,7 @@ func GetWebActivitySummary(store *Store) http.HandlerFunc {
 				SELECT 'peer' AS scope, p.id::text AS id,
 				       COALESCE(NULLIF(p.name, ''), 'peer') AS name,
 				       COALESCE(u.email, '') AS email,
+				       COALESCE(d.name, '') AS department_name,
 				       CAST(1 AS BIGINT) AS peers,
 				       COUNT(*) FILTER (WHERE b.blocked = FALSE) AS allowed,
 				       COUNT(*) FILTER (WHERE b.blocked = TRUE)  AS blocked,
@@ -188,9 +192,10 @@ func GetWebActivitySummary(store *Store) http.HandlerFunc {
 				FROM browsing_records b
 				JOIN peers p ON p.id = b.peer_id
 				LEFT JOIN users u ON u.id = p.user_id
+				LEFT JOIN departments d ON d.id = u.department_id
 				WHERE b.queried_at >= $1 AND b.queried_at < $2
 				  AND p.status <> 'removed'
-				GROUP BY p.id, p.name, u.email
+				GROUP BY p.id, p.name, u.email, d.name
 				ORDER BY (COUNT(*) FILTER (WHERE b.blocked = FALSE) +
 				          COUNT(*) FILTER (WHERE b.blocked = TRUE)) DESC`
 		} else {
@@ -198,6 +203,7 @@ func GetWebActivitySummary(store *Store) http.HandlerFunc {
 				SELECT 'user' AS scope, u.id::text AS id,
 				       COALESCE(u.full_name, u.email, 'user') AS name,
 				       COALESCE(u.email, '') AS email,
+				       COALESCE(d.name, '') AS department_name,
 				       COUNT(DISTINCT p.id) AS peers,
 				       COUNT(*) FILTER (WHERE b.blocked = FALSE) AS allowed,
 				       COUNT(*) FILTER (WHERE b.blocked = TRUE)  AS blocked,
@@ -205,10 +211,11 @@ func GetWebActivitySummary(store *Store) http.HandlerFunc {
 				FROM browsing_records b
 				JOIN peers p ON p.id = b.peer_id
 				JOIN users u ON u.id = p.user_id
+				LEFT JOIN departments d ON d.id = u.department_id
 				WHERE b.queried_at >= $1 AND b.queried_at < $2
 				  AND p.status <> 'removed'
 				  AND u.status <> 'removed'
-				GROUP BY u.id, u.full_name, u.email
+				GROUP BY u.id, u.full_name, u.email, d.name
 				ORDER BY (COUNT(*) FILTER (WHERE b.blocked = FALSE) +
 				          COUNT(*) FILTER (WHERE b.blocked = TRUE)) DESC`
 		}
@@ -222,7 +229,7 @@ func GetWebActivitySummary(store *Store) http.HandlerFunc {
 		out := []WebActivitySummary{}
 		for rows.Next() {
 			var s WebActivitySummary
-			if err := rows.Scan(&s.Scope, &s.ID, &s.Name, &s.Email, &s.Peers, &s.Allowed, &s.Blocked, &s.LastSeen); err != nil {
+			if err := rows.Scan(&s.Scope, &s.ID, &s.Name, &s.Email, &s.DepartmentName, &s.Peers, &s.Allowed, &s.Blocked, &s.LastSeen); err != nil {
 				writeError(w, http.StatusInternalServerError, "Failed to scan web activity summary")
 				return
 			}

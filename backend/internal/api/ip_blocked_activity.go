@@ -62,21 +62,24 @@ func IPBlockedActivity(store *Store) http.HandlerFunc {
 		}
 
 		type hitRecord struct {
-			ID        int64     `json:"id"`
-			UserName  string    `json:"user_name"`
-			UserEmail string    `json:"user_email"`
-			ClientIP  string    `json:"client_ip"`
-			DestCIDR  string    `json:"dest_cidr"`
-			Packets   int64     `json:"packets"`
-			SampledAt time.Time `json:"sampled_at"`
+			ID             int64     `json:"id"`
+			UserName       string    `json:"user_name"`
+			UserEmail      string    `json:"user_email"`
+			DepartmentName string    `json:"department_name"`
+			ClientIP       string    `json:"client_ip"`
+			DestCIDR       string    `json:"dest_cidr"`
+			Packets        int64     `json:"packets"`
+			SampledAt      time.Time `json:"sampled_at"`
 		}
 		records := []hitRecord{}
 		if limit > 0 {
 			rows, err := store.pool.Query(ctx, `
 				SELECT h.id, COALESCE(u.full_name, ''), COALESCE(u.email, ''),
-				       COALESCE(host(h.client_ip), ''), h.dest_cidr, h.packets, h.sampled_at
+				       COALESCE(d.name, ''), COALESCE(host(h.client_ip), ''),
+				       h.dest_cidr, h.packets, h.sampled_at
 				FROM ip_block_hits h
 				LEFT JOIN users u ON u.id = h.user_id
+				LEFT JOIN departments d ON d.id = u.department_id
 				WHERE h.sampled_at >= $1
 				  AND (h.user_id IS NULL OR u.status <> 'removed')
 				ORDER BY h.sampled_at DESC
@@ -89,8 +92,8 @@ func IPBlockedActivity(store *Store) http.HandlerFunc {
 			defer rows.Close()
 			for rows.Next() {
 				var rec hitRecord
-				if err := rows.Scan(&rec.ID, &rec.UserName, &rec.UserEmail, &rec.ClientIP,
-					&rec.DestCIDR, &rec.Packets, &rec.SampledAt); err != nil {
+				if err := rows.Scan(&rec.ID, &rec.UserName, &rec.UserEmail, &rec.DepartmentName,
+					&rec.ClientIP, &rec.DestCIDR, &rec.Packets, &rec.SampledAt); err != nil {
 					writeError(w, http.StatusInternalServerError, "Failed to scan blocked-IP activity")
 					return
 				}

@@ -71,10 +71,11 @@ func ListPeers(store *Store) http.HandlerFunc {
 		rows, err := store.pool.Query(ctx, `
 			SELECT p.id, p.user_id, p.server_id, p.name, p.public_key, host(p.allowed_ip),
 			       p.status, p.last_handshake_at, p.created_at, p.suspended_at, p.removed_at,
-			       COALESCE(u.email, ''), COALESCE(u.full_name, ''),
+			       COALESCE(u.email, ''), COALESCE(u.full_name, ''), COALESCE(d.name, ''),
 			       COALESCE(s.name, '')
 			FROM peers p
 			LEFT JOIN users u ON u.id = p.user_id
+			LEFT JOIN departments d ON d.id = u.department_id
 			LEFT JOIN servers s ON s.id = p.server_id
 			ORDER BY p.created_at DESC
 		`)
@@ -86,16 +87,17 @@ func ListPeers(store *Store) http.HandlerFunc {
 
 		type peerRow struct {
 			db.Peer
-			UserEmail    string `json:"user_email"`
-			UserFullName string `json:"user_full_name"`
-			ServerName   string `json:"server_name"`
+			UserEmail          string `json:"user_email"`
+			UserFullName       string `json:"user_full_name"`
+			UserDepartmentName string `json:"user_department_name"`
+			ServerName         string `json:"server_name"`
 		}
 		peers := []peerRow{}
 		for rows.Next() {
 			var pr peerRow
 			if err := rows.Scan(&pr.ID, &pr.UserID, &pr.ServerID, &pr.Name, &pr.PublicKey,
 				&pr.AllowedIP, &pr.Status, &pr.LastHandshakeAt, &pr.CreatedAt, &pr.SuspendedAt, &pr.RemovedAt,
-				&pr.UserEmail, &pr.UserFullName, &pr.ServerName); err != nil {
+				&pr.UserEmail, &pr.UserFullName, &pr.UserDepartmentName, &pr.ServerName); err != nil {
 				writeError(w, http.StatusInternalServerError, "Failed to scan peer")
 				return
 			}

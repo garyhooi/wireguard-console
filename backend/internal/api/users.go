@@ -26,13 +26,16 @@ func ListUsers(store *Store) http.HandlerFunc {
 		// its "Removed" tab keeps working.
 		includeRemoved := r.URL.Query().Get("include_removed") == "1"
 		query := `
-			SELECT id, email, full_name, status, invited_by, invited_at, activated_at, created_at, updated_at
-			FROM users
+			SELECT u.id, u.email, u.full_name, u.status, u.invited_by, u.invited_at,
+			       u.activated_at, u.created_at, u.updated_at,
+			       u.department_id, COALESCE(d.name, '')
+			FROM users u
+			LEFT JOIN departments d ON d.id = u.department_id
 		`
 		if !includeRemoved {
-			query += ` WHERE status <> 'removed'`
+			query += ` WHERE u.status <> 'removed'`
 		}
-		query += ` ORDER BY created_at DESC`
+		query += ` ORDER BY u.created_at DESC`
 
 		users := []db.User{}
 		rows, err := store.pool.Query(ctx, query)
@@ -45,7 +48,8 @@ func ListUsers(store *Store) http.HandlerFunc {
 		for rows.Next() {
 			var u db.User
 			if err := rows.Scan(&u.ID, &u.Email, &u.FullName, &u.Status,
-				&u.InvitedBy, &u.InvitedAt, &u.ActivatedAt, &u.CreatedAt, &u.UpdatedAt); err != nil {
+				&u.InvitedBy, &u.InvitedAt, &u.ActivatedAt, &u.CreatedAt, &u.UpdatedAt,
+				&u.DepartmentID, &u.DepartmentName); err != nil {
 				writeError(w, http.StatusInternalServerError, "Failed to scan user")
 				return
 			}
@@ -68,12 +72,16 @@ func GetUser(store *Store) http.HandlerFunc {
 
 		var u db.User
 		err = store.pool.QueryRow(ctx, `
-			SELECT id, email, full_name, status, invited_by, invited_at, activated_at, created_at, updated_at
-			FROM users
-			WHERE id = $1
+			SELECT u.id, u.email, u.full_name, u.status, u.invited_by, u.invited_at,
+			       u.activated_at, u.created_at, u.updated_at,
+			       u.department_id, COALESCE(d.name, '')
+			FROM users u
+			LEFT JOIN departments d ON d.id = u.department_id
+			WHERE u.id = $1
 		`, userID).Scan(
 			&u.ID, &u.Email, &u.FullName, &u.Status, &u.InvitedBy,
 			&u.InvitedAt, &u.ActivatedAt, &u.CreatedAt, &u.UpdatedAt,
+			&u.DepartmentID, &u.DepartmentName,
 		)
 
 		if err != nil {
@@ -88,8 +96,9 @@ func GetUser(store *Store) http.HandlerFunc {
 func CreateUser(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Email    string `json:"email"`
-			FullName string `json:"full_name"`
+			Email        string     `json:"email"`
+			FullName     string     `json:"full_name"`
+			DepartmentID *uuid.UUID `json:"department_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
@@ -98,6 +107,18 @@ func CreateUser(store *Store) http.HandlerFunc {
 
 		ctx := context.Background()
 		adminID := getAdminID(r)
+
+		if req.DepartmentID != nil {
+			ok, err := departmentExists(ctx, store, *req.DepartmentID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to check department")
+				return
+			}
+			if !ok {
+				writeError(w, http.StatusBadRequest, "Department not found")
+				return
+			}
+		}
 
 		invitedBy := adminID
 		now := time.Now()
@@ -115,9 +136,9 @@ func CreateUser(store *Store) http.HandlerFunc {
 		case err == nil && curStatus == "removed":
 			// Revive the old row.
 			if _, err := store.pool.Exec(ctx, `
-				UPDATE users SET full_name = $2, status = 'invited', updated_at = now()
+				UPDATE users SET full_name = $2, department_id = $3, status = 'invited', updated_at = now()
 				WHERE id = $1
-			`, existingID, req.FullName); err != nil {
+			`, existingID, req.FullName, req.DepartmentID); err != nil {
 				writeError(w, http.StatusInternalServerError, "Failed to revive user")
 				return
 			}
@@ -126,9 +147,9 @@ func CreateUser(store *Store) http.HandlerFunc {
 			return
 		case err == pgx.ErrNoRows:
 			if _, err := store.pool.Exec(ctx, `
-				INSERT INTO users (email, full_name, status, invited_by, invited_at)
-				VALUES ($1, $2, 'invited', $3, $4)
-			`, req.Email, req.FullName, invitedBy, invitedAt); err != nil {
+				INSERT INTO users (email, full_name, status, invited_by, invited_at, department_id)
+				VALUES ($1, $2, 'invited', $3, $4, $5)
+			`, req.Email, req.FullName, invitedBy, invitedAt, req.DepartmentID); err != nil {
 				writeError(w, http.StatusInternalServerError, "Failed to create user")
 				return
 			}
@@ -232,40 +253,6 @@ func ResendUserInvite(store *Store) http.HandlerFunc {
 	}
 }
 
-func UpdateUser(store *Store) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		userID, err := parseUUID(r.PathValue("id"))
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "Invalid user ID")
-			return
-		}
-
-		var req struct {
-			FullName string `json:"full_name"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "Invalid request body")
-			return
-		}
-
-		ctx := context.Background()
-		adminID := getAdminID(r)
-
-		_, err = store.pool.Exec(ctx, `
-			UPDATE users SET full_name = $1, updated_at = now() WHERE id = $2
-		`, req.FullName, userID)
-
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to update user")
-			return
-		}
-
-		logAudit(ctx, store, adminID, "user.update", "user", userID.String(), nil)
-
-		writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
-	}
-}
-
 // DeleteUser revokes any pending invite and marks the user and their
 // peers removed (soft delete).
 func DeleteUser(store *Store) http.HandlerFunc {
@@ -297,6 +284,80 @@ func DeleteUser(store *Store) http.HandlerFunc {
 		RequestDomainRuleSync(store)
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
+	}
+}
+
+// UpdateUser edits a VPN user's display name and/or department. Department is
+// sent as a raw JSON field so an explicit null clears it (JSON null and an
+// absent field are different intents for a nullable column).
+func UpdateUser(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, err := parseUUID(r.PathValue("id"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "Invalid user ID")
+			return
+		}
+		var req struct {
+			FullName     *string         `json:"full_name"`
+			DepartmentID json.RawMessage `json:"department_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "Invalid request body")
+			return
+		}
+		if req.FullName == nil && len(req.DepartmentID) == 0 {
+			writeError(w, http.StatusBadRequest, "Nothing to update")
+			return
+		}
+
+		ctx := context.Background()
+		adminID := getAdminID(r)
+
+		var exists bool
+		if err := store.pool.QueryRow(ctx, `SELECT true FROM users WHERE id = $1`, userID).Scan(&exists); err != nil {
+			writeError(w, http.StatusNotFound, "User not found")
+			return
+		}
+
+		if req.FullName != nil {
+			name := strings.TrimSpace(*req.FullName)
+			if _, err := store.pool.Exec(ctx, `
+				UPDATE users SET full_name = $1, updated_at = now() WHERE id = $2
+			`, name, userID); err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to update user")
+				return
+			}
+		}
+
+		if len(req.DepartmentID) > 0 {
+			var deptID *uuid.UUID
+			if string(req.DepartmentID) != "null" {
+				var id uuid.UUID
+				if err := json.Unmarshal(req.DepartmentID, &id); err != nil {
+					writeError(w, http.StatusBadRequest, "Invalid department ID")
+					return
+				}
+				ok, err := departmentExists(ctx, store, id)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "Failed to check department")
+					return
+				}
+				if !ok {
+					writeError(w, http.StatusBadRequest, "Department not found")
+					return
+				}
+				deptID = &id
+			}
+			if _, err := store.pool.Exec(ctx, `
+				UPDATE users SET department_id = $1, updated_at = now() WHERE id = $2
+			`, deptID, userID); err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to update user department")
+				return
+			}
+		}
+
+		logAudit(ctx, store, adminID, "user.update", "user", userID.String(), nil)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 	}
 }
 

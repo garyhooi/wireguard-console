@@ -241,16 +241,19 @@ func ListDomainRules(store *Store) http.HandlerFunc {
 		// applies to (same shape as ListPeers: user_email/user_full_name).
 		type domainRuleRow struct {
 			db.DomainRule
-			UserEmail    string `json:"user_email"`
-			UserFullName string `json:"user_full_name"`
-			GroupName    string `json:"group_name,omitempty"`
+			UserEmail          string `json:"user_email"`
+			UserFullName       string `json:"user_full_name"`
+			UserDepartmentName string `json:"user_department_name"`
+			GroupName          string `json:"group_name,omitempty"`
 		}
 		var rules []domainRuleRow
 		rows, err := store.pool.Query(ctx, `
 			SELECT dr.id, dr.scope, dr.user_id, dr.domain, dr.group_id, dr.created_by, dr.created_at,
-			       COALESCE(u.email, ''), COALESCE(u.full_name, ''), COALESCE(g.name, '')
+			       COALESCE(u.email, ''), COALESCE(u.full_name, ''), COALESCE(d.name, ''),
+			       COALESCE(g.name, '')
 			FROM domain_block_rules dr
 			LEFT JOIN users u ON u.id = dr.user_id
+			LEFT JOIN departments d ON d.id = u.department_id
 			LEFT JOIN domain_groups g ON g.id = dr.group_id
 			ORDER BY dr.created_at DESC
 		`)
@@ -264,7 +267,8 @@ func ListDomainRules(store *Store) http.HandlerFunc {
 			var rule domainRuleRow
 			var domain sql.NullString
 			if err := rows.Scan(&rule.ID, &rule.Scope, &rule.UserID, &domain, &rule.GroupID,
-				&rule.CreatedBy, &rule.CreatedAt, &rule.UserEmail, &rule.UserFullName, &rule.GroupName); err != nil {
+				&rule.CreatedBy, &rule.CreatedAt, &rule.UserEmail, &rule.UserFullName,
+				&rule.UserDepartmentName, &rule.GroupName); err != nil {
 				writeError(w, http.StatusInternalServerError, "Failed to scan domain rule")
 				return
 			}

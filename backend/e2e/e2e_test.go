@@ -1408,6 +1408,71 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatalf("ip-blocked records = %v, want empty array", ipBlockedOut["records"])
 	}
 
+	// ---- Departments ----
+	deptResp, deptOut := api(t, "POST", "/api/departments", token, map[string]interface{}{
+		"name": "E2E Engineering",
+	})
+	expectStatus(t, deptResp, 201, "POST /api/departments")
+	deptID, _ := deptOut["id"].(string)
+	if deptID == "" {
+		t.Fatal("department create returned no id")
+	}
+
+	deptDupResp, _ := api(t, "POST", "/api/departments", token, map[string]interface{}{
+		"name": "e2e engineering",
+	})
+	expectStatus(t, deptDupResp, 409, "POST /api/departments duplicate")
+
+	deptUpdResp, deptUpdOut := api(t, "PATCH", "/api/departments/"+deptID, token, map[string]interface{}{
+		"name": "E2E Engineering (renamed)",
+	})
+	expectStatus(t, deptUpdResp, 200, "PATCH /api/departments/{id}")
+	if deptUpdOut["name"] != "E2E Engineering (renamed)" {
+		t.Fatalf("department rename = %v", deptUpdOut["name"])
+	}
+
+	deptInviteResp, _ := api(t, "POST", "/api/users", token, map[string]interface{}{
+		"email": "dept@example.com", "full_name": "Dept User", "department_id": deptID,
+	})
+	expectStatus(t, deptInviteResp, 201, "POST /api/users (with department)")
+	var deptUsers []map[string]interface{}
+	json.Unmarshal([]byte(rawGet(t, baseURL+"/api/users", token)), &deptUsers)
+	deptUserID := ""
+	for _, usr := range deptUsers {
+		if email, _ := usr["email"].(string); email == "dept@example.com" {
+			deptUserID, _ = usr["id"].(string)
+			if got, _ := usr["department_name"].(string); got != "E2E Engineering (renamed)" {
+				t.Fatalf("user department_name = %q, want renamed department", got)
+			}
+		}
+	}
+	if deptUserID == "" {
+		t.Fatal("department user not listed")
+	}
+
+	deptClearResp, _ := api(t, "PATCH", "/api/users/"+deptUserID, token, map[string]interface{}{
+		"department_id": nil,
+	})
+	expectStatus(t, deptClearResp, 200, "PATCH /api/users/{id} (clear department)")
+	json.Unmarshal([]byte(rawGet(t, baseURL+"/api/users", token)), &deptUsers)
+	for _, usr := range deptUsers {
+		if email, _ := usr["email"].(string); email == "dept@example.com" {
+			if got, _ := usr["department_name"].(string); got != "" {
+				t.Fatalf("department not cleared: %q", got)
+			}
+		}
+	}
+
+	deptAssignResp, _ := api(t, "PATCH", "/api/users/"+deptUserID, token, map[string]interface{}{
+		"department_id": deptID,
+	})
+	expectStatus(t, deptAssignResp, 200, "PATCH /api/users/{id} (assign department)")
+	deptDelResp, deptDelOut := api(t, "DELETE", "/api/departments/"+deptID, token, nil)
+	expectStatus(t, deptDelResp, 200, "DELETE /api/departments/{id}")
+	if n, _ := deptDelOut["users_cleared"].(float64); n != 1 {
+		t.Fatalf("department users_cleared = %v, want 1", n)
+	}
+
 	// Cleanup: delete local server (cascade peers) must succeed
 	resp, _ = api(t, "DELETE", "/api/servers/"+serverID, token, map[string]string{
 		"code": actorCode(),

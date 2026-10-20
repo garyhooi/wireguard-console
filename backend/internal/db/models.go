@@ -42,6 +42,16 @@ type User struct {
 	ActivatedAt *time.Time `json:"activated_at"`
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
+	// Department is optional; DepartmentName is joined for display.
+	DepartmentID   *uuid.UUID `json:"department_id"`
+	DepartmentName string     `json:"department_name"`
+}
+
+type Department struct {
+	ID        uuid.UUID `json:"id"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type Peer struct {

@@ -200,6 +200,12 @@ func main() {
 				// (SMTP error) or the user lost/expired their invite link.
 				r.Post("/users/{id}/resend-invite", api.ResendUserInvite(store))
 
+				// Departments: free-form labels for VPN users.
+				r.Get("/departments", api.ListDepartments(store))
+				r.Post("/departments", api.CreateDepartment(store))
+				r.Patch("/departments/{id}", api.UpdateDepartment(store))
+				r.Delete("/departments/{id}", api.DeleteDepartment(store))
+
 				r.Get("/peers", api.ListPeers(store))
 				r.Post("/peers", api.CreatePeer(store))
 				r.Get("/peers/{id}", api.GetPeer(store))

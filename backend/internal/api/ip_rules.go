@@ -118,9 +118,10 @@ func RequestIPBlockSync(store *Store) {
 // ipRuleRow is the API shape of a rule with its user joined in.
 type ipRuleRow struct {
 	db.IPBlockRule
-	UserEmail    string `json:"user_email"`
-	UserFullName string `json:"user_full_name"`
-	GroupName    string `json:"group_name,omitempty"`
+	UserEmail          string `json:"user_email"`
+	UserFullName       string `json:"user_full_name"`
+	UserDepartmentName string `json:"user_department_name"`
+	GroupName          string `json:"group_name,omitempty"`
 }
 
 func loadIPBlockRules(ctx context.Context, pool *pgxpool.Pool) ([]db.IPBlockRule, error) {
@@ -316,9 +317,11 @@ func ListIPRules(store *Store) http.HandlerFunc {
 
 		rows, err := store.pool.Query(ctx, `
 			SELECT r.id, r.scope, r.user_id, r.cidr, r.group_id, r.note, r.created_by, r.created_at,
-			       COALESCE(u.email, ''), COALESCE(u.full_name, ''), COALESCE(g.name, '')
+			       COALESCE(u.email, ''), COALESCE(u.full_name, ''), COALESCE(d.name, ''),
+			       COALESCE(g.name, '')
 			FROM ip_block_rules r
 			LEFT JOIN users u ON u.id = r.user_id
+			LEFT JOIN departments d ON d.id = u.department_id
 			LEFT JOIN ip_groups g ON g.id = r.group_id
 			ORDER BY r.created_at DESC
 		`)
@@ -334,7 +337,7 @@ func ListIPRules(store *Store) http.HandlerFunc {
 			var cidr sql.NullString
 			if err := rows.Scan(&rule.ID, &rule.Scope, &rule.UserID, &cidr, &rule.GroupID,
 				&rule.Note, &rule.CreatedBy, &rule.CreatedAt, &rule.UserEmail, &rule.UserFullName,
-				&rule.GroupName); err != nil {
+				&rule.UserDepartmentName, &rule.GroupName); err != nil {
 				writeError(w, http.StatusInternalServerError, "Failed to scan IP rule")
 				return
 			}
@@ -350,13 +353,16 @@ func getIPRule(ctx context.Context, pool *pgxpool.Pool, id uuid.UUID) (ipRuleRow
 	var cidr sql.NullString
 	err := pool.QueryRow(ctx, `
 		SELECT r.id, r.scope, r.user_id, r.cidr, r.group_id, r.note, r.created_by, r.created_at,
-		       COALESCE(u.email, ''), COALESCE(u.full_name, ''), COALESCE(g.name, '')
+		       COALESCE(u.email, ''), COALESCE(u.full_name, ''), COALESCE(d.name, ''),
+		       COALESCE(g.name, '')
 		FROM ip_block_rules r
 		LEFT JOIN users u ON u.id = r.user_id
+		LEFT JOIN departments d ON d.id = u.department_id
 		LEFT JOIN ip_groups g ON g.id = r.group_id
 		WHERE r.id = $1
 	`, id).Scan(&rule.ID, &rule.Scope, &rule.UserID, &cidr, &rule.GroupID, &rule.Note,
-		&rule.CreatedBy, &rule.CreatedAt, &rule.UserEmail, &rule.UserFullName, &rule.GroupName)
+		&rule.CreatedBy, &rule.CreatedAt, &rule.UserEmail, &rule.UserFullName,
+		&rule.UserDepartmentName, &rule.GroupName)
 	rule.CIDR = cidr.String
 	return rule, err
 }
