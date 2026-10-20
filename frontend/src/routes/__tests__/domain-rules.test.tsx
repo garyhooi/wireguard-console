@@ -220,7 +220,9 @@ describe('DomainRulesPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Test' }))
 
     await waitFor(() => expect(screen.getByText('Allowed by AdGuard')).toBeTruthy())
-    expect(screen.queryByText(/^Blocked/)).toBeNull()
+    // Only the check result would start with "Blocked (…)" — the static certificate
+    // copy above this form also begins with the word "Blocked".
+    expect(screen.queryByText(/^Blocked \(/)).toBeNull()
   })
 
   it('lists domain groups and shows group-targeted rules as a group chip', async () => {
@@ -374,5 +376,26 @@ describe('DomainRulesPage', () => {
         group_id: 'g1',
       })
     })
+  })
+
+  it('offers the block page certificate download and platform install instructions', async () => {
+    renderWithClient(<DomainRulesPage />)
+    await waitFor(() => expect(screen.getByText('||tracker.io^')).toBeTruthy())
+
+    // The card links straight at the Caddy static file — a plain anchor, no API fetch.
+    expect(screen.getByText('Block page certificate')).toBeTruthy()
+    const download = screen.getByRole('link', { name: 'Download certificate' })
+    expect(download.getAttribute('href')).toBe('/ca.crt')
+    expect(download.hasAttribute('download')).toBe(true)
+
+    // "Install instructions" opens the modal on the default iOS steps.
+    fireEvent.click(screen.getByRole('button', { name: 'Install instructions' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText('Install the block page certificate')).toBeTruthy()
+    expect(within(dialog).getByText(/Certificate Trust Settings/)).toBeTruthy()
+
+    // Switching platforms swaps in that platform's steps.
+    fireEvent.click(within(dialog).getByRole('tab', { name: 'Windows' }))
+    expect(within(dialog).getByText(/Trusted Root Certification Authorities/)).toBeTruthy()
   })
 })

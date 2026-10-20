@@ -1,7 +1,14 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { IconChevronRight, IconPencil, IconPlus, IconRefresh, IconTrash } from '@tabler/icons-react'
+import {
+  IconChevronRight,
+  IconDownload,
+  IconPencil,
+  IconPlus,
+  IconRefresh,
+  IconTrash,
+} from '@tabler/icons-react'
 import { apiJson } from '../../lib/api'
 import { fmtDate } from '../../lib/timezone'
 import {
@@ -19,6 +26,8 @@ import {
   thCls,
   inputCls,
   labelCls,
+  tabGroupCls,
+  toolbarTab,
 } from '../../lib/ui'
 
 interface DomainRule {
@@ -191,6 +200,51 @@ const smallButtonCls =
 const iconButtonCls =
   'inline-flex items-center justify-center rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500'
 
+const certDownloadCls =
+  'inline-flex shrink-0 items-center justify-center gap-1.5 rounded-md border border-teal-600/60 bg-teal-700/25 px-3 py-1.5 text-xs font-medium text-teal-200 transition-colors hover:border-teal-500 hover:bg-teal-700/40 hover:text-teal-100 active:translate-y-[1px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500'
+
+type CertPlatform = 'ios' | 'android' | 'macos' | 'windows'
+
+/** Per-platform, one-time steps to trust the block page's internal root CA. */
+const CERT_PLATFORMS: Array<{ id: CertPlatform; label: string; steps: string[] }> = [
+  {
+    id: 'ios',
+    label: 'iOS/iPadOS',
+    steps: [
+      'Download the certificate on the device.',
+      'Settings → Profile Downloaded → Install.',
+      'Settings → General → About → Certificate Trust Settings → enable full trust for the certificate.',
+    ],
+  },
+  {
+    id: 'android',
+    label: 'Android',
+    steps: [
+      'Download the certificate on the device.',
+      'Settings → Security → Encryption & credentials (or "More security settings").',
+      'Install a certificate → CA certificate → choose the downloaded file.',
+    ],
+  },
+  {
+    id: 'macos',
+    label: 'macOS',
+    steps: [
+      'Download the certificate.',
+      'Double-click the file to add it to Keychain.',
+      'Keychain Access → System → find the certificate → Trust → "Always Trust".',
+    ],
+  },
+  {
+    id: 'windows',
+    label: 'Windows',
+    steps: [
+      'Download the certificate.',
+      'Right-click the file → Install Certificate → Local Machine.',
+      'Place all certificates in "Trusted Root Certification Authorities".',
+    ],
+  },
+]
+
 export const Route = createFileRoute('/_authenticated/domain-rules')({
   component: DomainRulesPage,
 })
@@ -203,6 +257,10 @@ export function DomainRulesPage() {
   const [groupId, setGroupId] = useState('')
   const [userId, setUserId] = useState('')
   const [testDomain, setTestDomain] = useState('')
+
+  // Block page certificate install-instructions modal.
+  const [showCertModal, setShowCertModal] = useState(false)
+  const [certPlatform, setCertPlatform] = useState<CertPlatform>('ios')
 
   // Domain groups card + create/edit modal.
   const [showGroupModal, setShowGroupModal] = useState(false)
@@ -781,6 +839,80 @@ export function DomainRulesPage() {
           <li>• Changes are synced to AdGuard Home immediately</li>
         </ul>
       </div>
+
+      {/* Block page certificate — the tunnel CA signs the HTTPS block page. */}
+      <Panel title="Block page certificate" className="mb-6">
+        <div className="space-y-3 px-5 pb-5">
+          <p className="text-sm text-zinc-400 leading-relaxed">
+            Blocked HTTPS sites show a certificate warning until this certificate is installed
+            once per device. HSTS sites like YouTube won't open the block page at all without it.
+          </p>
+          <p className="text-xs text-zinc-500">
+            Root CA: only install on devices that trust this VPN server.
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <a href="/ca.crt" download className={certDownloadCls}>
+              <IconDownload size={13} stroke={1.8} aria-hidden="true" />
+              Download certificate
+            </a>
+            <button
+              type="button"
+              onClick={() => setShowCertModal(true)}
+              className={smallButtonCls}
+            >
+              Install instructions
+            </button>
+          </div>
+        </div>
+      </Panel>
+
+      {/* Install instructions: one platform at a time, short steps. */}
+      <Modal
+        open={showCertModal}
+        onClose={() => setShowCertModal(false)}
+        title="Install the block page certificate"
+        className="max-w-md"
+        footer={
+          <GhostButton type="button" onClick={() => setShowCertModal(false)}>
+            Close
+          </GhostButton>
+        }
+      >
+        <div className="space-y-3">
+          <div className={tabGroupCls} role="tablist" aria-label="Platform">
+            {CERT_PLATFORMS.map((platform) => (
+              <button
+                key={platform.id}
+                type="button"
+                role="tab"
+                aria-selected={certPlatform === platform.id}
+                onClick={() => setCertPlatform(platform.id)}
+                className={toolbarTab(certPlatform === platform.id, 'bg-teal-700 text-white')}
+              >
+                {platform.label}
+              </button>
+            ))}
+          </div>
+
+          <ol className="list-decimal space-y-1.5 pl-5 text-sm text-zinc-400 leading-relaxed">
+            {(CERT_PLATFORMS.find((platform) => platform.id === certPlatform)?.steps ?? []).map(
+              (step) => (
+                <li key={step}>{step}</li>
+              ),
+            )}
+          </ol>
+
+          <p className="text-xs text-zinc-500 leading-relaxed">
+            Chrome/Edge use the OS certificate store; Firefox desktop has its own store
+            (Settings → Certificates → Import).
+          </p>
+
+          <p className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300 leading-relaxed">
+            This certificate is a root CA: devices that trust it also trust any HTTPS site the
+            VPN server signs. Only install it on devices you trust.
+          </p>
+        </div>
+      </Modal>
 
       {/* Reusable groups: one rule can block every domain in a group. */}
       <Panel
