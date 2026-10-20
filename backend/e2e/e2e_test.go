@@ -1473,6 +1473,37 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatalf("department users_cleared = %v, want 1", n)
 	}
 
+	// ---- Edit VPN user name + email ----
+	editUserResp, _ := api(t, "PATCH", "/api/users/"+deptUserID, token, map[string]interface{}{
+		"full_name": "Dept User Edited", "email": "Dept.Edited@Example.com",
+	})
+	expectStatus(t, editUserResp, 200, "PATCH /api/users/{id} (name + email)")
+	json.Unmarshal([]byte(rawGet(t, baseURL+"/api/users", token)), &deptUsers)
+	editedUserFound := false
+	for _, usr := range deptUsers {
+		if email, _ := usr["email"].(string); email == "dept.edited@example.com" {
+			editedUserFound = true
+			if name, _ := usr["full_name"].(string); name != "Dept User Edited" {
+				t.Fatalf("edited user full_name = %q, want Dept User Edited", name)
+			}
+		}
+	}
+	if !editedUserFound {
+		t.Fatal("user edit did not persist (lowercased email not listed)")
+	}
+
+	// Duplicate email of another user is a clear 409.
+	dupEmailResp, _ := api(t, "PATCH", "/api/users/"+deptUserID, token, map[string]interface{}{
+		"email": "claimer@example.com",
+	})
+	expectStatus(t, dupEmailResp, 409, "PATCH /api/users/{id} duplicate email")
+
+	// Invalid email is rejected.
+	badEmailResp, _ := api(t, "PATCH", "/api/users/"+deptUserID, token, map[string]interface{}{
+		"email": "not-an-email",
+	})
+	expectStatus(t, badEmailResp, 400, "PATCH /api/users/{id} invalid email")
+
 	// Cleanup: delete local server (cascade peers) must succeed
 	resp, _ = api(t, "DELETE", "/api/servers/"+serverID, token, map[string]string{
 		"code": actorCode(),

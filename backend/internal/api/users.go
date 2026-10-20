@@ -3,14 +3,17 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
+	"net/mail"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/wireguard-console/backend/internal/db"
 	"github.com/wireguard-console/backend/internal/email"
@@ -299,13 +302,14 @@ func UpdateUser(store *Store) http.HandlerFunc {
 		}
 		var req struct {
 			FullName     *string         `json:"full_name"`
+			Email        *string         `json:"email"`
 			DepartmentID json.RawMessage `json:"department_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
-		if req.FullName == nil && len(req.DepartmentID) == 0 {
+		if req.FullName == nil && req.Email == nil && len(req.DepartmentID) == 0 {
 			writeError(w, http.StatusBadRequest, "Nothing to update")
 			return
 		}
@@ -317,6 +321,43 @@ func UpdateUser(store *Store) http.HandlerFunc {
 		if err := store.pool.QueryRow(ctx, `SELECT true FROM users WHERE id = $1`, userID).Scan(&exists); err != nil {
 			writeError(w, http.StatusNotFound, "User not found")
 			return
+		}
+
+		// Email is the user's identity for invites/emails: validate it, store it
+		// lowercased, and reject collisions (removed users keep their row, so
+		// their address stays reserved — re-inviting it revives that row instead).
+		if req.Email != nil {
+			email := strings.ToLower(strings.TrimSpace(*req.Email))
+			if email == "" {
+				writeError(w, http.StatusBadRequest, "Email is required")
+				return
+			}
+			if addr, err := mail.ParseAddress(email); err != nil || addr.Address != email {
+				writeError(w, http.StatusBadRequest, "Invalid email address")
+				return
+			}
+			var taken bool
+			err := store.pool.QueryRow(ctx,
+				`SELECT true FROM users WHERE lower(email) = $1 AND id <> $2`, email, userID).Scan(&taken)
+			if err == nil {
+				writeError(w, http.StatusConflict, "Another user already uses this email")
+				return
+			}
+			if !errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, http.StatusInternalServerError, "Failed to check email")
+				return
+			}
+			if _, err := store.pool.Exec(ctx, `
+				UPDATE users SET email = $1, updated_at = now() WHERE id = $2
+			`, email, userID); err != nil {
+				var pgErr *pgconn.PgError
+				if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+					writeError(w, http.StatusConflict, "Another user already uses this email")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "Failed to update email")
+				return
+			}
 		}
 
 		if req.FullName != nil {
