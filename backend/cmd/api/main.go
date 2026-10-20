@@ -96,6 +96,10 @@ func main() {
 	// Import AdGuard Home's DNS query log into browsing_records so the Web
 	// Activity page and domain statistics have data (see worker/browse.go).
 	go worker.NewBrowseWorker(conn.Pool()).Start(ctx)
+	// Sample the IP-block nftables rule counters so blocked-IP attempts show
+	// up in Statistics and Web Activity (they never hit DNS, so the AdGuard
+	// query-log importer cannot see them).
+	go worker.NewIPBlockHitWorker(conn.Pool(), 30*time.Second).Start(ctx)
 	// Remove expired admin_sessions rows (absolute-expiry backstop; idle-
 	// expired rows are deleted inline on next use).
 	go worker.NewSessionPurgeWorker(conn.Pool(), time.Hour).Start(ctx)
@@ -258,6 +262,13 @@ func main() {
 				r.Post("/ip-rules", api.CreateIPRule(store))
 				r.Delete("/ip-rules/{id}", api.DeleteIPRule(store))
 				r.Get("/ip-rules/status", api.IPRuleStatus(store))
+
+				// Reusable IP groups (e.g. "CDN edge ranges"): one blocking
+				// rule can target a whole group, editing it updates the rules.
+				r.Get("/ip-groups", api.ListIPGroups(store))
+				r.Post("/ip-groups", api.CreateIPGroup(store))
+				r.Patch("/ip-groups/{id}", api.UpdateIPGroup(store))
+				r.Delete("/ip-groups/{id}", api.DeleteIPGroup(store))
 				// Is this domain actually blocked right now? Proxies AdGuard's
 				// check_host (read-only diagnostics).
 				r.Get("/domain-rules/check", api.CheckDomainRule(store))
@@ -267,6 +278,9 @@ func main() {
 				r.Get("/web-activity", api.ListWebActivity(store))
 				r.Get("/web-activity/summary", api.GetWebActivitySummary(store))
 				r.Get("/web-activity/top-domains", api.GetTopDomains(store))
+				// Blocked-IP attempts (nftables counters) — they never hit DNS,
+				// so they are not part of the browsing records above.
+				r.Get("/web-activity/ip-blocked", api.IPBlockedActivity(store))
 
 				r.Get("/stats/overview", api.GetStatsOverview(store))
 				r.Get("/stats/traffic", api.GetTrafficStats(store))

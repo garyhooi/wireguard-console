@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"sync"
 	"time"
@@ -202,6 +203,39 @@ func enforce(interfaceName, natCIDR string, dnsEnforcement bool, rules *[]IPBloc
 		return fmt.Errorf("wg-helper enforce: %v", out.Warnings)
 	}
 	return nil
+}
+
+// IPBlockCounter is one sampled IP-block drop-rule counter from wg-helper.
+type IPBlockCounter struct {
+	SourceIP string `json:"source_ip"`
+	CIDR     string `json:"cidr"`
+	Family   string `json:"family"`
+	Packets  uint64 `json:"packets"`
+	Bytes    uint64 `json:"bytes"`
+}
+
+// IPBlockStats fetches the cumulative IP-block counters for one interface.
+// A missing interface/table is reported by the helper as an empty list.
+func IPBlockStats(interfaceName string) ([]IPBlockCounter, error) {
+	socket := Socket()
+	if socket == "" {
+		return nil, nil
+	}
+	resp, err := get(socket, "/ipblock-stats?interface="+url.QueryEscape(interfaceName))
+	if err != nil {
+		return nil, fmt.Errorf("wg-helper ipblock-stats: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("wg-helper ipblock-stats: status %d", resp.StatusCode)
+	}
+	var out struct {
+		Rules []IPBlockCounter `json:"rules"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("wg-helper ipblock-stats: bad response: %w", err)
+	}
+	return out.Rules, nil
 }
 
 // Remove deletes a server's interface from the kernel.

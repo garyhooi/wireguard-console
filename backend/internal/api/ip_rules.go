@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -118,11 +120,12 @@ type ipRuleRow struct {
 	db.IPBlockRule
 	UserEmail    string `json:"user_email"`
 	UserFullName string `json:"user_full_name"`
+	GroupName    string `json:"group_name,omitempty"`
 }
 
 func loadIPBlockRules(ctx context.Context, pool *pgxpool.Pool) ([]db.IPBlockRule, error) {
 	rows, err := pool.Query(ctx, `
-		SELECT id, scope, user_id, cidr, note, created_by, created_at
+		SELECT id, scope, user_id, cidr, group_id, note, created_by, created_at
 		FROM ip_block_rules
 		ORDER BY created_at DESC
 	`)
@@ -134,10 +137,12 @@ func loadIPBlockRules(ctx context.Context, pool *pgxpool.Pool) ([]db.IPBlockRule
 	var rules []db.IPBlockRule
 	for rows.Next() {
 		var rule db.IPBlockRule
-		if err := rows.Scan(&rule.ID, &rule.Scope, &rule.UserID, &rule.CIDR,
+		var cidr sql.NullString
+		if err := rows.Scan(&rule.ID, &rule.Scope, &rule.UserID, &cidr, &rule.GroupID,
 			&rule.Note, &rule.CreatedBy, &rule.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan IP rule: %w", err)
 		}
+		rule.CIDR = cidr.String
 		rules = append(rules, rule)
 	}
 	return rules, rows.Err()
@@ -198,6 +203,7 @@ func peersByUserForServer(ctx context.Context, pool *pgxpool.Pool, serverID uuid
 func expandIPBlockRules(
 	rules []db.IPBlockRule,
 	peersByUser map[uuid.UUID][]string,
+	groupCIDRs map[uuid.UUID][]string,
 	gatewayIP, blockPageIP string,
 ) ([]wgclient.IPBlockRule, []ipBlockConflict, []uuid.UUID) {
 	type key struct{ source, cidr string }
@@ -216,32 +222,45 @@ func expandIPBlockRules(
 	}
 
 	for _, rule := range rules {
-		reason := ""
-		if gatewayIP != "" && cidrContains(rule.CIDR, gatewayIP) {
-			reason = "contains the tunnel gateway " + gatewayIP + " (DNS/block page)"
-		} else if blockPageIP != "" && cidrContains(rule.CIDR, blockPageIP) {
-			reason = "contains the block-page/AdGuard address " + blockPageIP
-		}
-		if reason != "" {
-			conflicts = append(conflicts, ipBlockConflict{RuleID: rule.ID, CIDR: rule.CIDR, Reason: reason})
-			continue
+		// Resolve the rule's destinations: one CIDR, or every range in its group.
+		dests := []string{rule.CIDR}
+		if rule.GroupID != nil {
+			dests = groupCIDRs[*rule.GroupID]
+			if len(dests) == 0 {
+				unexpanded = append(unexpanded, rule.ID)
+				continue
+			}
 		}
 
-		if rule.Scope == "user" && rule.UserID != nil {
-			added := false
-			for _, peerIP := range peersByUser[*rule.UserID] {
-				if cidrIsIPv4(rule.CIDR) != isIPv4Address(peerIP) {
-					continue // no valid source of this family on this server
+		ruleAdded := false
+		for _, dest := range dests {
+			reason := ""
+			if gatewayIP != "" && cidrContains(dest, gatewayIP) {
+				reason = "contains the tunnel gateway " + gatewayIP + " (DNS/block page)"
+			} else if blockPageIP != "" && cidrContains(dest, blockPageIP) {
+				reason = "contains the block-page/AdGuard address " + blockPageIP
+			}
+			if reason != "" {
+				conflicts = append(conflicts, ipBlockConflict{RuleID: rule.ID, CIDR: dest, Reason: reason})
+				continue
+			}
+
+			if rule.Scope == "user" && rule.UserID != nil {
+				for _, peerIP := range peersByUser[*rule.UserID] {
+					if cidrIsIPv4(dest) != isIPv4Address(peerIP) {
+						continue // no valid source of this family on this server
+					}
+					add(peerIP, dest)
+					ruleAdded = true
 				}
-				add(peerIP, rule.CIDR)
-				added = true
+				continue
 			}
-			if !added {
-				unexpanded = append(unexpanded, rule.ID)
-			}
-			continue
+			add("", dest)
+			ruleAdded = true
 		}
-		add("", rule.CIDR)
+		if rule.Scope == "user" && rule.UserID != nil && !ruleAdded {
+			unexpanded = append(unexpanded, rule.ID)
+		}
 	}
 
 	sort.Slice(entries, func(i, j int) bool {
@@ -278,11 +297,15 @@ func buildIPBlockPayload(ctx context.Context, pool *pgxpool.Pool, serverID uuid.
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	groupCIDRs, err := loadIPGroupCIDRs(ctx, pool)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	peers, err := peersByUserForServer(ctx, pool, serverID)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	entries, conflicts, unexpanded := expandIPBlockRules(rules, peers, gatewayIP, blockPageIP)
+	entries, conflicts, unexpanded := expandIPBlockRules(rules, peers, groupCIDRs, gatewayIP, blockPageIP)
 	return entries, conflicts, unexpanded, nil
 }
 
@@ -292,10 +315,11 @@ func ListIPRules(store *Store) http.HandlerFunc {
 		ctx := context.Background()
 
 		rows, err := store.pool.Query(ctx, `
-			SELECT r.id, r.scope, r.user_id, r.cidr, r.note, r.created_by, r.created_at,
-			       COALESCE(u.email, ''), COALESCE(u.full_name, '')
+			SELECT r.id, r.scope, r.user_id, r.cidr, r.group_id, r.note, r.created_by, r.created_at,
+			       COALESCE(u.email, ''), COALESCE(u.full_name, ''), COALESCE(g.name, '')
 			FROM ip_block_rules r
 			LEFT JOIN users u ON u.id = r.user_id
+			LEFT JOIN ip_groups g ON g.id = r.group_id
 			ORDER BY r.created_at DESC
 		`)
 		if err != nil {
@@ -307,11 +331,14 @@ func ListIPRules(store *Store) http.HandlerFunc {
 		rules := []ipRuleRow{}
 		for rows.Next() {
 			var rule ipRuleRow
-			if err := rows.Scan(&rule.ID, &rule.Scope, &rule.UserID, &rule.CIDR, &rule.Note,
-				&rule.CreatedBy, &rule.CreatedAt, &rule.UserEmail, &rule.UserFullName); err != nil {
+			var cidr sql.NullString
+			if err := rows.Scan(&rule.ID, &rule.Scope, &rule.UserID, &cidr, &rule.GroupID,
+				&rule.Note, &rule.CreatedBy, &rule.CreatedAt, &rule.UserEmail, &rule.UserFullName,
+				&rule.GroupName); err != nil {
 				writeError(w, http.StatusInternalServerError, "Failed to scan IP rule")
 				return
 			}
+			rule.CIDR = cidr.String
 			rules = append(rules, rule)
 		}
 		writeJSON(w, http.StatusOK, rules)
@@ -320,14 +347,17 @@ func ListIPRules(store *Store) http.HandlerFunc {
 
 func getIPRule(ctx context.Context, pool *pgxpool.Pool, id uuid.UUID) (ipRuleRow, error) {
 	var rule ipRuleRow
+	var cidr sql.NullString
 	err := pool.QueryRow(ctx, `
-		SELECT r.id, r.scope, r.user_id, r.cidr, r.note, r.created_by, r.created_at,
-		       COALESCE(u.email, ''), COALESCE(u.full_name, '')
+		SELECT r.id, r.scope, r.user_id, r.cidr, r.group_id, r.note, r.created_by, r.created_at,
+		       COALESCE(u.email, ''), COALESCE(u.full_name, ''), COALESCE(g.name, '')
 		FROM ip_block_rules r
 		LEFT JOIN users u ON u.id = r.user_id
+		LEFT JOIN ip_groups g ON g.id = r.group_id
 		WHERE r.id = $1
-	`, id).Scan(&rule.ID, &rule.Scope, &rule.UserID, &rule.CIDR, &rule.Note,
-		&rule.CreatedBy, &rule.CreatedAt, &rule.UserEmail, &rule.UserFullName)
+	`, id).Scan(&rule.ID, &rule.Scope, &rule.UserID, &cidr, &rule.GroupID, &rule.Note,
+		&rule.CreatedBy, &rule.CreatedAt, &rule.UserEmail, &rule.UserFullName, &rule.GroupName)
+	rule.CIDR = cidr.String
 	return rule, err
 }
 
@@ -336,10 +366,11 @@ func getIPRule(ctx context.Context, pool *pgxpool.Pool, id uuid.UUID) (ipRuleRow
 func CreateIPRule(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Scope  string     `json:"scope"`
-			UserID *uuid.UUID `json:"user_id"`
-			CIDR   string     `json:"cidr"`
-			Note   string     `json:"note"`
+			Scope   string     `json:"scope"`
+			UserID  *uuid.UUID `json:"user_id"`
+			CIDR    string     `json:"cidr"`
+			GroupID *uuid.UUID `json:"group_id"`
+			Note    string     `json:"note"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
@@ -361,14 +392,44 @@ func CreateIPRule(store *Store) http.HandlerFunc {
 			return
 		}
 
-		cidr, err := normalizeIPRuleCIDR(req.CIDR)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
+		hasCIDR := strings.TrimSpace(req.CIDR) != ""
+		hasGroup := req.GroupID != nil
+		if hasCIDR == hasGroup {
+			writeError(w, http.StatusBadRequest, "Provide either an IP/CIDR or an IP group (exactly one)")
 			return
 		}
 
 		ctx := context.Background()
 		adminID := getAdminID(r)
+
+		var (
+			cidr      string
+			domainArg *string
+			groupName string
+		)
+		var targetID string
+
+		if hasCIDR {
+			var err error
+			cidr, err = normalizeIPRuleCIDR(req.CIDR)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			domainArg = &cidr
+			targetID = cidr
+		} else {
+			if err := store.pool.QueryRow(ctx,
+				`SELECT name FROM ip_groups WHERE id = $1`, *req.GroupID).Scan(&groupName); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					writeError(w, http.StatusNotFound, "IP group not found")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "Failed to check IP group")
+				return
+			}
+			targetID = req.GroupID.String()
+		}
 
 		if req.UserID != nil {
 			var exists bool
@@ -384,16 +445,32 @@ func CreateIPRule(store *Store) http.HandlerFunc {
 		}
 
 		var exists bool
-		err = store.pool.QueryRow(ctx, `
-			SELECT true FROM ip_block_rules
-			WHERE scope = $1
-			  AND COALESCE(user_id, '00000000-0000-0000-0000-000000000000'::uuid)
-			    = COALESCE($2::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
-			  AND cidr = $3
-			LIMIT 1
-		`, req.Scope, req.UserID, cidr).Scan(&exists)
+		var err error
+		if hasCIDR {
+			err = store.pool.QueryRow(ctx, `
+				SELECT true FROM ip_block_rules
+				WHERE scope = $1
+				  AND COALESCE(user_id, '00000000-0000-0000-0000-000000000000'::uuid)
+				    = COALESCE($2::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
+				  AND cidr = $3
+				LIMIT 1
+			`, req.Scope, req.UserID, cidr).Scan(&exists)
+		} else {
+			err = store.pool.QueryRow(ctx, `
+				SELECT true FROM ip_block_rules
+				WHERE scope = $1
+				  AND COALESCE(user_id, '00000000-0000-0000-0000-000000000000'::uuid)
+				    = COALESCE($2::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
+				  AND group_id = $3
+				LIMIT 1
+			`, req.Scope, req.UserID, *req.GroupID).Scan(&exists)
+		}
 		if err == nil {
-			writeError(w, http.StatusConflict, fmt.Sprintf("%s is already blocked for this scope", cidr))
+			if hasCIDR {
+				writeError(w, http.StatusConflict, fmt.Sprintf("%s is already blocked for this scope", cidr))
+			} else {
+				writeError(w, http.StatusConflict, fmt.Sprintf("group %q is already blocked for this scope", groupName))
+			}
 			return
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
@@ -403,20 +480,20 @@ func CreateIPRule(store *Store) http.HandlerFunc {
 
 		var id uuid.UUID
 		err = store.pool.QueryRow(ctx, `
-			INSERT INTO ip_block_rules (scope, user_id, cidr, note, created_by)
-			VALUES ($1, $2, $3, $4, $5) RETURNING id
-		`, req.Scope, req.UserID, cidr, req.Note, adminID).Scan(&id)
+			INSERT INTO ip_block_rules (scope, user_id, cidr, group_id, note, created_by)
+			VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
+		`, req.Scope, req.UserID, domainArg, req.GroupID, req.Note, adminID).Scan(&id)
 		if err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-				writeError(w, http.StatusConflict, fmt.Sprintf("%s is already blocked for this scope", cidr))
+				writeError(w, http.StatusConflict, "This rule already exists for this scope")
 				return
 			}
 			writeError(w, http.StatusInternalServerError, "Failed to create IP rule")
 			return
 		}
 
-		logAudit(ctx, store, adminID, "ip_rule.create", "ip_rule", cidr, nil)
+		logAudit(ctx, store, adminID, "ip_rule.create", "ip_rule", targetID, nil)
 		RequestIPBlockSync(store)
 
 		rule, err := getIPRule(ctx, store.pool, id)

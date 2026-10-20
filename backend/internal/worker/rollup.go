@@ -70,6 +70,14 @@ func (w *RollupWorker) rollup(ctx context.Context) error {
 		return fmt.Errorf("failed to delete old traffic samples: %w", err)
 	}
 
+	// Blocked-IP hit samples follow the same 30-day retention as browsing
+	// records so the table stays bounded without a separate worker.
+	if _, err := w.pool.Exec(ctx, `
+		DELETE FROM ip_block_hits WHERE sampled_at < now() - interval '30 days'
+	`); err != nil {
+		return fmt.Errorf("failed to delete old IP-block hits: %w", err)
+	}
+
 	log.Println("Traffic rollup completed")
 	return nil
 }

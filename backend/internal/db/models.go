@@ -88,13 +88,23 @@ type DomainRule struct {
 }
 
 type IPBlockRule struct {
-	ID        uuid.UUID  `json:"id"`
-	Scope     string     `json:"scope"`
-	UserID    *uuid.UUID `json:"user_id"`
+	ID     uuid.UUID  `json:"id"`
+	Scope  string     `json:"scope"`
+	UserID *uuid.UUID `json:"user_id"`
+	// CIDR is empty for group rules (see GroupID).
 	CIDR      string     `json:"cidr"`
+	GroupID   *uuid.UUID `json:"group_id,omitempty"`
 	Note      string     `json:"note"`
 	CreatedBy *uuid.UUID `json:"created_by"`
 	CreatedAt time.Time  `json:"created_at"`
+}
+
+type IPGroup struct {
+	ID        uuid.UUID  `json:"id"`
+	Name      string     `json:"name"`
+	CreatedBy *uuid.UUID `json:"created_by"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
 }
 
 type AuditLog struct {

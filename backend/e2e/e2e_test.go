@@ -1337,6 +1337,67 @@ func TestEndToEnd(t *testing.T) {
 	ipDelAgainResp, _ := api(t, "DELETE", "/api/ip-rules/"+ipV4ID, token, nil)
 	expectStatus(t, ipDelAgainResp, 404, "DELETE /api/ip-rules/{id} twice")
 
+	// ---- IP groups ----
+	ipGroupResp, ipGroupOut := api(t, "POST", "/api/ip-groups", token, map[string]interface{}{
+		"name":  "E2E CDN edges",
+		"cidrs": []string{"198.51.100.0/24", "2001:DB8:bad::/48"},
+	})
+	expectStatus(t, ipGroupResp, 201, "POST /api/ip-groups")
+	ipGroupID, _ := ipGroupOut["id"].(string)
+	if ipGroupID == "" {
+		t.Fatal("IP group create returned no id")
+	}
+	if n, _ := ipGroupOut["range_count"].(float64); n != 2 {
+		t.Fatalf("IP group range_count = %v, want 2", n)
+	}
+
+	// Duplicate group name is a clear 409.
+	ipGroupDupResp, _ := api(t, "POST", "/api/ip-groups", token, map[string]interface{}{
+		"name": "e2e cdn edges", "cidrs": []string{"203.0.113.0/24"},
+	})
+	expectStatus(t, ipGroupDupResp, 409, "POST /api/ip-groups duplicate")
+
+	// A rule can target the whole group.
+	ipGroupRuleResp, ipGroupRuleOut := api(t, "POST", "/api/ip-rules", token, map[string]interface{}{
+		"scope": "global", "group_id": ipGroupID,
+	})
+	expectStatus(t, ipGroupRuleResp, 201, "POST /api/ip-rules (group)")
+	if ipGroupRuleOut["group_name"] != "E2E CDN edges" {
+		t.Fatalf("group rule group_name = %v, want E2E CDN edges", ipGroupRuleOut["group_name"])
+	}
+
+	// Both cidr and group_id is rejected.
+	ipGroupBadResp, _ := api(t, "POST", "/api/ip-rules", token, map[string]interface{}{
+		"scope": "global", "cidr": "192.0.2.0/24", "group_id": ipGroupID,
+	})
+	expectStatus(t, ipGroupBadResp, 400, "POST /api/ip-rules (cidr+group)")
+
+	// Editing the group's ranges replaces the list.
+	ipGroupUpdResp, ipGroupUpdOut := api(t, "PATCH", "/api/ip-groups/"+ipGroupID, token, map[string]interface{}{
+		"cidrs": []string{"198.51.100.0/24"},
+	})
+	expectStatus(t, ipGroupUpdResp, 200, "PATCH /api/ip-groups/{id}")
+	if n, _ := ipGroupUpdOut["range_count"].(float64); n != 1 {
+		t.Fatalf("updated IP group range_count = %v, want 1", n)
+	}
+
+	// Deleting the group cascades the rule that referenced it.
+	ipGroupDelResp, ipGroupDelOut := api(t, "DELETE", "/api/ip-groups/"+ipGroupID, token, nil)
+	expectStatus(t, ipGroupDelResp, 200, "DELETE /api/ip-groups/{id}")
+	if n, _ := ipGroupDelOut["rules_removed"].(float64); n != 1 {
+		t.Fatalf("IP group rules_removed = %v, want 1 (cascade)", n)
+	}
+
+	// ---- Blocked-IP activity (empty in e2e: no nftables/wg-helper) ----
+	ipBlockedResp, ipBlockedOut := api(t, "GET", "/api/web-activity/ip-blocked?days=7&limit=100", token, nil)
+	expectStatus(t, ipBlockedResp, 200, "GET /api/web-activity/ip-blocked")
+	if n, _ := ipBlockedOut["total_hits"].(float64); n != 0 {
+		t.Fatalf("ip-blocked total_hits = %v, want 0", n)
+	}
+	if recs, ok := ipBlockedOut["records"].([]interface{}); !ok || len(recs) != 0 {
+		t.Fatalf("ip-blocked records = %v, want empty array", ipBlockedOut["records"])
+	}
+
 	// Cleanup: delete local server (cascade peers) must succeed
 	resp, _ = api(t, "DELETE", "/api/servers/"+serverID, token, map[string]string{
 		"code": actorCode(),
