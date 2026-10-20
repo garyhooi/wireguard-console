@@ -8,6 +8,7 @@ import {
   IconTrash,
 } from '@tabler/icons-react'
 import { apiJson } from '../../lib/api'
+import { userLabel } from '../../lib/userLabel'
 import {
   Badge,
   GhostButton,
@@ -29,6 +30,8 @@ interface IPRule {
   user_id: string | null
   user_email: string
   user_full_name: string
+  /** Joined department name (newer backends); absorbs into the user label. */
+  user_department_name?: string
   cidr: string
   note: string
   /** Set for group-targeted rules: cidr is "" and group_name is filled. */
@@ -204,7 +207,9 @@ export function IPBlockingPage() {
   const { data: users } = useQuery({
     queryKey: ['users'],
     queryFn: async () => {
-      return apiJson<Array<{ id: string; email: string; full_name: string }>>('/api/users')
+      return apiJson<
+        Array<{ id: string; email: string; full_name: string; department_name?: string }>
+      >('/api/users')
     },
     enabled: scope === 'user',
   })
@@ -563,7 +568,11 @@ export function IPBlockingPage() {
                         {rule.scope === 'global' ? (
                           <Badge tone="accent">Global</Badge>
                         ) : (
-                          rule.user_full_name || rule.user_email || '—'
+                          userLabel(
+                            rule.user_full_name,
+                            rule.user_email,
+                            rule.user_department_name,
+                          )
                         )}
                       </td>
                       <td className={tdCls}>
@@ -636,7 +645,7 @@ export function IPBlockingPage() {
                 <option value="">Select a user</option>
                 {users?.map((user) => (
                   <option key={user.id} value={user.id}>
-                    {user.full_name || user.email}
+                    {userLabel(user.full_name, user.email, user.department_name)}
                   </option>
                 ))}
               </select>

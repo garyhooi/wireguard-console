@@ -94,9 +94,9 @@ describe('DomainRulesPage', () => {
     renderWithClient(<DomainRulesPage />)
     await waitFor(() => expect(screen.getByText('||tracker.io^')).toBeTruthy())
 
-    // Named user rule → full name.
+    // Named user rule → "Name <email>" (plus department once the backend sends it).
     const namedRow = screen.getByText('||tracker.io^').closest('tr')!
-    expect(within(namedRow).getByText('Alice Tan')).toBeTruthy()
+    expect(within(namedRow).getByText('Alice Tan <alice@example.com>')).toBeTruthy()
     expect(within(namedRow).queryByText('User')).toBeNull()
 
     // User rule whose owner has no full name → falls back to email.

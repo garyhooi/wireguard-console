@@ -1,9 +1,10 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { apiJson } from '../../lib/api'
+import { userLabel } from '../../lib/userLabel'
 import { fmtDateTime } from '../../lib/timezone'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
-import { IconCopy, IconMailForward, IconMailPlus } from '@tabler/icons-react'
+import { IconCopy, IconMailForward, IconMailPlus, IconPencil } from '@tabler/icons-react'
 import {
   Badge,
   EmptyState,
@@ -28,15 +29,28 @@ interface User {
   id: string
   email: string
   full_name: string
+  /** Null/absent on older backends that predate departments. */
+  department_id?: string | null
+  department_name?: string
   status: string
   invited_at: string | null
   activated_at: string | null
   created_at: string
 }
 
+interface Department {
+  id: string
+  name: string
+  user_count: number
+  created_at: string
+}
+
 export const Route = createFileRoute('/_authenticated/users')({
   component: UsersPage,
 })
+
+const iconButtonCls =
+  'inline-flex items-center justify-center rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500'
 
 const USER_TONE: Record<string, 'good' | 'warn' | 'info' | 'bad' | 'neutral'> = {
   active: 'good',
@@ -46,11 +60,15 @@ const USER_TONE: Record<string, 'good' | 'warn' | 'info' | 'bad' | 'neutral'> = 
   disabled: 'bad',
 }
 
-function UsersPage() {
+export function UsersPage() {
   const [showInviteModal, setShowInviteModal] = useState(false)
   const [inviteEmail, setInviteEmail] = useState('')
   const [inviteName, setInviteName] = useState('')
+  const [inviteDepartmentId, setInviteDepartmentId] = useState('')
   const [inviteLink, setInviteLink] = useState('')
+  // Per-user department edit (small modal opened from the row action).
+  const [editingUser, setEditingUser] = useState<User | null>(null)
+  const [editDepartmentId, setEditDepartmentId] = useState('')
   const [resendLink, setResendLink] = useState('')
   const [resendTarget, setResendTarget] = useState('')
   const [statusFilter, setStatusFilter] = useState('all')
@@ -73,8 +91,19 @@ function UsersPage() {
     },
   })
 
+  const { data: departments } = useQuery<Department[]>({
+    queryKey: ['departments'],
+    queryFn: async () => {
+      return apiJson<Department[]>('/api/departments')
+    },
+  })
+
   const inviteMutation = useMutation({
-    mutationFn: async (data: { email: string; full_name: string }) => {
+    mutationFn: async (data: {
+      email: string
+      full_name: string
+      department_id?: string
+    }) => {
       return apiJson<{ invite_link?: string }>('/api/users', { method: 'POST', body: data })
     },
     onSuccess: (data) => {
@@ -138,9 +167,47 @@ function UsersPage() {
     onSuccess: () => refetch(),
   })
 
+  // Update only the department; null clears it server-side.
+  const editDepartmentMutation = useMutation({
+    mutationFn: async () => {
+      if (!editingUser) return
+      return apiJson(`/api/users/${editingUser.id}`, {
+        method: 'PATCH',
+        body: { department_id: editDepartmentId || null },
+      })
+    },
+    onSuccess: () => {
+      setEditingUser(null)
+      setEditDepartmentId('')
+      refetch()
+    },
+  })
+
   const handleInvite = (e: React.FormEvent) => {
     e.preventDefault()
-    inviteMutation.mutate({ email: inviteEmail, full_name: inviteName })
+    inviteMutation.mutate({
+      email: inviteEmail,
+      full_name: inviteName,
+      ...(inviteDepartmentId ? { department_id: inviteDepartmentId } : {}),
+    })
+  }
+
+  const openEditDepartment = (user: User) => {
+    editDepartmentMutation.reset()
+    setEditingUser(user)
+    setEditDepartmentId(user.department_id || '')
+  }
+
+  const closeEditDepartment = () => {
+    editDepartmentMutation.reset()
+    setEditingUser(null)
+    setEditDepartmentId('')
+  }
+
+  const handleSaveDepartment = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!editingUser) return
+    editDepartmentMutation.mutate()
   }
 
   const copyLink = async () => {
@@ -222,6 +289,24 @@ function UsersPage() {
               onChange={(e) => setInviteName(e.target.value)}
             />
           </div>
+          <div>
+            <label htmlFor="inviteDepartment" className={labelCls}>
+              Department (optional)
+            </label>
+            <select
+              id="inviteDepartment"
+              className={inputCls}
+              value={inviteDepartmentId}
+              onChange={(e) => setInviteDepartmentId(e.target.value)}
+            >
+              <option value="">No department</option>
+              {(departments || []).map((department) => (
+                <option key={department.id} value={department.id}>
+                  {department.name}
+                </option>
+              ))}
+            </select>
+          </div>
           <div className="flex justify-end gap-3">
             <GhostButton type="button" onClick={() => setShowInviteModal(false)}>
               Cancel
@@ -264,6 +349,7 @@ function UsersPage() {
                   setInviteLink('')
                   setInviteEmail('')
                   setInviteName('')
+                  setInviteDepartmentId('')
                 }}
               >
                 Done
@@ -315,6 +401,58 @@ function UsersPage() {
         </div>
       </Modal>
 
+      {/* Department edit — a single-field PATCH; null unassigns the user. */}
+      <Modal
+        open={editingUser !== null}
+        onClose={closeEditDepartment}
+        title="Edit department"
+        className="max-w-md"
+      >
+        <form onSubmit={handleSaveDepartment} className="space-y-4">
+          {editingUser && (
+            <p className="text-sm text-zinc-400">
+              {userLabel(editingUser.full_name, editingUser.email, editingUser.department_name)}
+            </p>
+          )}
+          <div>
+            <label htmlFor="editDepartment" className={labelCls}>
+              Department
+            </label>
+            <select
+              id="editDepartment"
+              className={inputCls}
+              value={editDepartmentId}
+              onChange={(e) => {
+                setEditDepartmentId(e.target.value)
+                editDepartmentMutation.reset()
+              }}
+            >
+              <option value="">No department</option>
+              {(departments || []).map((department) => (
+                <option key={department.id} value={department.id}>
+                  {department.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {editDepartmentMutation.isError && (
+            <p role="alert" className="text-sm text-red-400">
+              {editDepartmentMutation.error?.message || 'Failed to update department.'}
+            </p>
+          )}
+
+          <div className="flex justify-end gap-3 pt-2">
+            <GhostButton type="button" onClick={closeEditDepartment}>
+              Cancel
+            </GhostButton>
+            <PrimaryButton type="submit" disabled={editDepartmentMutation.isPending}>
+              {editDepartmentMutation.isPending ? 'Saving…' : 'Save'}
+            </PrimaryButton>
+          </div>
+        </form>
+      </Modal>
+
       <div className={toolbarCls}>
         <div className={tabGroupCls}>
           {TABS.map((tab) => (
@@ -357,6 +495,7 @@ function UsersPage() {
                 <tr className="text-left text-[11px] uppercase tracking-wider text-zinc-500 bg-zinc-800/40">
                   <th className={thCls}>Name</th>
                   <th className={thCls}>Email</th>
+                  <th className={thCls}>Department</th>
                   <th className={thCls}>Status</th>
                   <th className={thCls}>Invited At</th>
                   <th className={thCls + ' text-right'}>Actions</th>
@@ -369,6 +508,7 @@ function UsersPage() {
                       {user.full_name || '-'}
                     </td>
                     <td className={tdCls}>{user.email}</td>
+                    <td className={tdCls}>{user.department_name || '—'}</td>
                     <td className="px-5 py-3.5 whitespace-nowrap">
                       <Badge tone={USER_TONE[user.status] || 'neutral'}>{user.status}</Badge>
                     </td>
@@ -377,6 +517,17 @@ function UsersPage() {
                     </td>
                     <td className="px-5 py-3.5 whitespace-nowrap text-right text-sm">
                       <div className="flex justify-end gap-1">
+                        {user.status !== 'removed' && (
+                          <button
+                            type="button"
+                            onClick={() => openEditDepartment(user)}
+                            className={iconButtonCls}
+                            title="Edit department"
+                            aria-label={`Edit department for ${user.email}`}
+                          >
+                            <IconPencil size={14} stroke={1.6} aria-hidden="true" />
+                          </button>
+                        )}
                         {user.status === 'invited' && (
                           <button
                             onClick={() => resendMutation.mutate(user)}

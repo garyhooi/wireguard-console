@@ -1,5 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { apiJson } from '../../lib/api'
+import { userLabel } from '../../lib/userLabel'
 import { dateKey, fmtDateTime } from '../../lib/timezone'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -24,6 +25,7 @@ interface SummaryRow {
   id: string
   name: string
   email: string
+  department_name?: string
   peers: number
   allowed: number
   blocked: number
@@ -44,6 +46,7 @@ interface WebRecord {
   user_id: string | null
   user_name: string
   user_email: string
+  department_name?: string
   client_ip: string
   host: string
   base_domain: string
@@ -62,6 +65,7 @@ interface BlockedIPRecord {
   id: number
   user_name: string
   user_email: string
+  department_name?: string
   client_ip: string
   dest_cidr: string
   packets: number
@@ -137,8 +141,13 @@ export function WebActivityPage() {
   const { data: users } = useQuery<Selectable[]>({
     queryKey: ['users'],
     queryFn: async () => {
-      const rows = await apiJson<Array<{ id: string; email: string; full_name: string | null }>>('/api/users')
-      return rows.map((u) => ({ id: u.id, label: u.full_name || u.email }))
+      const rows = await apiJson<
+        Array<{ id: string; email: string; full_name: string | null; department_name?: string }>
+      >('/api/users')
+      return rows.map((u) => ({
+        id: u.id,
+        label: userLabel(u.full_name, u.email, u.department_name),
+      }))
     },
   })
 
@@ -440,7 +449,9 @@ export function WebActivityPage() {
                       {fmtDateTime(rec.sampled_at)}
                     </td>
                     <td className="px-5 py-3 text-sm text-zinc-300">
-                      {rec.user_name || rec.user_email || 'All peers'}
+                      {rec.user_name || rec.user_email
+                        ? userLabel(rec.user_name, rec.user_email, rec.department_name)
+                        : 'All peers'}
                     </td>
                     <td className="px-5 py-3 text-sm text-zinc-400">
                       <span className="font-mono">{rec.dest_cidr}</span>
@@ -529,9 +540,10 @@ function EntityRow({
           {open ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
         </td>
         <td className="px-5 py-3 text-sm text-zinc-200">
-          {row.name}
-          {row.email && row.email !== row.name && (
-            <span className="block text-xs text-zinc-500">{row.email}</span>
+          {userLabel(
+            row.name && row.name !== row.email ? row.name : '',
+            row.email,
+            row.department_name,
           )}
         </td>
         {row.scope === 'user' && (
@@ -570,7 +582,11 @@ function EntityRow({
                       <tr className="text-left text-[11px] uppercase tracking-wider text-zinc-500">
                         <th className={thCls}>When</th>
                         <th className={thCls}>Domain</th>
-                        {row.scope === 'user' && <th className={thCls}>Peer</th>}
+                        {row.scope === 'user' ? (
+                          <th className={thCls}>Peer</th>
+                        ) : (
+                          <th className={thCls}>User</th>
+                        )}
                         <th className={thCls}>Status</th>
                       </tr>
                     </thead>
@@ -581,8 +597,12 @@ function EntityRow({
                             {fmtDateTime(rec.queried_at)}
                           </td>
                           <td className="px-5 py-2 text-zinc-200 font-mono">{rec.host}</td>
-                          {row.scope === 'user' && (
+                          {row.scope === 'user' ? (
                             <td className="px-5 py-2 text-zinc-500">{rec.peer_name}</td>
+                          ) : (
+                            <td className="px-5 py-2 text-zinc-500">
+                              {userLabel(rec.user_name, rec.user_email, rec.department_name)}
+                            </td>
                           )}
                           <td className="px-5 py-2 whitespace-nowrap">
                             {rec.blocked ? (

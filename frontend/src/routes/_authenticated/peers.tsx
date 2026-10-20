@@ -1,5 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { apiFetch, apiJson } from '../../lib/api'
+import { userLabel } from '../../lib/userLabel'
 import { fmtDateTime } from '../../lib/timezone'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
@@ -34,6 +35,8 @@ interface Peer {
   created_at: string
   user_email: string
   user_full_name: string
+  /** Joined department name (newer backends); absorbs into the user label. */
+  user_department_name?: string
   server_name: string
 }
 
@@ -46,6 +49,7 @@ interface User {
   id: string
   email: string
   full_name: string | null
+  department_name?: string
   status: string
 }
 
@@ -381,7 +385,7 @@ function PeersPage() {
                   </option>
                   {addableUsers.map((u) => (
                     <option key={u.id} value={u.id}>
-                      {u.full_name || u.email}
+                      {userLabel(u.full_name, u.email, u.department_name)}
                     </option>
                   ))}
                 </select>
@@ -450,7 +454,13 @@ function PeersPage() {
             This sends a fresh config link for{' '}
             <span className="text-zinc-100">{confirmResendPeer?.name}</span> to{' '}
             <span className="text-zinc-100">
-              {confirmResendPeer?.user_full_name || confirmResendPeer?.user_email || 'its user'}
+              {confirmResendPeer?.user_full_name || confirmResendPeer?.user_email
+                ? userLabel(
+                    confirmResendPeer?.user_full_name,
+                    confirmResendPeer?.user_email,
+                    confirmResendPeer?.user_department_name,
+                  )
+                : 'its user'}
             </span>
             .
           </p>
@@ -563,7 +573,7 @@ function PeersPage() {
                     <td className="px-5 py-3.5 whitespace-nowrap text-sm text-zinc-200">{peer.name}</td>
                     <td className={tdCls}>{peer.server_name || '—'}</td>
                     <td className={tdCls}>
-                      {peer.user_full_name || peer.user_email || '—'}
+                      {userLabel(peer.user_full_name, peer.user_email, peer.user_department_name)}
                     </td>
                     <td className={tdCls + ' font-mono'}>
                       {peer.public_key ? `${peer.public_key.substring(0, 16)}...` : '—'}

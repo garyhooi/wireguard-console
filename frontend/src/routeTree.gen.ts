@@ -19,6 +19,7 @@ import { Route as AuthenticatedAuditLogRouteImport } from './routes/_authenticat
 import { Route as AuthenticatedBackupsRouteImport } from './routes/_authenticated/backups'
 import { Route as AuthenticatedConfigRouteImport } from './routes/_authenticated/config'
 import { Route as AuthenticatedDashboardRouteImport } from './routes/_authenticated/dashboard'
+import { Route as AuthenticatedDepartmentsRouteImport } from './routes/_authenticated/departments'
 import { Route as AuthenticatedDomainRulesRouteImport } from './routes/_authenticated/domain-rules'
 import { Route as AuthenticatedIpRulesRouteImport } from './routes/_authenticated/ip-rules'
 import { Route as AuthenticatedMonitoringRouteImport } from './routes/_authenticated/monitoring'
@@ -81,6 +82,12 @@ const AuthenticatedDashboardRoute = AuthenticatedDashboardRouteImport.update({
   path: '/dashboard',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
+const AuthenticatedDepartmentsRoute =
+  AuthenticatedDepartmentsRouteImport.update({
+    id: '/departments',
+    path: '/departments',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
 const AuthenticatedDomainRulesRoute =
   AuthenticatedDomainRulesRouteImport.update({
     id: '/domain-rules',
@@ -154,6 +161,7 @@ export interface FileRoutesByFullPath {
   '/backups': typeof AuthenticatedBackupsRoute
   '/config': typeof AuthenticatedConfigRoute
   '/dashboard': typeof AuthenticatedDashboardRoute
+  '/departments': typeof AuthenticatedDepartmentsRoute
   '/domain-rules': typeof AuthenticatedDomainRulesRoute
   '/ip-rules': typeof AuthenticatedIpRulesRoute
   '/monitoring': typeof AuthenticatedMonitoringRoute
@@ -177,6 +185,7 @@ export interface FileRoutesByTo {
   '/backups': typeof AuthenticatedBackupsRoute
   '/config': typeof AuthenticatedConfigRoute
   '/dashboard': typeof AuthenticatedDashboardRoute
+  '/departments': typeof AuthenticatedDepartmentsRoute
   '/domain-rules': typeof AuthenticatedDomainRulesRoute
   '/ip-rules': typeof AuthenticatedIpRulesRoute
   '/monitoring': typeof AuthenticatedMonitoringRoute
@@ -202,6 +211,7 @@ export interface FileRoutesById {
   '/_authenticated/backups': typeof AuthenticatedBackupsRoute
   '/_authenticated/config': typeof AuthenticatedConfigRoute
   '/_authenticated/dashboard': typeof AuthenticatedDashboardRoute
+  '/_authenticated/departments': typeof AuthenticatedDepartmentsRoute
   '/_authenticated/domain-rules': typeof AuthenticatedDomainRulesRoute
   '/_authenticated/ip-rules': typeof AuthenticatedIpRulesRoute
   '/_authenticated/monitoring': typeof AuthenticatedMonitoringRoute
@@ -227,6 +237,7 @@ export interface FileRouteTypes {
     | '/backups'
     | '/config'
     | '/dashboard'
+    | '/departments'
     | '/domain-rules'
     | '/ip-rules'
     | '/monitoring'
@@ -250,6 +261,7 @@ export interface FileRouteTypes {
     | '/backups'
     | '/config'
     | '/dashboard'
+    | '/departments'
     | '/domain-rules'
     | '/ip-rules'
     | '/monitoring'
@@ -274,6 +286,7 @@ export interface FileRouteTypes {
     | '/_authenticated/backups'
     | '/_authenticated/config'
     | '/_authenticated/dashboard'
+    | '/_authenticated/departments'
     | '/_authenticated/domain-rules'
     | '/_authenticated/ip-rules'
     | '/_authenticated/monitoring'
@@ -370,6 +383,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedDashboardRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
+    '/_authenticated/departments': {
+      id: '/_authenticated/departments'
+      path: '/departments'
+      fullPath: '/departments'
+      preLoaderRoute: typeof AuthenticatedDepartmentsRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
     '/_authenticated/domain-rules': {
       id: '/_authenticated/domain-rules'
       path: '/domain-rules'
@@ -463,6 +483,7 @@ interface AuthenticatedRouteChildren {
   AuthenticatedBackupsRoute: typeof AuthenticatedBackupsRoute
   AuthenticatedConfigRoute: typeof AuthenticatedConfigRoute
   AuthenticatedDashboardRoute: typeof AuthenticatedDashboardRoute
+  AuthenticatedDepartmentsRoute: typeof AuthenticatedDepartmentsRoute
   AuthenticatedDomainRulesRoute: typeof AuthenticatedDomainRulesRoute
   AuthenticatedIpRulesRoute: typeof AuthenticatedIpRulesRoute
   AuthenticatedMonitoringRoute: typeof AuthenticatedMonitoringRoute
@@ -481,6 +502,7 @@ const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedBackupsRoute: AuthenticatedBackupsRoute,
   AuthenticatedConfigRoute: AuthenticatedConfigRoute,
   AuthenticatedDashboardRoute: AuthenticatedDashboardRoute,
+  AuthenticatedDepartmentsRoute: AuthenticatedDepartmentsRoute,
   AuthenticatedDomainRulesRoute: AuthenticatedDomainRulesRoute,
   AuthenticatedIpRulesRoute: AuthenticatedIpRulesRoute,
   AuthenticatedMonitoringRoute: AuthenticatedMonitoringRoute,

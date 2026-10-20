@@ -107,7 +107,7 @@ describe('IPBlockingPage', () => {
 
     const v6Row = screen.getByText('2001:db8:bad::/48').closest('tr')!
     expect(within(v6Row).getByText('IPv6')).toBeTruthy()
-    expect(within(v6Row).getByText('Alice Tan')).toBeTruthy()
+    expect(within(v6Row).getByText('Alice Tan <alice@example.com>')).toBeTruthy()
     // Empty note falls back to an em dash.
     expect(within(v6Row).getByText('—')).toBeTruthy()
 

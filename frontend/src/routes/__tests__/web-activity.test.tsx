@@ -127,7 +127,10 @@ describe('WebActivityPage', () => {
 
   it('renders the per-user summary table', async () => {
     renderWithClient(<WebActivityPage />)
-    await waitFor(() => expect(screen.getByText('Alice Tan')).toBeTruthy())
+    await waitFor(() =>
+      expect(screen.getByText('Alice Tan <alice@example.com>')).toBeTruthy(),
+    )
+    // Name == email in the fixture, so the label never duplicates it.
     expect(screen.getByText('bob@example.com')).toBeTruthy()
     // Blocked count renders.
     expect(screen.getByText('3')).toBeTruthy()
@@ -141,10 +144,12 @@ describe('WebActivityPage', () => {
 
   it('expands a row to show its records with blocked/allowed badges', async () => {
     renderWithClient(<WebActivityPage />)
-    await waitFor(() => expect(screen.getByText('Alice Tan')).toBeTruthy())
-    // The name appears in the summary table row (and the filters drop the
-    // users list is empty here, so only the row matches — but guard anyway).
-    const row = screen.getAllByText('Alice Tan')[0].closest('tr')!
+    await waitFor(() =>
+      expect(screen.getByText('Alice Tan <alice@example.com>')).toBeTruthy(),
+    )
+    // The label appears in the summary table row (the users filter list is
+    // empty here, so only the row matches — but guard anyway).
+    const row = screen.getAllByText('Alice Tan <alice@example.com>')[0].closest('tr')!
     row.click()
     await waitFor(() => expect(screen.getByText('www.youtube.com')).toBeTruthy())
     expect(screen.getByText(/Blocked · FilteredBlackList/)).toBeTruthy()
@@ -189,7 +194,7 @@ describe('WebActivityPage', () => {
 
     // Per-user record: user name, mono destination, thousands-separated packets.
     const userRow = screen.getByText('203.0.113.0/24').closest('tr')!
-    expect(within(userRow).getByText('Alice Tan')).toBeTruthy()
+    expect(within(userRow).getByText('Alice Tan <alice@example.com>')).toBeTruthy()
     expect(within(userRow).getByText('1,234')).toBeTruthy()
 
     // A hit with no owning user comes from a global rule → "All peers".

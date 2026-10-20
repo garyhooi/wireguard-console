@@ -1,5 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { apiJson } from '../../lib/api'
+import { userLabel } from '../../lib/userLabel'
 import { fmtDateTime, dateKey } from '../../lib/timezone'
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
@@ -74,6 +75,7 @@ interface UsageRow {
   name: string
   email: string
   full_name: string
+  department_name?: string
   allowed_ip?: string
   rx_bytes: number
   tx_bytes: number
@@ -553,9 +555,10 @@ export function StatisticsPage() {
                         {usageScope === 'user' ? (
                           <>
                             <td className="px-5 py-3 text-sm text-zinc-200">
-                              {row.full_name || row.email}
-                              {row.email && row.full_name && (
-                                <span className="block text-xs text-zinc-500">{row.email}</span>
+                              {userLabel(
+                                row.full_name || row.name,
+                                row.email,
+                                row.department_name,
                               )}
                             </td>
                             <td className="px-5 py-3 text-sm text-zinc-500 font-mono tabular-nums">{row.peers}</td>

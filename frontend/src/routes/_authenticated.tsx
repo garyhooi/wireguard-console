@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   IconBan,
+  IconBuilding,
   IconChartBar,
   IconDeviceDesktop,
   IconDots,
@@ -74,6 +75,7 @@ const NAV: NavGroup[] = [
     group: 'Directory',
     items: [
       { label: 'VPN Users', to: '/users', icon: IconUsers },
+      { label: 'Departments', to: '/departments', icon: IconBuilding },
       { label: 'Admins', to: '/admins', icon: IconUserShield },
     ],
   },
