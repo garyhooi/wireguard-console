@@ -284,6 +284,7 @@ func DeleteUser(store *Store) http.HandlerFunc {
 		logAudit(ctx, store, adminID, "user.delete", "user", userID.String(), nil)
 
 		resyncServersOfUser(ctx, store, userID)
+		RequestDomainRuleSync(store)
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
 	}
@@ -334,6 +335,7 @@ func SuspendUser(store *Store) http.HandlerFunc {
 
 		// Drop the user's peers from the kernel interfaces immediately.
 		resyncServersOfUser(ctx, store, userID)
+		RequestDomainRuleSync(store)
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "suspended"})
 	}
@@ -383,6 +385,7 @@ func ResumeUser(store *Store) http.HandlerFunc {
 
 		// Re-add the user's peers to the kernel interfaces.
 		resyncServersOfUser(ctx, store, userID)
+		RequestDomainRuleSync(store)
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "resumed"})
 	}

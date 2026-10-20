@@ -235,6 +235,9 @@ func CreatePeer(store *Store) http.HandlerFunc {
 			sendPeerConfigLinkEmail(ctx, store, req.UserID, req.Name, configLink)
 		}
 
+		// A new peer adds a $client= expansion for user-scoped rules.
+		RequestDomainRuleSync(store)
+
 		writeJSON(w, http.StatusCreated, map[string]string{
 			"status":        "created",
 			"public_key":    req.PublicKey,
@@ -314,6 +317,7 @@ func SuspendPeer(store *Store) http.HandlerFunc {
 		logAudit(ctx, store, adminID, "peer.suspend", "peer", peerID.String(), nil)
 
 		resyncPeerKernel(ctx, store, peerID)
+		RequestDomainRuleSync(store) // drop this peer's $client= rules
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "suspended"})
 	}
@@ -342,6 +346,7 @@ func ResumePeer(store *Store) http.HandlerFunc {
 		logAudit(ctx, store, adminID, "peer.resume", "peer", peerID.String(), nil)
 
 		resyncPeerKernel(ctx, store, peerID)
+		RequestDomainRuleSync(store) // re-add this peer's $client= rules
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "resumed"})
 	}
@@ -371,6 +376,7 @@ func DeletePeer(store *Store) http.HandlerFunc {
 		logAudit(ctx, store, adminID, "peer.remove", "peer", peerID.String(), nil)
 
 		resyncPeerKernel(ctx, store, peerID)
+		RequestDomainRuleSync(store) // drop this peer's $client= rules
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
 	}

@@ -3,97 +3,97 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
-	"os/exec"
-	"strings"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/wireguard-console/backend/internal/adguard"
 	"github.com/wireguard-console/backend/internal/db"
 )
 
-// syncDomainRulesToAdGuard mirrors the full rule set into AdGuard Home.
-// Global rules apply to every client; user rules are scoped with
-// $client=<tunnel-ip>. Also ensures the block mode returns the block-page
-// IP so browsers hit the branded page instead of a dead address.
-func syncDomainRulesToAdGuard(store *Store, rules []db.DomainRule) error {
-	client := adguard.NewClient()
-	ctx := context.Background()
+// Domain-rule sync is a small state machine with three goals:
+//  1. Serialize full-set pushes so concurrent create/delete cannot race and
+//     overwrite a fresher DB snapshot with a stale one.
+//  2. Coalesce event-driven requests (peer/user/server changes) into
+//     single-flight background syncs instead of one HTTP round trip each.
+//  3. Remember the last attempt so the console can show whether AdGuard
+//     really has the rules, instead of optimistically claiming success.
+var (
+	domainSyncMu sync.Mutex // held for the duration of one full sync
 
-	// Credential/reachability check first: surface misconfig instead of
-	// silently doing nothing.
-	if err := client.Ping(ctx); err != nil {
-		return fmt.Errorf("AdGuard unreachable (ADGUARD_URL / ADGUARD_API_PASSWORD): %w", err)
+	domainSyncStateMu sync.Mutex
+	domainSyncLastAt  time.Time
+	domainSyncLastErr string
+
+	domainSyncReq struct {
+		mu      sync.Mutex
+		running bool
+		dirty   bool
 	}
+)
 
-	var adguardRules []string
-
-	for _, rule := range rules {
-		domain := strings.Trim(strings.TrimSpace(rule.Domain), "^")
-		domain = strings.TrimPrefix(strings.TrimPrefix(domain, "||"), "|")
-		domain = strings.TrimPrefix(domain, "https://")
-		domain = strings.TrimPrefix(domain, "http://")
-
-		agRule := fmt.Sprintf("||%s^", domain)
-
-		if rule.Scope == "user" && rule.UserID != nil {
-			// AdGuard identifies clients by source IP: the peer's tunnel IP.
-			rows, err := store.pool.Query(ctx, `
-				SELECT DISTINCT host(p.allowed_ip)
-				FROM peers p
-				JOIN servers s ON s.id = p.server_id
-				WHERE p.user_id = $1 AND p.status = 'active' AND s.status = 'active'
-			`, *rule.UserID)
-			if err == nil {
-				var ips []string
-				for rows.Next() {
-					var ip string
-					if rows.Scan(&ip) == nil {
-						ips = append(ips, strings.Split(ip, "/")[0])
-					}
-				}
-				rows.Close()
-				for _, ip := range ips {
-					adguardRules = append(adguardRules, agRule+"$client="+ip)
-				}
-			}
-		} else {
-			adguardRules = append(adguardRules, agRule)
-		}
+func recordDomainSync(err error) {
+	domainSyncStateMu.Lock()
+	defer domainSyncStateMu.Unlock()
+	domainSyncLastAt = time.Now()
+	domainSyncLastErr = ""
+	if err != nil {
+		domainSyncLastErr = err.Error()
 	}
-
-	if err := client.ReplaceUserRules(ctx, adguardRules); err != nil {
-		return fmt.Errorf("failed to sync rules to AdGuard: %w", err)
-	}
-
-	// Blocked domains resolve to a placeholder IP that serves the block page.
-	blockIP := blockingIP(store)
-	if blockIP != "" {
-		_ = client.EnsureCustomBlockingMode(ctx, blockIP)
-	}
-
-	return nil
 }
 
-// SyncDomainRulesToAdGuard reloads every rule from the database and pushes
-// the full set into AdGuard Home. Domain rules persist in PostgreSQL, but a
-// fresh AdGuard provisioning (e.g. after a server reset / redeploy) writes a
-// clean config with empty user_rules — so this is called at startup to
-// repopulate AdGuard without requiring a rule create/delete to re-trigger a
-// sync. Returns the number of rules pushed. Best-effort at the call site:
-// a failure here means the rules stay in the DB and will re-sync later.
-func SyncDomainRulesToAdGuard(store *Store) (int, error) {
-	ctx := context.Background()
+func lastDomainSync() (time.Time, string) {
+	domainSyncStateMu.Lock()
+	defer domainSyncStateMu.Unlock()
+	return domainSyncLastAt, domainSyncLastErr
+}
 
+// RequestDomainRuleSync asks for an async re-sync of the rule set. Repeated
+// requests while a sync is running are coalesced into one more pass (the DB is
+// re-read at the start of each pass, so the newest rules always win).
+func RequestDomainRuleSync(store *Store) {
+	domainSyncReq.mu.Lock()
+	if domainSyncReq.running {
+		domainSyncReq.dirty = true
+		domainSyncReq.mu.Unlock()
+		return
+	}
+	domainSyncReq.running = true
+	domainSyncReq.mu.Unlock()
+
+	go func() {
+		for {
+			if _, err := SyncDomainRulesToAdGuard(store); err != nil {
+				log.Printf("Domain-rule sync: %v", err)
+			}
+
+			domainSyncReq.mu.Lock()
+			if !domainSyncReq.dirty {
+				domainSyncReq.running = false
+				domainSyncReq.mu.Unlock()
+				return
+			}
+			domainSyncReq.dirty = false
+			domainSyncReq.mu.Unlock()
+		}
+	}()
+}
+
+func loadDomainRules(ctx context.Context, store *Store) ([]db.DomainRule, error) {
 	rows, err := store.pool.Query(ctx, `
 		SELECT id, scope, user_id, domain, created_by, created_at
 		FROM domain_block_rules
 		ORDER BY created_at DESC
 	`)
 	if err != nil {
-		return 0, fmt.Errorf("query domain rules: %w", err)
+		return nil, fmt.Errorf("query domain rules: %w", err)
 	}
 	defer rows.Close()
 
@@ -102,22 +102,129 @@ func SyncDomainRulesToAdGuard(store *Store) (int, error) {
 		var rule db.DomainRule
 		if err := rows.Scan(&rule.ID, &rule.Scope, &rule.UserID, &rule.Domain,
 			&rule.CreatedBy, &rule.CreatedAt); err != nil {
-			return 0, fmt.Errorf("scan domain rule: %w", err)
+			return nil, fmt.Errorf("scan domain rule: %w", err)
 		}
 		rules = append(rules, rule)
 	}
 	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("iterate domain rules: %w", err)
+		return nil, fmt.Errorf("iterate domain rules: %w", err)
 	}
+	return rules, nil
+}
 
-	if err := syncDomainRulesToAdGuard(store, rules); err != nil {
+// SyncDomainRulesToAdGuard reloads every rule from the database, verifies that
+// AdGuard is actually enforcing (filtering + protection on), pushes the full
+// user-rule set and then verifies the result by reading the rules back.
+//
+// It returns the number of DB rule rows (not the expanded per-client rule
+// count). Failures are recorded in the sync state and surfaced by
+// DomainRuleSyncStatus; they are never silently swallowed.
+func SyncDomainRulesToAdGuard(store *Store) (int, error) {
+	domainSyncMu.Lock()
+	defer domainSyncMu.Unlock()
+
+	ctx := context.Background()
+
+	rules, err := loadDomainRules(ctx, store)
+	if err != nil {
+		recordDomainSync(err)
 		return 0, err
 	}
+
+	built, err := buildAdGuardRules(ctx, store, rules)
+	if err != nil {
+		recordDomainSync(err)
+		return len(rules), err
+	}
+
+	client := adguard.NewClient()
+
+	// Reachability/credential check first: surface misconfiguration instead of
+	// silently doing nothing.
+	if err := client.Ping(ctx); err != nil {
+		err = fmt.Errorf("AdGuard unreachable (ADGUARD_URL / ADGUARD_API_PASSWORD): %w", err)
+		recordDomainSync(err)
+		return len(rules), err
+	}
+
+	status := client.GetStatus(ctx)
+	if !status.Reachable {
+		err = fmt.Errorf("AdGuard status: %s", status.Error)
+		recordDomainSync(err)
+		return len(rules), err
+	}
+
+	// A paused protection or disabled filtering means the rules exist but do
+	// nothing. The console owns enforcement, so heal both states; a paused
+	// protection is otherwise invisible on /control/filtering/status.
+	if !status.FilteringEnabled {
+		if err := client.SetFilteringEnabled(ctx, true, status.IntervalHours); err != nil {
+			err = fmt.Errorf("enable AdGuard filtering: %w", err)
+			recordDomainSync(err)
+			return len(rules), err
+		}
+		log.Printf("Domain-rule sync: AdGuard filtering was disabled — re-enabled it")
+	}
+	if !status.ProtectionEnabled {
+		if err := client.SetProtection(ctx, true); err != nil {
+			err = fmt.Errorf("resume AdGuard protection: %w", err)
+			recordDomainSync(err)
+			return len(rules), err
+		}
+		log.Printf("Domain-rule sync: AdGuard protection was paused — resumed it")
+		recordSystemAudit(store, "domain_rules.protection_resume", "AdGuard protection was paused; the console resumed it so domain rules are enforced")
+	}
+
+	// Blocked domains resolve to the branded block-page IP.
+	if blockIP := blockingIP(store); blockIP != "" {
+		if err := client.EnsureCustomBlockingMode(ctx, blockIP); err != nil {
+			// Not fatal for rule enforcement, but record it.
+			log.Printf("Domain-rule sync: blocking mode: %v", err)
+		}
+	}
+
+	if err := client.ReplaceUserRules(ctx, built.AdGuard); err != nil {
+		err = fmt.Errorf("push rules to AdGuard: %w", err)
+		recordDomainSync(err)
+		return len(rules), err
+	}
+
+	// Verify what AdGuard actually stored (it accepts rules asynchronously in
+	// some versions), so "synced" means effective, not just "request accepted".
+	after := client.GetStatus(ctx)
+	if !after.Reachable {
+		err = fmt.Errorf("verify rules: AdGuard unreachable after push: %s", after.Error)
+		recordDomainSync(err)
+		return len(rules), err
+	}
+	missing, unexpected := diffRuleSets(built.AdGuard, after.UserRules)
+	if missing > 0 || unexpected > 0 {
+		err = fmt.Errorf("rule verification failed: %d expected rule(s) missing, %d unexpected in AdGuard", missing, unexpected)
+		recordDomainSync(err)
+		return len(rules), err
+	}
+	if !after.ProtectionEnabled {
+		err = fmt.Errorf("AdGuard protection is still paused after sync")
+		recordDomainSync(err)
+		return len(rules), err
+	}
+
+	recordDomainSync(nil)
 	return len(rules), nil
 }
 
-// blockingIP returns the address the console serves the branded block page
-// on (the tunnel gateway), or "" when no local server exists.
+// recordSystemAudit writes an audit row for an action performed by the console
+// itself (no admin actor).
+func recordSystemAudit(store *Store, action, detail string) {
+	if _, err := store.pool.Exec(context.Background(), `
+		INSERT INTO audit_logs (action, target_type, target_id) VALUES ($1, 'adguard', '')
+	`, action); err != nil {
+		log.Printf("audit %s: %v", action, err)
+	}
+}
+
+// blockingIP returns the address the console serves the branded block page on
+// (the tunnel gateway), or "" when no local server exists.
 func blockingIP(store *Store) string {
 	var ip string
 	err := store.pool.QueryRow(context.Background(), `
@@ -182,42 +289,68 @@ func CreateDomainRule(store *Store) http.HandlerFunc {
 			return
 		}
 
+		if req.Scope != "global" && req.Scope != "user" {
+			writeError(w, http.StatusBadRequest, "Scope must be global or user")
+			return
+		}
+		if req.Scope == "user" && req.UserID == nil {
+			writeError(w, http.StatusBadRequest, "A user is required for user-scoped rules")
+			return
+		}
+		if req.Scope == "global" {
+			req.UserID = nil
+		}
+
+		domain, err := normalizeDomain(req.Domain)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
 		ctx := context.Background()
 		adminID := getAdminID(r)
 
-		_, err := store.pool.Exec(ctx, `
+		// Dedupe deliberately (the DB has a unique index too, but a clear 409
+		// is nicer than a constraint-violation error).
+		var exists bool
+		err = store.pool.QueryRow(ctx, `
+			SELECT true FROM domain_block_rules
+			WHERE scope = $1
+			  AND COALESCE(user_id, '00000000-0000-0000-0000-000000000000'::uuid)
+			    = COALESCE($2::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
+			  AND domain = $3
+			LIMIT 1
+		`, req.Scope, req.UserID, domain).Scan(&exists)
+		if err == nil {
+			writeError(w, http.StatusConflict, fmt.Sprintf("%s is already blocked for this scope", domain))
+			return
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusInternalServerError, "Failed to check existing rules")
+			return
+		}
+
+		_, err = store.pool.Exec(ctx, `
 			INSERT INTO domain_block_rules (scope, user_id, domain, created_by)
 			VALUES ($1, $2, $3, $4)
-		`, req.Scope, req.UserID, req.Domain, adminID)
-
+		`, req.Scope, req.UserID, domain, adminID)
 		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+				writeError(w, http.StatusConflict, fmt.Sprintf("%s is already blocked for this scope", domain))
+				return
+			}
 			writeError(w, http.StatusInternalServerError, "Failed to create domain rule")
 			return
 		}
 
-		// Sync to AdGuard
-		rows, err := store.pool.Query(ctx, `
-			SELECT id, scope, user_id, domain, created_by, created_at
-			FROM domain_block_rules
-			ORDER BY created_at DESC
-		`)
-		if err == nil {
-			var allRules []db.DomainRule
-			for rows.Next() {
-				var rule db.DomainRule
-				if err := rows.Scan(&rule.ID, &rule.Scope, &rule.UserID, &rule.Domain, &rule.CreatedBy, &rule.CreatedAt); err == nil {
-					allRules = append(allRules, rule)
-				}
-			}
-			rows.Close()
-			if err := syncDomainRulesToAdGuard(store, allRules); err != nil {
-				log.Printf("Failed to sync domain rules to AdGuard: %v", err)
-			}
-		}
-
 		logAudit(ctx, store, adminID, "domain_rule.create", "domain_rule", "", nil)
 
-		writeJSON(w, http.StatusCreated, map[string]string{"status": "created"})
+		// Push asynchronously (coalesced) so the API stays fast when AdGuard is
+		// slow/unreachable; the status endpoint reports sync failures.
+		RequestDomainRuleSync(store)
+
+		writeJSON(w, http.StatusCreated, map[string]string{"status": "created", "domain": domain})
 	}
 }
 
@@ -232,139 +365,149 @@ func DeleteDomainRule(store *Store) http.HandlerFunc {
 		ctx := context.Background()
 		adminID := getAdminID(r)
 
-		_, err = store.pool.Exec(ctx, `
-			DELETE FROM domain_block_rules WHERE id = $1
-		`, ruleID)
-
+		_, err = store.pool.Exec(ctx, `DELETE FROM domain_block_rules WHERE id = $1`, ruleID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to delete domain rule")
 			return
 		}
 
-		// Sync to AdGuard
-		rows, err := store.pool.Query(ctx, `
-			SELECT id, scope, user_id, domain, created_by, created_at
-			FROM domain_block_rules
-			ORDER BY created_at DESC
-		`)
-		if err == nil {
-			var allRules []db.DomainRule
-			for rows.Next() {
-				var rule db.DomainRule
-				if err := rows.Scan(&rule.ID, &rule.Scope, &rule.UserID, &rule.Domain, &rule.CreatedBy, &rule.CreatedAt); err == nil {
-					allRules = append(allRules, rule)
-				}
-			}
-			rows.Close()
-			if err := syncDomainRulesToAdGuard(store, allRules); err != nil {
-				log.Printf("Failed to sync domain rules to AdGuard: %v", err)
-			}
-		}
-
 		logAudit(ctx, store, adminID, "domain_rule.delete", "domain_rule", ruleID.String(), nil)
+		RequestDomainRuleSync(store)
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 	}
 }
 
 // DomainRuleSyncStatus returns what AdGuard Home actually has right now, so
-// the UI can show "synced / unreachable / mismatch" instead of a silent
-// failure. Combines the DB rule set with AGH's live filtering state.
+// the UI can show "synced / paused / unreachable / mismatch" instead of a
+// silent failure. Combines the DB rule set (expanded per peer IP) with AGH's
+// live filtering/protection state and the last sync result.
 func DomainRuleSyncStatus(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := context.Background()
 
-		// Rules the console wants AdGuard to have.
-		var dbRules []string
-		rows, err := store.pool.Query(ctx, `
-			SELECT scope, user_id, domain FROM domain_block_rules ORDER BY created_at
-		`)
-		if err == nil {
-			for rows.Next() {
-				var scope string
-				var userID *uuid.UUID
-				var domain string
-				if rows.Scan(&scope, &userID, &domain) == nil {
-					d := strings.Trim(strings.TrimSpace(domain), "^")
-					d = strings.TrimPrefix(strings.TrimPrefix(d, "||"), "|")
-					d = strings.TrimPrefix(d, "https://")
-					d = strings.TrimPrefix(d, "http://")
-					dbRules = append(dbRules, "||"+d+"^")
-				}
-			}
-			rows.Close()
+		rules, err := loadDomainRules(ctx, store)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to query domain rules")
+			return
+		}
+		built, err := buildAdGuardRules(ctx, store, rules)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to expand domain rules")
+			return
 		}
 
 		client := adguard.NewClient()
 		ag := client.GetStatus(ctx)
 
-		// Compare expected (DB) vs actual (AGH) — but user-scoped rules get
-		// expanded per-peer in AGH ($client=), so only report a mismatch when
-		// AGH has NONE of our global rules while the DB has some.
-		missing := 0
-		if ag.Reachable && len(dbRules) > 0 {
-			have := map[string]bool{}
-			for _, ur := range ag.UserRules {
-				// Strip any $client=... suffix for comparison.
-				if i := strings.IndexByte(ur, '$'); i >= 0 {
-					ur = ur[:i]
-				}
-				have[ur] = true
+		missing, unexpected := 0, 0
+		if ag.Reachable {
+			missing, unexpected = diffRuleSets(built.AdGuard, ag.UserRules)
+		}
+
+		lastAt, lastErr := lastDomainSync()
+		resp := map[string]interface{}{
+			"reachable":                    ag.Reachable,
+			"error":                        ag.Error,
+			"filtering_enabled":            ag.FilteringEnabled,
+			"protection_enabled":           ag.ProtectionEnabled,
+			"protection_on":                ag.ProtectionEnabled, // backward-compatible alias for the UI
+			"protection_disabled_duration": ag.ProtectionDisabledDuration,
+			"blocking_mode":                ag.BlockMode,
+			"blocking_ipv4":                ag.BlockIPv4,
+			"expected_rules":               len(built.AdGuard),
+			"actual_rules":                 len(ag.UserRules),
+			"missing_rules":                missing,
+			"unexpected_rules":             unexpected,
+			"invalid_rules":                len(built.Invalid),
+			"unexpanded_rules":             len(built.Unexpanded),
+			"db_rules":                     built.AdGuard,
+			"ag_rules":                     ag.UserRules,
+			"block_page_ip":                blockingIP(store),
+		}
+		if !lastAt.IsZero() {
+			resp["last_sync_at"] = lastAt.UTC().Format(time.RFC3339)
+		}
+		if lastErr != "" {
+			resp["last_sync_error"] = lastErr
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+// CheckDomainRule asks AdGuard whether a domain is blocked right now (and, for
+// user-scoped test, for a specific user's peer IP). Read-only diagnostics.
+func CheckDomainRule(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		raw := r.URL.Query().Get("domain")
+		domain, err := normalizeDomain(raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		ctx := context.Background()
+		clientIP := ""
+		if uidRaw := r.URL.Query().Get("user_id"); uidRaw != "" {
+			uid, err := uuid.Parse(uidRaw)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "Invalid user ID")
+				return
 			}
-			for _, want := range dbRules {
-				if !have[want] {
-					missing++
-				}
+			ips, err := userPeerIPs(ctx, store, uid)
+			if err == nil && len(ips) > 0 {
+				clientIP = ips[0]
 			}
 		}
 
+		client := adguard.NewClient()
+		status := client.GetStatus(ctx)
+		res, err := client.CheckHost(ctx, domain, clientIP, r.URL.Query().Get("qtype"))
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"domain":             domain,
+				"blocked":            false,
+				"reachable":          false,
+				"error":              err.Error(),
+				"protection_enabled": status.ProtectionEnabled,
+				"filtering_enabled":  status.FilteringEnabled,
+			})
+			return
+		}
+
+		rules := make([]map[string]interface{}, 0, len(res.Rules))
+		for _, rule := range res.Rules {
+			rules = append(rules, map[string]interface{}{
+				"text":           rule.Text,
+				"filter_list_id": rule.FilterListID,
+			})
+		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"reachable":      ag.Reachable,
-			"error":          ag.Error,
-			"protection_on":  ag.ProtEnabled,
-			"blocking_mode":  ag.BlockMode,
-			"blocking_ipv4":  ag.BlockIPv4,
-			"db_rules":       dbRules,
-			"ag_rules":       ag.UserRules,
-			"expected_rules": len(dbRules),
-			"missing_rules":  missing,
-			"block_page_ip":  blockingIP(store),
+			"domain":             domain,
+			"blocked":            res.Blocked(),
+			"reachable":          true,
+			"reason":             res.Reason,
+			"rule":               res.Rule,
+			"rules":              rules,
+			"canonical_name":     res.CanonName,
+			"ip_addrs":           res.IPList,
+			"protection_enabled": status.ProtectionEnabled,
+			"filtering_enabled":  status.FilteringEnabled,
 		})
 	}
 }
 
-func ApplyNFTablesRules() error {
-	// Get the WireGuard interface name and subnet
-	_ = "wg0"
-	subnet := "10.10.0.0/24"
-	dnsServer := "10.10.0.1" // AdGuard Home IP
-
-	// Flush existing rules for our chain
-	cmd := exec.Command("nft", "flush", "chain", "inet", "fw", "wg-dns")
-	if err := cmd.Run(); err != nil {
-		// Chain might not exist yet, that's ok
-	}
-
-	// Create chain if it doesn't exist
-	cmd = exec.Command("nft", "add", "chain", "inet", "fw", "wg-dns")
-	cmd.Run()
-
-	// Add rules to redirect DNS traffic from WG subnet to AdGuard Home
-	rules := fmt.Sprintf(`
-		table inet fw {
-			chain wg-dns {
-				ip saddr %s tcp dport 53 ip daddr %s accept
-				ip saddr %s udp dport 53 ip daddr %s accept
-				ip saddr %s counter drop
-			}
+// ResyncDomainRules forces a full sync now (the "Resync now" button).
+func ResyncDomainRules(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		n, err := SyncDomainRulesToAdGuard(store)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to sync rules: %v", err))
+			return
 		}
-	`, subnet, dnsServer, subnet, dnsServer, subnet)
-
-	cmd = exec.Command("nft", "-f", "/dev/stdin")
-	cmd.Stdin = strings.NewReader(rules)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to apply nftables rules: %w", err)
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"status": "synced",
+			"rules":  n,
+		})
 	}
-
-	return nil
 }

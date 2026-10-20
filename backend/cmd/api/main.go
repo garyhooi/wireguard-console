@@ -86,7 +86,9 @@ func main() {
 	go worker.NewMailWorker(conn.Pool()).Start(ctx)
 	// Reconcile DB rules into AdGuard periodically so rules can't silently
 	// drift (AGH re-provision, manual AGH edits, partial failed syncs).
-	go worker.NewDomainRuleWorker(conn.Pool(), 5*time.Minute).Start(ctx)
+	// 60s backstop: catches failed event-driven syncs, AdGuard restarts and
+	// rule/peer changes within a minute instead of five.
+	go worker.NewDomainRuleWorker(conn.Pool(), time.Minute).Start(ctx)
 	// Re-apply locally-managed WireGuard interfaces after host reboots (the
 	// kernel interface + NAT are lost on reboot; wg-helper is passive in
 	// local mode, so this worker restores them — fast at boot, then slow).
@@ -175,6 +177,8 @@ func main() {
 				// Live Go runtime counters (goroutines / heap / fds) for leak
 				// triage. super_admin only; pprof is on the loopback listener.
 				r.Get("/debug/runtime", api.RuntimeStats(store))
+				// Force an immediate full rule sync (super_admin only).
+				r.Post("/domain-rules/sync", api.ResyncDomainRules(store))
 			})
 
 			// User and peer management - admin and super_admin
@@ -238,6 +242,9 @@ func main() {
 				r.Post("/domain-rules", api.CreateDomainRule(store))
 				r.Delete("/domain-rules/{id}", api.DeleteDomainRule(store))
 				r.Get("/domain-rules/status", api.DomainRuleSyncStatus(store))
+				// Is this domain actually blocked right now? Proxies AdGuard's
+				// check_host (read-only diagnostics).
+				r.Get("/domain-rules/check", api.CheckDomainRule(store))
 
 				// Web activity (per-peer DNS browsing history). Records are
 				// imported from AdGuard Home by the browse worker.

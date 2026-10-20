@@ -210,6 +210,9 @@ func CreateServer(store *Store) http.HandlerFunc {
 			warning = "assigned to node — the node agent will apply it on its next poll"
 		}
 
+		// The block-page IP / CIDR may have changed.
+		RequestDomainRuleSync(store)
+
 		writeJSON(w, http.StatusCreated, map[string]string{
 			"status":        "created",
 			"managed_mode":  req.ManagedMode,
@@ -264,6 +267,7 @@ func UpdateServer(store *Store) http.HandlerFunc {
 		}
 
 		logAudit(ctx, store, adminID, "server.update", "server", serverID.String(), nil)
+		RequestDomainRuleSync(store) // CIDR/block-page IP may have changed
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 	}
@@ -324,6 +328,7 @@ func DeleteServer(store *Store) http.HandlerFunc {
 		}
 
 		logAudit(ctx, store, adminID, "server.delete", "server", serverID.String(), nil)
+		RequestDomainRuleSync(store) // active peers/block-page IP changed
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 	}
