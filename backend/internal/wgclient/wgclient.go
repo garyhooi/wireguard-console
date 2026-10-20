@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -57,15 +58,45 @@ func get(socket, path string) (*http.Response, error) {
 	return request("GET", socket, path, nil)
 }
 
-func request(method, socket, path string, body io.Reader) (*http.Response, error) {
-	client := &http.Client{
+// helperClients caches one HTTP client per wg-helper socket path. A client
+// (and its Transport) must never be created per request: when the response
+// body is closed, net/http parks the keep-alive connection in the transport's
+// idle pool; a zero-value Transport has IdleConnTimeout == 0 (nothing ever
+// reaps it) and nothing calls CloseIdleConnections, so the connection, its
+// readLoop/writeLoop goroutines and buffers leaked on every call. Reusing one
+// client with keep-alive disabled keeps this channel leak-free.
+var (
+	helperClientsMu sync.Mutex
+	helperClients   = map[string]*http.Client{}
+)
+
+// helperClient returns the process-wide HTTP client for a wg-helper socket.
+func helperClient(socket string) *http.Client {
+	helperClientsMu.Lock()
+	defer helperClientsMu.Unlock()
+
+	if c, ok := helperClients[socket]; ok {
+		return c
+	}
+	c := &http.Client{
 		Timeout: 15 * time.Second,
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				return (&net.Dialer{}).DialContext(ctx, "unix", socket)
 			},
+			// The helper is a local unix socket hit a few times a minute;
+			// connection reuse buys nothing, and an idle pooled connection is
+			// exactly what leaked when the transport was per-call.
+			DisableKeepAlives:     true,
+			IdleConnTimeout:       90 * time.Second, // belt-and-braces if keep-alive is ever re-enabled
+			ResponseHeaderTimeout: 10 * time.Second,
 		},
 	}
+	helperClients[socket] = c
+	return c
+}
+
+func request(method, socket, path string, body io.Reader) (*http.Response, error) {
 	req, err := http.NewRequest(method, "http://wg-helper"+path, body)
 	if err != nil {
 		return nil, err
@@ -73,7 +104,7 @@ func request(method, socket, path string, body io.Reader) (*http.Response, error
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	return client.Do(req)
+	return helperClient(socket).Do(req)
 }
 
 // Apply pushes a server's full desired state to wg-helper.
