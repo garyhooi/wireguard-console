@@ -3,6 +3,7 @@ package server
 import (
 	"net"
 	"net/http"
+	"time"
 )
 
 type Server struct {
@@ -15,7 +16,11 @@ func New(handler http.Handler) *Server {
 
 func (s *Server) Serve(listener net.Listener) error {
 	srv := &http.Server{
-		Handler: s.handler,
+		Handler:           s.handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second, // /apply runs a handful of wg/iptables commands
+		IdleTimeout:       30 * time.Second,
 	}
 	return srv.Serve(listener)
 }
