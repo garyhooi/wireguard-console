@@ -648,9 +648,14 @@ DANGLING_BEFORE="$(docker image ls -q -f dangling=true 2>/dev/null | wc -l | tr 
 if docker image prune -f >/dev/null 2>&1; then
   [[ "${DANGLING_BEFORE}" != "0" ]] && info "Pruned ${DANGLING_BEFORE} dangling image(s) from earlier builds."
 fi
-# Keep two weeks of BuildKit cache (fast rebuilds) and drop anything older so
-# the builder cache cannot grow unbounded across many updates.
-docker builder prune -f --filter until=336h >/dev/null 2>&1 || true
+# Bound the BuildKit cache by SIZE so repeated updates can neither grow it
+# without limit nor keep old layers around: this reclaims immediately on a
+# host whose cache has already ballooned, while keeping recent layers for
+# fast rebuilds. --keep-storage needs Docker 23+; older engines fall back to
+# an age filter.
+if ! docker builder prune -f --keep-storage 2GB >/dev/null 2>&1; then
+  docker builder prune -f --filter until=336h >/dev/null 2>&1 || true
+fi
 
 # ---------------------------------------------------------------------------
 # 10b. AdGuard Home. On a first install this writes AdGuardHome.yaml directly
