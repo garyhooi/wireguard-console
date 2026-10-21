@@ -59,6 +59,11 @@ const ipGroups = [
   },
 ]
 
+const departments = [
+  { id: 'd1', name: 'Engineering', user_count: 4, created_at: '2026-01-01T00:00:00Z' },
+  { id: 'd2', name: 'Sales', user_count: 0, created_at: '2026-01-02T00:00:00Z' },
+]
+
 const status = {
   enabled: true,
   rules_total: 2,
@@ -82,6 +87,7 @@ describe('IPBlockingPage', () => {
         if (url.includes('/api/ip-rules/status')) {
           return jsonRes(status)
         }
+        if (url === '/api/departments') return jsonRes(departments)
         if (url === '/api/ip-groups') return jsonRes([])
         if (url === '/api/ip-rules') {
           return jsonRes(rules)
@@ -132,6 +138,7 @@ describe('IPBlockingPage', () => {
           201,
         )
       }
+      if (url === '/api/departments') return jsonRes(departments)
       if (url === '/api/ip-groups') return jsonRes([])
       if (url.includes('/api/ip-rules/status')) return jsonRes(status)
       if (url === '/api/ip-rules') return jsonRes([])
@@ -165,6 +172,7 @@ describe('IPBlockingPage', () => {
       if (url === '/api/ip-rules' && init?.method === 'POST') {
         return errRes('invalid CIDR: default routes are not allowed', 400)
       }
+      if (url === '/api/departments') return jsonRes(departments)
       if (url === '/api/ip-groups') return jsonRes([])
       if (url.includes('/api/ip-rules/status')) return jsonRes(status)
       if (url === '/api/ip-rules') return jsonRes([])
@@ -191,6 +199,7 @@ describe('IPBlockingPage', () => {
     let listCalls = 0
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       if (init?.method === 'DELETE') return jsonRes({ status: 'deleted' })
+      if (url === '/api/departments') return jsonRes(departments)
       if (url === '/api/ip-groups') return jsonRes([])
       if (url.includes('/api/ip-rules/status')) return jsonRes(status)
       if (url === '/api/ip-rules') {
@@ -219,6 +228,7 @@ describe('IPBlockingPage', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (url: string) => {
+        if (url === '/api/departments') return jsonRes(departments)
         if (url === '/api/ip-groups') return jsonRes([])
         if (url.includes('/api/ip-rules/status')) return jsonRes({ ...status, enabled: false })
         if (url === '/api/ip-rules') return jsonRes(rules)
@@ -245,6 +255,7 @@ describe('IPBlockingPage', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (url: string) => {
+        if (url === '/api/departments') return jsonRes(departments)
         if (url === '/api/ip-groups') return jsonRes(ipGroups)
         if (url.includes('/api/ip-rules/status')) return jsonRes(status)
         if (url === '/api/ip-rules') return jsonRes([...rules, groupRule])
@@ -286,6 +297,7 @@ describe('IPBlockingPage', () => {
           201,
         )
       }
+      if (url === '/api/departments') return jsonRes(departments)
       if (url === '/api/ip-groups') return jsonRes([])
       if (url.includes('/api/ip-rules/status')) return jsonRes(status)
       if (url === '/api/ip-rules') return jsonRes([])
@@ -340,6 +352,7 @@ describe('IPBlockingPage', () => {
           201,
         )
       }
+      if (url === '/api/departments') return jsonRes(departments)
       if (url === '/api/ip-groups') return jsonRes(singleGroup)
       if (url.includes('/api/ip-rules/status')) return jsonRes(status)
       if (url === '/api/ip-rules') return jsonRes([])
@@ -372,6 +385,69 @@ describe('IPBlockingPage', () => {
       expect(JSON.parse(String(call![1]?.body))).toEqual({
         scope: 'global',
         group_id: 'g1',
+      })
+    })
+  })
+
+  it('adds a rule for a department scope by sending department_id only', async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === '/api/ip-rules' && init?.method === 'POST') {
+        return jsonRes(
+          {
+            id: 'r-new',
+            scope: 'department',
+            department_id: 'd1',
+            department_name: 'Engineering',
+            user_id: null,
+            user_email: '',
+            user_full_name: '',
+            cidr: '203.0.113.0/24',
+            note: '',
+            created_at: '',
+          },
+          201,
+        )
+      }
+      if (url === '/api/departments') return jsonRes(departments)
+      if (url === '/api/ip-groups') return jsonRes([])
+      if (url.includes('/api/ip-rules/status')) return jsonRes(status)
+      if (url === '/api/ip-rules') return jsonRes([])
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderWithClient(<IPBlockingPage />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Add IP rule' }))
+    const dialog = await screen.findByRole('dialog')
+
+    // Department scope swaps the user picker for the department picker.
+    fireEvent.change(within(dialog).getByLabelText('Scope'), {
+      target: { value: 'department' },
+    })
+    expect(within(dialog).queryByLabelText('User')).toBeNull()
+    const departmentSelect = within(dialog).getByLabelText('Department')
+    await waitFor(() =>
+      expect(
+        within(departmentSelect).getByRole('option', { name: /Engineering/ }),
+      ).toBeTruthy(),
+    )
+    fireEvent.change(departmentSelect, { target: { value: 'd1' } })
+    fireEvent.change(within(dialog).getByLabelText('IP address or CIDR'), {
+      target: { value: '203.0.113.0/24' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add rule' }))
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(
+        ([url, init]) => url === '/api/ip-rules' && init?.method === 'POST',
+      )
+      expect(call).toBeTruthy()
+      // Exactly one of user_id / department_id: department rules never send user_id.
+      expect(JSON.parse(String(call![1]?.body))).toEqual({
+        scope: 'department',
+        department_id: 'd1',
+        cidr: '203.0.113.0/24',
+        note: '',
       })
     })
   })

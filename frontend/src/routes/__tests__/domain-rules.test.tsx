@@ -52,6 +52,11 @@ const rules = [
   },
 ]
 
+const departments = [
+  { id: 'd1', name: 'Engineering', user_count: 4, created_at: '2026-01-01T00:00:00Z' },
+  { id: 'd2', name: 'Sales', user_count: 0, created_at: '2026-01-02T00:00:00Z' },
+]
+
 const status = {
   reachable: true,
   protection_on: true,
@@ -74,6 +79,7 @@ describe('DomainRulesPage', () => {
         if (url.includes('/api/domain-rules/status')) {
           return { ok: true, status: 200, json: async () => status } as Response
         }
+        if (url.includes('/api/departments')) return jsonRes(departments)
         if (url.includes('/api/domain-groups')) {
           return { ok: true, status: 200, json: async () => [] } as Response
         }
@@ -124,6 +130,7 @@ describe('DomainRulesPage', () => {
             }),
           } as Response
         }
+        if (url.includes('/api/departments')) return jsonRes(departments)
         if (url.includes('/api/domain-groups')) {
           return { ok: true, status: 200, json: async () => [] } as Response
         }
@@ -204,6 +211,7 @@ describe('DomainRulesPage', () => {
         if (url.includes('/api/domain-rules/status')) {
           return { ok: true, status: 200, json: async () => status } as Response
         }
+        if (url.includes('/api/departments')) return jsonRes(departments)
         if (url.includes('/api/domain-groups')) {
           return { ok: true, status: 200, json: async () => [] } as Response
         }
@@ -254,6 +262,7 @@ describe('DomainRulesPage', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (url: string) => {
+        if (url.includes('/api/departments')) return jsonRes(departments)
         if (url.includes('/api/domain-groups')) return jsonRes(groups)
         if (url.includes('/api/domain-rules/status')) return jsonRes(status)
         if (url.includes('/api/domain-rules')) return jsonRes([...rules, groupRule])
@@ -296,6 +305,7 @@ describe('DomainRulesPage', () => {
           201,
         )
       }
+      if (url.includes('/api/departments')) return jsonRes(departments)
       if (url.includes('/api/domain-groups')) return jsonRes([])
       if (url.includes('/api/domain-rules/status')) return jsonRes(status)
       if (url.includes('/api/domain-rules')) return jsonRes(rules)
@@ -374,6 +384,52 @@ describe('DomainRulesPage', () => {
       expect(JSON.parse(String(call![1]?.body))).toEqual({
         scope: 'global',
         group_id: 'g1',
+      })
+    })
+  })
+
+  it('adds a rule for a department scope by sending department_id only', async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === '/api/domain-rules' && init?.method === 'POST') return jsonRes({}, 201)
+      if (url.includes('/api/departments')) return jsonRes(departments)
+      if (url.includes('/api/domain-groups')) return jsonRes([])
+      if (url.includes('/api/domain-rules/status')) return jsonRes(status)
+      if (url.includes('/api/domain-rules')) return jsonRes([])
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderWithClient(<DomainRulesPage />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Add Rule' }))
+    const dialog = await screen.findByRole('dialog')
+
+    // Department scope swaps the user picker for the department picker.
+    fireEvent.change(within(dialog).getByLabelText('Scope'), {
+      target: { value: 'department' },
+    })
+    expect(within(dialog).queryByLabelText('User')).toBeNull()
+    const departmentSelect = within(dialog).getByLabelText('Department')
+    await waitFor(() =>
+      expect(
+        within(departmentSelect).getByRole('option', { name: /Engineering/ }),
+      ).toBeTruthy(),
+    )
+    fireEvent.change(departmentSelect, { target: { value: 'd1' } })
+    fireEvent.change(within(dialog).getByLabelText('Domain'), {
+      target: { value: 'ads.example' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add Rule' }))
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(
+        ([url, init]) => url === '/api/domain-rules' && init?.method === 'POST',
+      )
+      expect(call).toBeTruthy()
+      // Exactly one of user_id / department_id: department rules never send user_id.
+      expect(JSON.parse(String(call![1]?.body))).toEqual({
+        scope: 'department',
+        department_id: 'd1',
+        domain: 'ads.example',
       })
     })
   })

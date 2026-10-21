@@ -31,14 +31,19 @@ import {
   toolbarTab,
 } from '../../lib/ui'
 
+type RuleScope = 'global' | 'user' | 'department'
+
 interface DomainRule {
   id: string
-  scope: 'global' | 'user'
+  scope: RuleScope
   user_id: string | null
   user_email?: string
   user_full_name?: string
   /** Joined department name (newer backends); absorbs into the user label. */
   user_department_name?: string
+  /** Set for department-scoped rules. */
+  department_id?: string | null
+  department_name?: string
   domain: string
   /** Set for group-targeted rules: domain is "" and group_name is filled. */
   group_id?: string | null
@@ -53,6 +58,13 @@ interface DomainGroup {
   domains: string[]
   domain_count: number
   rule_count: number
+  created_at: string
+}
+
+interface Department {
+  id: string
+  name: string
+  user_count: number
   created_at: string
 }
 
@@ -269,7 +281,8 @@ export const Route = createFileRoute('/_authenticated/domain-rules')({
 
 export function DomainRulesPage() {
   const [showAddModal, setShowAddModal] = useState(false)
-  const [scope, setScope] = useState<'global' | 'user'>('global')
+  const [scope, setScope] = useState<RuleScope>('global')
+  const [departmentId, setDepartmentId] = useState('')
   const [target, setTarget] = useState<'domain' | 'group'>('domain')
   const [domain, setDomain] = useState('')
   const [groupId, setGroupId] = useState('')
@@ -346,10 +359,26 @@ export function DomainRulesPage() {
     enabled: scope === 'user',
   })
 
+  // Departments are loaded for the scope picker and as a fallback label for
+  // department rows when an older API response omits department_name.
+  const { data: departmentsData } = useQuery<Department[]>({
+    queryKey: ['departments'],
+    queryFn: async () => {
+      return apiJson<Department[]>('/api/departments')
+    },
+  })
+  const departments = Array.isArray(departmentsData) ? departmentsData : []
+  const departmentById = new Map(departments.map((department) => [department.id, department]))
+  const departmentLabel = (rule: DomainRule) =>
+    rule.department_name ||
+    (rule.department_id ? departmentById.get(rule.department_id)?.name : '') ||
+    '—'
+
   const addMutation = useMutation({
     mutationFn: async (data: {
-      scope: string
+      scope: RuleScope
       user_id?: string
+      department_id?: string
       domain?: string
       group_id?: string
     }) => {
@@ -361,6 +390,7 @@ export function DomainRulesPage() {
       setGroupId('')
       setTarget('domain')
       setUserId('')
+      setDepartmentId('')
       refetch()
       refetchGroups()
       refetchStatus()
@@ -448,12 +478,21 @@ export function DomainRulesPage() {
 
   const handleAdd = (e: React.FormEvent) => {
     e.preventDefault()
-    // The API accepts exactly one of domain / group_id.
-    const data: { scope: string; user_id?: string; domain?: string; group_id?: string } = {
-      scope,
-    }
+    // Exactly one of user_id / department_id, matching the selected scope, and
+    // exactly one of domain / group_id.
+    const data: {
+      scope: RuleScope
+      user_id?: string
+      department_id?: string
+      domain?: string
+      group_id?: string
+    } = { scope }
     if (scope === 'user' && userId) {
       data.user_id = userId
+    }
+    if (scope === 'department') {
+      if (!departmentId) return
+      data.department_id = departmentId
     }
     if (target === 'group') {
       if (!groupId) return
@@ -660,10 +699,16 @@ export function DomainRulesPage() {
               id="scope"
               className={inputCls}
               value={scope}
-              onChange={(e) => setScope(e.target.value as 'global' | 'user')}
+              onChange={(e) => {
+                setScope(e.target.value as RuleScope)
+                setUserId('')
+                setDepartmentId('')
+                addMutation.reset()
+              }}
             >
               <option value="global">Global (all users)</option>
-              <option value="user">User-specific</option>
+              <option value="user">Specific user</option>
+              <option value="department">Department</option>
             </select>
           </div>
 
@@ -676,7 +721,10 @@ export function DomainRulesPage() {
                 id="userId"
                 className={inputCls}
                 value={userId}
-                onChange={(e) => setUserId(e.target.value)}
+                onChange={(e) => {
+                  setUserId(e.target.value)
+                  addMutation.reset()
+                }}
               >
                 <option value="">Select a user</option>
                 {users?.map((user) => (
@@ -685,6 +733,36 @@ export function DomainRulesPage() {
                   </option>
                 ))}
               </select>
+            </div>
+          )}
+
+          {scope === 'department' && (
+            <div>
+              <label htmlFor="departmentId" className={labelCls}>
+                Department
+              </label>
+              <select
+                id="departmentId"
+                className={inputCls}
+                value={departmentId}
+                onChange={(e) => {
+                  setDepartmentId(e.target.value)
+                  addMutation.reset()
+                }}
+              >
+                <option value="">Select a department</option>
+                {departments.map((department) => (
+                  <option key={department.id} value={department.id}>
+                    {department.name} ({department.user_count} user
+                    {department.user_count === 1 ? '' : 's'})
+                  </option>
+                ))}
+              </select>
+              {departments.length === 0 && (
+                <p className="mt-1 text-xs text-zinc-500">
+                  No departments yet — create one on the Departments page.
+                </p>
+              )}
             </div>
           )}
 
@@ -772,7 +850,10 @@ export function DomainRulesPage() {
             <PrimaryButton
               type="submit"
               disabled={
-                addMutation.isPending || (target === 'group' ? !groupId : !domain)
+                addMutation.isPending ||
+                (target === 'group' ? !groupId : !domain) ||
+                (scope === 'user' && !userId) ||
+                (scope === 'department' && !departmentId)
               }
             >
               {addMutation.isPending ? 'Adding…' : 'Add Rule'}
@@ -1114,15 +1195,30 @@ export function DomainRulesPage() {
                         )}
                       </td>
                       <td className="px-5 py-3.5 whitespace-nowrap">
-                        <Badge tone={rule.scope === 'global' ? 'accent' : 'info'}>
+                        <Badge
+                          tone={
+                            rule.scope === 'global'
+                              ? 'accent'
+                              : rule.scope === 'user'
+                                ? 'info'
+                                : 'neutral'
+                          }
+                        >
                           {rule.scope}
                         </Badge>
                       </td>
                       <td className={tdCls}>
-                        {userLabel(
-                          rule.user_full_name,
-                          rule.user_email,
-                          rule.user_department_name,
+                        {rule.scope === 'department' ? (
+                          <span className="inline-flex flex-wrap items-center gap-1.5">
+                            <span className="text-xs text-zinc-500">Dept:</span>
+                            <span className="text-zinc-300">{departmentLabel(rule)}</span>
+                          </span>
+                        ) : (
+                          userLabel(
+                            rule.user_full_name,
+                            rule.user_email,
+                            rule.user_department_name,
+                          )
                         )}
                       </td>
                       <td className={tdCls}>{fmtDate(rule.created_at)}</td>

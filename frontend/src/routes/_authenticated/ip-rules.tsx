@@ -24,14 +24,19 @@ import {
   labelCls,
 } from '../../lib/ui'
 
+type RuleScope = 'global' | 'user' | 'department'
+
 interface IPRule {
   id: string
-  scope: 'global' | 'user'
+  scope: RuleScope
   user_id: string | null
   user_email: string
   user_full_name: string
   /** Joined department name (newer backends); absorbs into the user label. */
   user_department_name?: string
+  /** Set for department-scoped rules. */
+  department_id?: string | null
+  department_name?: string
   cidr: string
   note: string
   /** Set for group-targeted rules: cidr is "" and group_name is filled. */
@@ -46,6 +51,13 @@ interface IPGroup {
   cidrs: string[]
   range_count: number
   rule_count: number
+  created_at: string
+}
+
+interface Department {
+  id: string
+  name: string
+  user_count: number
   created_at: string
 }
 
@@ -165,9 +177,10 @@ export const Route = createFileRoute('/_authenticated/ip-rules')({
 
 export function IPBlockingPage() {
   const [showAddModal, setShowAddModal] = useState(false)
-  const [scope, setScope] = useState<'global' | 'user'>('global')
+  const [scope, setScope] = useState<RuleScope>('global')
   const [target, setTarget] = useState<'cidr' | 'group'>('cidr')
   const [userId, setUserId] = useState('')
+  const [departmentId, setDepartmentId] = useState('')
   const [cidr, setCidr] = useState('')
   const [groupId, setGroupId] = useState('')
   const [note, setNote] = useState('')
@@ -214,6 +227,21 @@ export function IPBlockingPage() {
     enabled: scope === 'user',
   })
 
+  // Departments are loaded for the scope picker and as a fallback label for
+  // department rows when an older API response omits department_name.
+  const { data: departmentsData } = useQuery<Department[]>({
+    queryKey: ['departments'],
+    queryFn: async () => {
+      return apiJson<Department[]>('/api/departments')
+    },
+  })
+  const departments = Array.isArray(departmentsData) ? departmentsData : []
+  const departmentById = new Map(departments.map((department) => [department.id, department]))
+  const departmentLabel = (rule: IPRule) =>
+    rule.department_name ||
+    (rule.department_id ? departmentById.get(rule.department_id)?.name : '') ||
+    '—'
+
   const {
     data: groupsData,
     isLoading: groupsLoading,
@@ -230,8 +258,9 @@ export function IPBlockingPage() {
 
   const addMutation = useMutation({
     mutationFn: async (body: {
-      scope: 'global' | 'user'
+      scope: RuleScope
       user_id?: string
+      department_id?: string
       cidr?: string
       group_id?: string
       note?: string
@@ -243,6 +272,7 @@ export function IPBlockingPage() {
       setScope('global')
       setTarget('cidr')
       setUserId('')
+      setDepartmentId('')
       setCidr('')
       setGroupId('')
       setNote('')
@@ -303,6 +333,7 @@ export function IPBlockingPage() {
     setScope('global')
     setTarget('cidr')
     setUserId('')
+    setDepartmentId('')
     setCidr('')
     setGroupId('')
     setNote('')
@@ -316,16 +347,22 @@ export function IPBlockingPage() {
 
   const handleAdd = (e: React.FormEvent) => {
     e.preventDefault()
-    // The API accepts exactly one of cidr / group_id.
+    // Exactly one of user_id / department_id (per scope) and exactly one of
+    // cidr / group_id.
     const body: {
-      scope: 'global' | 'user'
+      scope: RuleScope
       user_id?: string
+      department_id?: string
       cidr?: string
       group_id?: string
       note?: string
     } = { scope }
     if (scope === 'user' && userId) {
       body.user_id = userId
+    }
+    if (scope === 'department') {
+      if (!departmentId) return
+      body.department_id = departmentId
     }
     if (target === 'group') {
       if (!groupId) return
@@ -386,7 +423,11 @@ export function IPBlockingPage() {
   const groupCidrs = parseCIDRs(groupCidrsText)
   const canSubmit =
     (target === 'group' ? groupId !== '' : cidr.trim().length > 0) &&
-    (scope === 'global' || userId !== '')
+    (scope === 'global'
+      ? true
+      : scope === 'user'
+        ? userId !== ''
+        : departmentId !== '')
 
   return (
     <div>
@@ -567,6 +608,12 @@ export function IPBlockingPage() {
                       <td className={tdCls}>
                         {rule.scope === 'global' ? (
                           <Badge tone="accent">Global</Badge>
+                        ) : rule.scope === 'department' ? (
+                          <span className="inline-flex flex-wrap items-center gap-1.5">
+                            <Badge tone="neutral">department</Badge>
+                            <span className="text-xs text-zinc-500">Dept:</span>
+                            <span className="text-zinc-300">{departmentLabel(rule)}</span>
+                          </span>
                         ) : (
                           userLabel(
                             rule.user_full_name,
@@ -618,13 +665,15 @@ export function IPBlockingPage() {
               className={inputCls}
               value={scope}
               onChange={(e) => {
-                setScope(e.target.value as 'global' | 'user')
+                setScope(e.target.value as RuleScope)
                 setUserId('')
+                setDepartmentId('')
                 addMutation.reset()
               }}
             >
               <option value="global">Global (all users)</option>
-              <option value="user">User-specific</option>
+              <option value="user">Specific user</option>
+              <option value="department">Department</option>
             </select>
           </div>
 
@@ -649,6 +698,36 @@ export function IPBlockingPage() {
                   </option>
                 ))}
               </select>
+            </div>
+          )}
+
+          {scope === 'department' && (
+            <div>
+              <label htmlFor="ip-department" className={labelCls}>
+                Department
+              </label>
+              <select
+                id="ip-department"
+                className={inputCls}
+                value={departmentId}
+                onChange={(e) => {
+                  setDepartmentId(e.target.value)
+                  addMutation.reset()
+                }}
+              >
+                <option value="">Select a department</option>
+                {departments.map((department) => (
+                  <option key={department.id} value={department.id}>
+                    {department.name} ({department.user_count} user
+                    {department.user_count === 1 ? '' : 's'})
+                  </option>
+                ))}
+              </select>
+              {departments.length === 0 && (
+                <p className="mt-1 text-xs text-zinc-500">
+                  No departments yet — create one on the Departments page.
+                </p>
+              )}
             </div>
           )}
 
