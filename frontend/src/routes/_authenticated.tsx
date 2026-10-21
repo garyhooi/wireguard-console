@@ -24,6 +24,7 @@ import {
 import { apiFetch, clearSessionCache, fetchSession } from '../lib/api'
 import { ensureTimezone } from '../lib/timezone'
 import { ConsoleVersionControl } from '../components/ConsoleVersionControl'
+import { AmbientBackdrop } from '../components/AmbientBackdrop'
 
 interface Stats {
   total_peers: number
@@ -201,7 +202,9 @@ function AuthenticatedLayout() {
       </aside>
 
       {/* Main column */}
-      <div className="flex-1 min-w-0">
+      <div className="relative flex-1 min-w-0 overflow-hidden">
+        {/* Subtle ambient animation behind the page content (CSS-only). */}
+        <AmbientBackdrop />
         {/* Top bar */}
         <header className="sticky top-0 z-30 bg-zinc-950/90 backdrop-blur border-b border-zinc-800/80">
           <div className="px-4 sm:px-6 h-14 flex items-center justify-between gap-4">
@@ -271,7 +274,7 @@ function AuthenticatedLayout() {
           </div>
         )}
 
-        <main className="px-4 sm:px-6 lg:px-8 py-8 max-w-[1400px] mx-auto">
+        <main className="relative z-10 px-4 sm:px-6 lg:px-8 py-8 max-w-[1400px] mx-auto">
           <Outlet />
         </main>
       </div>
