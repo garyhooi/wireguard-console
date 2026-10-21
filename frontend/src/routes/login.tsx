@@ -21,7 +21,32 @@ interface LoginResponse {
   }
 }
 
-// 429 from the login endpoint: the server locked this IP out for a while.
+// Remember the last email we attempted so a refreshed page can ask the
+// server about that ACCOUNT's lock too (the IP may have changed).
+const LOCKOUT_EMAIL_KEY = 'wgc-lockout-email'
+function storedLockoutEmail(): string {
+  try {
+    return sessionStorage.getItem(LOCKOUT_EMAIL_KEY) || ''
+  } catch {
+    return ''
+  }
+}
+function rememberLockoutEmail(email: string) {
+  try {
+    sessionStorage.setItem(LOCKOUT_EMAIL_KEY, email)
+  } catch {
+    // storage disabled: fall back to IP-only countdowns
+  }
+}
+function forgetLockoutEmail() {
+  try {
+    sessionStorage.removeItem(LOCKOUT_EMAIL_KEY)
+  } catch {
+    // ignore
+  }
+}
+
+// 429 from the login endpoint: the server locked this IP/account for a while.
 class LoginLockedError extends Error {
   seconds: number
   constructor(seconds: number, message: string) {
@@ -47,7 +72,10 @@ export function LoginPage() {
   // locked so the countdown resumes where it stopped.
   useEffect(() => {
     let cancelled = false
-    apiFetch('/api/auth/lockout-status', { noAuthRedirect: true })
+    const storedEmail = storedLockoutEmail()
+    const statusPath =
+      '/api/auth/lockout-status' + (storedEmail ? '?email=' + encodeURIComponent(storedEmail) : '')
+    apiFetch(statusPath, { noAuthRedirect: true })
       .then(async (res) => {
         if (!res.ok) return
         const data = (await res.json().catch(() => null)) as
@@ -81,6 +109,7 @@ export function LoginPage() {
           | { error?: string; retry_after_seconds?: number }
           | null
         if (res.status === 429 && (err?.retry_after_seconds ?? 0) > 0) {
+          rememberLockoutEmail(credentials.email)
           throw new LoginLockedError(
             err?.retry_after_seconds as number,
             err?.error || 'Too many failed login attempts',
@@ -99,6 +128,7 @@ export function LoginPage() {
         return
       }
       setCsrfToken(data.csrf_token)
+      forgetLockoutEmail()
       redirectRef.current = '/dashboard'
       setAuthOutcome('success')
     },
@@ -116,7 +146,10 @@ export function LoginPage() {
   // server-reported remaining time instead of letting the user retry early.
   const handleLockoutUnlock = async () => {
     try {
-      const res = await apiFetch('/api/auth/lockout-status', { noAuthRedirect: true })
+      const storedEmail = storedLockoutEmail()
+      const statusPath =
+        '/api/auth/lockout-status' + (storedEmail ? '?email=' + encodeURIComponent(storedEmail) : '')
+      const res = await apiFetch(statusPath, { noAuthRedirect: true })
       const data = res.ok
         ? ((await res.json().catch(() => null)) as
             | { locked?: boolean; retry_after_seconds?: number }
@@ -130,6 +163,7 @@ export function LoginPage() {
     } catch {
       // Status probe failed: fall through and unlock optimistically.
     }
+    forgetLockoutEmail()
     setLockoutSeconds(null)
     loginMutation.reset()
   }
