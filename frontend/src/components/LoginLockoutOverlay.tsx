@@ -141,12 +141,7 @@ export function LoginLockoutOverlay({ seconds, onUnlock }: LoginLockoutOverlayPr
         <h2 className="mt-2 text-2xl font-semibold tracking-[0.06em] text-zinc-100 sm:text-3xl">
           TOO MANY ATTEMPTS
         </h2>
-        <p className="mt-2 max-w-sm text-sm text-zinc-400">
-          Too many wrong passwords from this network. The countdown continues even if you refresh — it is enforced by the server.
-        </p>
-        <p className="mt-4 text-xs text-zinc-500">
-          Unlocks automatically in <span className="text-zinc-300 tabular-nums">{formatSeconds(remaining)}</span>
-        </p>
+        <p className="mt-2 text-sm text-zinc-400">Too many failed sign-in attempts.</p>
       </div>
     </div>
   )
