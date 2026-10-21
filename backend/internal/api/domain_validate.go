@@ -238,6 +238,22 @@ func buildAdGuardRules(ctx context.Context, store *Store, rules []db.DomainRule)
 			}
 			continue
 		}
+		if rule.Scope == "department" && rule.DepartmentID != nil {
+			ips, err := departmentPeerIPs(ctx, store, *rule.DepartmentID)
+			if err != nil {
+				return out, fmt.Errorf("expand department rule %s: %w", rule.ID, err)
+			}
+			if len(ips) == 0 {
+				out.Unexpanded++
+				continue
+			}
+			for _, ip := range ips {
+				for _, domain := range valid {
+					add("||" + domain + "^$client=" + ip)
+				}
+			}
+			continue
+		}
 		for _, domain := range valid {
 			add("||" + domain + "^")
 		}
@@ -279,6 +295,33 @@ func userPeerIPs(ctx context.Context, store *Store, userID uuid.UUID) ([]string,
 		WHERE p.user_id = $1 AND p.status = 'active' AND s.status = 'active'
 		ORDER BY 1
 	`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ips []string
+	for rows.Next() {
+		var ip string
+		if err := rows.Scan(&ip); err != nil {
+			return nil, err
+		}
+		ips = append(ips, ip)
+	}
+	return ips, rows.Err()
+}
+
+// departmentPeerIPs returns the client IPs of every active peer belonging to
+// a user in the department (active peers on active servers).
+func departmentPeerIPs(ctx context.Context, store *Store, departmentID uuid.UUID) ([]string, error) {
+	rows, err := store.pool.Query(ctx, `
+		SELECT DISTINCT host(p.allowed_ip)
+		FROM peers p
+		JOIN users u ON u.id = p.user_id
+		JOIN servers s ON s.id = p.server_id
+		WHERE u.department_id = $1 AND p.status = 'active' AND s.status = 'active'
+		ORDER BY 1
+	`, departmentID)
 	if err != nil {
 		return nil, err
 	}

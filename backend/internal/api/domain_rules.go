@@ -90,7 +90,7 @@ func RequestDomainRuleSync(store *Store) {
 
 func loadDomainRules(ctx context.Context, store *Store) ([]db.DomainRule, error) {
 	rows, err := store.pool.Query(ctx, `
-		SELECT id, scope, user_id, domain, group_id, created_by, created_at
+		SELECT id, scope, user_id, department_id, domain, group_id, created_by, created_at
 		FROM domain_block_rules
 		ORDER BY created_at DESC
 	`)
@@ -103,7 +103,7 @@ func loadDomainRules(ctx context.Context, store *Store) ([]db.DomainRule, error)
 	for rows.Next() {
 		var rule db.DomainRule
 		var domain sql.NullString
-		if err := rows.Scan(&rule.ID, &rule.Scope, &rule.UserID, &domain, &rule.GroupID,
+		if err := rows.Scan(&rule.ID, &rule.Scope, &rule.UserID, &rule.DepartmentID, &domain, &rule.GroupID,
 			&rule.CreatedBy, &rule.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan domain rule: %w", err)
 		}
@@ -244,16 +244,18 @@ func ListDomainRules(store *Store) http.HandlerFunc {
 			UserEmail          string `json:"user_email"`
 			UserFullName       string `json:"user_full_name"`
 			UserDepartmentName string `json:"user_department_name"`
+			DepartmentName     string `json:"department_name"`
 			GroupName          string `json:"group_name,omitempty"`
 		}
 		var rules []domainRuleRow
 		rows, err := store.pool.Query(ctx, `
-			SELECT dr.id, dr.scope, dr.user_id, dr.domain, dr.group_id, dr.created_by, dr.created_at,
+			SELECT dr.id, dr.scope, dr.user_id, dr.department_id, dr.domain, dr.group_id, dr.created_by, dr.created_at,
 			       COALESCE(u.email, ''), COALESCE(u.full_name, ''), COALESCE(d.name, ''),
-			       COALESCE(g.name, '')
+			       COALESCE(dd.name, ''), COALESCE(g.name, '')
 			FROM domain_block_rules dr
 			LEFT JOIN users u ON u.id = dr.user_id
 			LEFT JOIN departments d ON d.id = u.department_id
+			LEFT JOIN departments dd ON dd.id = dr.department_id
 			LEFT JOIN domain_groups g ON g.id = dr.group_id
 			ORDER BY dr.created_at DESC
 		`)
@@ -266,9 +268,9 @@ func ListDomainRules(store *Store) http.HandlerFunc {
 		for rows.Next() {
 			var rule domainRuleRow
 			var domain sql.NullString
-			if err := rows.Scan(&rule.ID, &rule.Scope, &rule.UserID, &domain, &rule.GroupID,
+			if err := rows.Scan(&rule.ID, &rule.Scope, &rule.UserID, &rule.DepartmentID, &domain, &rule.GroupID,
 				&rule.CreatedBy, &rule.CreatedAt, &rule.UserEmail, &rule.UserFullName,
-				&rule.UserDepartmentName, &rule.GroupName); err != nil {
+				&rule.UserDepartmentName, &rule.DepartmentName, &rule.GroupName); err != nil {
 				writeError(w, http.StatusInternalServerError, "Failed to scan domain rule")
 				return
 			}
@@ -283,26 +285,45 @@ func ListDomainRules(store *Store) http.HandlerFunc {
 func CreateDomainRule(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Scope   string     `json:"scope"`
-			UserID  *uuid.UUID `json:"user_id"`
-			Domain  string     `json:"domain"`
-			GroupID *uuid.UUID `json:"group_id"`
+			Scope        string     `json:"scope"`
+			UserID       *uuid.UUID `json:"user_id"`
+			DepartmentID *uuid.UUID `json:"department_id"`
+			Domain       string     `json:"domain"`
+			GroupID      *uuid.UUID `json:"group_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
 
-		if req.Scope != "global" && req.Scope != "user" {
-			writeError(w, http.StatusBadRequest, "Scope must be global or user")
-			return
-		}
-		if req.Scope == "user" && req.UserID == nil {
-			writeError(w, http.StatusBadRequest, "A user is required for user-scoped rules")
-			return
-		}
-		if req.Scope == "global" {
+		switch req.Scope {
+		case "global":
 			req.UserID = nil
+			req.DepartmentID = nil
+		case "user":
+			if req.UserID == nil {
+				writeError(w, http.StatusBadRequest, "A user is required for user-scoped rules")
+				return
+			}
+			req.DepartmentID = nil
+		case "department":
+			if req.DepartmentID == nil {
+				writeError(w, http.StatusBadRequest, "A department is required for department-scoped rules")
+				return
+			}
+			req.UserID = nil
+			ok, err := departmentExists(context.Background(), store, *req.DepartmentID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to check department")
+				return
+			}
+			if !ok {
+				writeError(w, http.StatusBadRequest, "Department not found")
+				return
+			}
+		default:
+			writeError(w, http.StatusBadRequest, "Scope must be global, user or department")
+			return
 		}
 
 		hasDomain := strings.TrimSpace(req.Domain) != ""
@@ -332,9 +353,11 @@ func CreateDomainRule(store *Store) http.HandlerFunc {
 				WHERE scope = $1
 				  AND COALESCE(user_id, '00000000-0000-0000-0000-000000000000'::uuid)
 				    = COALESCE($2::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
-				  AND domain = $3
+				  AND COALESCE(department_id, '00000000-0000-0000-0000-000000000000'::uuid)
+				    = COALESCE($3::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
+				  AND domain = $4
 				LIMIT 1
-			`, req.Scope, req.UserID, domain).Scan(&exists)
+			`, req.Scope, req.UserID, req.DepartmentID, domain).Scan(&exists)
 			if err == nil {
 				writeError(w, http.StatusConflict, fmt.Sprintf("%s is already blocked for this scope", domain))
 				return
@@ -363,9 +386,11 @@ func CreateDomainRule(store *Store) http.HandlerFunc {
 				WHERE scope = $1
 				  AND COALESCE(user_id, '00000000-0000-0000-0000-000000000000'::uuid)
 				    = COALESCE($2::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
-				  AND group_id = $3
+				  AND COALESCE(department_id, '00000000-0000-0000-0000-000000000000'::uuid)
+				    = COALESCE($3::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
+				  AND group_id = $4
 				LIMIT 1
-			`, req.Scope, req.UserID, *req.GroupID).Scan(&exists)
+			`, req.Scope, req.UserID, req.DepartmentID, *req.GroupID).Scan(&exists)
 			if err == nil {
 				writeError(w, http.StatusConflict, fmt.Sprintf("group %q is already blocked for this scope", groupName))
 				return
@@ -382,9 +407,9 @@ func CreateDomainRule(store *Store) http.HandlerFunc {
 			domainArg = &domain
 		}
 		_, err := store.pool.Exec(ctx, `
-			INSERT INTO domain_block_rules (scope, user_id, domain, group_id, created_by)
-			VALUES ($1, $2, $3, $4, $5)
-		`, req.Scope, req.UserID, domainArg, req.GroupID, adminID)
+			INSERT INTO domain_block_rules (scope, user_id, department_id, domain, group_id, created_by)
+			VALUES ($1, $2, $3, $4, $5, $6)
+		`, req.Scope, req.UserID, req.DepartmentID, domainArg, req.GroupID, adminID)
 		if err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == "23505" {

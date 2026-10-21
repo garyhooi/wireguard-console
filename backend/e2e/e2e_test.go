@@ -1467,10 +1467,69 @@ func TestEndToEnd(t *testing.T) {
 		"department_id": deptID,
 	})
 	expectStatus(t, deptAssignResp, 200, "PATCH /api/users/{id} (assign department)")
+
+	// ---- Department-scoped blocking rules (domain + IP) ----
+	deptDomainResp, _ := api(t, "POST", "/api/domain-rules", token, map[string]interface{}{
+		"scope": "department", "department_id": deptID, "domain": "dept-blocked.example.com",
+	})
+	expectStatus(t, deptDomainResp, 201, "POST /api/domain-rules (department)")
+	deptIPResp, deptIPOut := api(t, "POST", "/api/ip-rules", token, map[string]interface{}{
+		"scope": "department", "department_id": deptID, "cidr": "203.0.113.77",
+	})
+	expectStatus(t, deptIPResp, 201, "POST /api/ip-rules (department)")
+	if got, _ := deptIPOut["department_name"].(string); got != "E2E Engineering (renamed)" {
+		t.Fatalf("department IP rule department_name = %q, want renamed department", got)
+	}
+
+	// Department scope without an id is rejected for both rule types.
+	badDeptDomain, _ := api(t, "POST", "/api/domain-rules", token, map[string]interface{}{
+		"scope": "department", "domain": "dept-missing.example.com",
+	})
+	expectStatus(t, badDeptDomain, 400, "POST /api/domain-rules (department without id)")
+	badDeptIP, _ := api(t, "POST", "/api/ip-rules", token, map[string]interface{}{
+		"scope": "department", "cidr": "203.0.113.78",
+	})
+	expectStatus(t, badDeptIP, 400, "POST /api/ip-rules (department without id)")
+
+	// Lists expose the department name; status counts department rules.
+	var deptDomainRules []map[string]interface{}
+	json.Unmarshal([]byte(rawGet(t, baseURL+"/api/domain-rules", token)), &deptDomainRules)
+	foundDeptDomain := false
+	for _, rr := range deptDomainRules {
+		if scope, _ := rr["scope"].(string); scope == "department" {
+			if name, _ := rr["department_name"].(string); name == "E2E Engineering (renamed)" {
+				foundDeptDomain = true
+			}
+		}
+	}
+	if !foundDeptDomain {
+		t.Fatal("department domain rule missing from list")
+	}
+	_, ipStatus := api(t, "GET", "/api/ip-rules/status", token, nil)
+	if n, _ := ipStatus["department_rules"].(float64); n < 1 {
+		t.Fatalf("IP status department_rules = %v, want >= 1", ipStatus["department_rules"])
+	}
+
 	deptDelResp, deptDelOut := api(t, "DELETE", "/api/departments/"+deptID, token, nil)
 	expectStatus(t, deptDelResp, 200, "DELETE /api/departments/{id}")
 	if n, _ := deptDelOut["users_cleared"].(float64); n != 1 {
 		t.Fatalf("department users_cleared = %v, want 1", n)
+	}
+
+	// Deleting the department cascades its blocking rules (domain + IP).
+	var afterDomainRules []map[string]interface{}
+	json.Unmarshal([]byte(rawGet(t, baseURL+"/api/domain-rules", token)), &afterDomainRules)
+	for _, rr := range afterDomainRules {
+		if domain, _ := rr["domain"].(string); domain == "dept-blocked.example.com" {
+			t.Fatal("department domain rule survived department deletion (no cascade)")
+		}
+	}
+	var afterIPRules []map[string]interface{}
+	json.Unmarshal([]byte(rawGet(t, baseURL+"/api/ip-rules", token)), &afterIPRules)
+	for _, rr := range afterIPRules {
+		if cidr, _ := rr["cidr"].(string); cidr == "203.0.113.77" {
+			t.Fatal("department IP rule survived department deletion (no cascade)")
+		}
 	}
 
 	// ---- Edit VPN user name + email ----

@@ -121,12 +121,13 @@ type ipRuleRow struct {
 	UserEmail          string `json:"user_email"`
 	UserFullName       string `json:"user_full_name"`
 	UserDepartmentName string `json:"user_department_name"`
+	DepartmentName     string `json:"department_name"`
 	GroupName          string `json:"group_name,omitempty"`
 }
 
 func loadIPBlockRules(ctx context.Context, pool *pgxpool.Pool) ([]db.IPBlockRule, error) {
 	rows, err := pool.Query(ctx, `
-		SELECT id, scope, user_id, cidr, group_id, note, created_by, created_at
+		SELECT id, scope, user_id, department_id, cidr, group_id, note, created_by, created_at
 		FROM ip_block_rules
 		ORDER BY created_at DESC
 	`)
@@ -139,7 +140,7 @@ func loadIPBlockRules(ctx context.Context, pool *pgxpool.Pool) ([]db.IPBlockRule
 	for rows.Next() {
 		var rule db.IPBlockRule
 		var cidr sql.NullString
-		if err := rows.Scan(&rule.ID, &rule.Scope, &rule.UserID, &cidr, &rule.GroupID,
+		if err := rows.Scan(&rule.ID, &rule.Scope, &rule.UserID, &rule.DepartmentID, &cidr, &rule.GroupID,
 			&rule.Note, &rule.CreatedBy, &rule.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan IP rule: %w", err)
 		}
@@ -197,6 +198,33 @@ func peersByUserForServer(ctx context.Context, pool *pgxpool.Pool, serverID uuid
 	return out, rows.Err()
 }
 
+// peersByDepartmentForServer maps each department with active peers on the
+// server to those peer IPs (for department-scoped rules).
+func peersByDepartmentForServer(ctx context.Context, pool *pgxpool.Pool, serverID uuid.UUID) (map[uuid.UUID][]string, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT u.department_id, host(p.allowed_ip)
+		FROM peers p
+		JOIN users u ON u.id = p.user_id
+		WHERE p.server_id = $1 AND p.status = 'active' AND u.department_id IS NOT NULL
+		ORDER BY u.department_id, p.allowed_ip
+	`, serverID)
+	if err != nil {
+		return nil, fmt.Errorf("query department peers: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[uuid.UUID][]string{}
+	for rows.Next() {
+		var departmentID uuid.UUID
+		var ip string
+		if err := rows.Scan(&departmentID, &ip); err != nil {
+			return nil, err
+		}
+		out[departmentID] = append(out[departmentID], ip)
+	}
+	return out, rows.Err()
+}
+
 // expandIPBlockRules turns stored rules into the exact per-server drop list:
 // global rules once with an empty source, per-user rules once per active peer,
 // source/destination family pairs kept consistent, and control-plane conflicts
@@ -204,6 +232,7 @@ func peersByUserForServer(ctx context.Context, pool *pgxpool.Pool, serverID uuid
 func expandIPBlockRules(
 	rules []db.IPBlockRule,
 	peersByUser map[uuid.UUID][]string,
+	peersByDepartment map[uuid.UUID][]string,
 	groupCIDRs map[uuid.UUID][]string,
 	gatewayIP, blockPageIP string,
 ) ([]wgclient.IPBlockRule, []ipBlockConflict, []uuid.UUID) {
@@ -256,10 +285,21 @@ func expandIPBlockRules(
 				}
 				continue
 			}
+			if rule.Scope == "department" && rule.DepartmentID != nil {
+				for _, peerIP := range peersByDepartment[*rule.DepartmentID] {
+					if cidrIsIPv4(dest) != isIPv4Address(peerIP) {
+						continue // no valid source of this family on this server
+					}
+					add(peerIP, dest)
+					ruleAdded = true
+				}
+				continue
+			}
 			add("", dest)
 			ruleAdded = true
 		}
-		if rule.Scope == "user" && rule.UserID != nil && !ruleAdded {
+		if (rule.Scope == "user" && rule.UserID != nil && !ruleAdded) ||
+			(rule.Scope == "department" && rule.DepartmentID != nil && !ruleAdded) {
 			unexpanded = append(unexpanded, rule.ID)
 		}
 	}
@@ -306,7 +346,11 @@ func buildIPBlockPayload(ctx context.Context, pool *pgxpool.Pool, serverID uuid.
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	entries, conflicts, unexpanded := expandIPBlockRules(rules, peers, groupCIDRs, gatewayIP, blockPageIP)
+	departmentPeers, err := peersByDepartmentForServer(ctx, pool, serverID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	entries, conflicts, unexpanded := expandIPBlockRules(rules, peers, departmentPeers, groupCIDRs, gatewayIP, blockPageIP)
 	return entries, conflicts, unexpanded, nil
 }
 
@@ -316,12 +360,13 @@ func ListIPRules(store *Store) http.HandlerFunc {
 		ctx := context.Background()
 
 		rows, err := store.pool.Query(ctx, `
-			SELECT r.id, r.scope, r.user_id, r.cidr, r.group_id, r.note, r.created_by, r.created_at,
+			SELECT r.id, r.scope, r.user_id, r.department_id, r.cidr, r.group_id, r.note, r.created_by, r.created_at,
 			       COALESCE(u.email, ''), COALESCE(u.full_name, ''), COALESCE(d.name, ''),
-			       COALESCE(g.name, '')
+			       COALESCE(dd.name, ''), COALESCE(g.name, '')
 			FROM ip_block_rules r
 			LEFT JOIN users u ON u.id = r.user_id
 			LEFT JOIN departments d ON d.id = u.department_id
+			LEFT JOIN departments dd ON dd.id = r.department_id
 			LEFT JOIN ip_groups g ON g.id = r.group_id
 			ORDER BY r.created_at DESC
 		`)
@@ -335,9 +380,9 @@ func ListIPRules(store *Store) http.HandlerFunc {
 		for rows.Next() {
 			var rule ipRuleRow
 			var cidr sql.NullString
-			if err := rows.Scan(&rule.ID, &rule.Scope, &rule.UserID, &cidr, &rule.GroupID,
+			if err := rows.Scan(&rule.ID, &rule.Scope, &rule.UserID, &rule.DepartmentID, &cidr, &rule.GroupID,
 				&rule.Note, &rule.CreatedBy, &rule.CreatedAt, &rule.UserEmail, &rule.UserFullName,
-				&rule.UserDepartmentName, &rule.GroupName); err != nil {
+				&rule.UserDepartmentName, &rule.DepartmentName, &rule.GroupName); err != nil {
 				writeError(w, http.StatusInternalServerError, "Failed to scan IP rule")
 				return
 			}
@@ -352,17 +397,18 @@ func getIPRule(ctx context.Context, pool *pgxpool.Pool, id uuid.UUID) (ipRuleRow
 	var rule ipRuleRow
 	var cidr sql.NullString
 	err := pool.QueryRow(ctx, `
-		SELECT r.id, r.scope, r.user_id, r.cidr, r.group_id, r.note, r.created_by, r.created_at,
+		SELECT r.id, r.scope, r.user_id, r.department_id, r.cidr, r.group_id, r.note, r.created_by, r.created_at,
 		       COALESCE(u.email, ''), COALESCE(u.full_name, ''), COALESCE(d.name, ''),
-		       COALESCE(g.name, '')
+		       COALESCE(dd.name, ''), COALESCE(g.name, '')
 		FROM ip_block_rules r
 		LEFT JOIN users u ON u.id = r.user_id
 		LEFT JOIN departments d ON d.id = u.department_id
+		LEFT JOIN departments dd ON dd.id = r.department_id
 		LEFT JOIN ip_groups g ON g.id = r.group_id
 		WHERE r.id = $1
-	`, id).Scan(&rule.ID, &rule.Scope, &rule.UserID, &cidr, &rule.GroupID, &rule.Note,
+	`, id).Scan(&rule.ID, &rule.Scope, &rule.UserID, &rule.DepartmentID, &cidr, &rule.GroupID, &rule.Note,
 		&rule.CreatedBy, &rule.CreatedAt, &rule.UserEmail, &rule.UserFullName,
-		&rule.UserDepartmentName, &rule.GroupName)
+		&rule.UserDepartmentName, &rule.DepartmentName, &rule.GroupName)
 	rule.CIDR = cidr.String
 	return rule, err
 }
@@ -372,26 +418,36 @@ func getIPRule(ctx context.Context, pool *pgxpool.Pool, id uuid.UUID) (ipRuleRow
 func CreateIPRule(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Scope   string     `json:"scope"`
-			UserID  *uuid.UUID `json:"user_id"`
-			CIDR    string     `json:"cidr"`
-			GroupID *uuid.UUID `json:"group_id"`
-			Note    string     `json:"note"`
+			Scope        string     `json:"scope"`
+			UserID       *uuid.UUID `json:"user_id"`
+			DepartmentID *uuid.UUID `json:"department_id"`
+			CIDR         string     `json:"cidr"`
+			GroupID      *uuid.UUID `json:"group_id"`
+			Note         string     `json:"note"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
-		if req.Scope != "global" && req.Scope != "user" {
-			writeError(w, http.StatusBadRequest, "Scope must be global or user")
-			return
-		}
-		if req.Scope == "user" && req.UserID == nil {
-			writeError(w, http.StatusBadRequest, "A user is required for user-scoped rules")
-			return
-		}
-		if req.Scope == "global" {
+		switch req.Scope {
+		case "global":
 			req.UserID = nil
+			req.DepartmentID = nil
+		case "user":
+			if req.UserID == nil {
+				writeError(w, http.StatusBadRequest, "A user is required for user-scoped rules")
+				return
+			}
+			req.DepartmentID = nil
+		case "department":
+			if req.DepartmentID == nil {
+				writeError(w, http.StatusBadRequest, "A department is required for department-scoped rules")
+				return
+			}
+			req.UserID = nil
+		default:
+			writeError(w, http.StatusBadRequest, "Scope must be global, user or department")
+			return
 		}
 		if len(req.Note) > 200 {
 			writeError(w, http.StatusBadRequest, "Note is too long (max 200 characters)")
@@ -449,6 +505,17 @@ func CreateIPRule(store *Store) http.HandlerFunc {
 				return
 			}
 		}
+		if req.DepartmentID != nil {
+			ok, err := departmentExists(ctx, store, *req.DepartmentID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to check department")
+				return
+			}
+			if !ok {
+				writeError(w, http.StatusBadRequest, "Department not found")
+				return
+			}
+		}
 
 		var exists bool
 		var err error
@@ -458,18 +525,22 @@ func CreateIPRule(store *Store) http.HandlerFunc {
 				WHERE scope = $1
 				  AND COALESCE(user_id, '00000000-0000-0000-0000-000000000000'::uuid)
 				    = COALESCE($2::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
-				  AND cidr = $3
+				  AND COALESCE(department_id, '00000000-0000-0000-0000-000000000000'::uuid)
+				    = COALESCE($3::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
+				  AND cidr = $4
 				LIMIT 1
-			`, req.Scope, req.UserID, cidr).Scan(&exists)
+			`, req.Scope, req.UserID, req.DepartmentID, cidr).Scan(&exists)
 		} else {
 			err = store.pool.QueryRow(ctx, `
 				SELECT true FROM ip_block_rules
 				WHERE scope = $1
 				  AND COALESCE(user_id, '00000000-0000-0000-0000-000000000000'::uuid)
 				    = COALESCE($2::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
-				  AND group_id = $3
+				  AND COALESCE(department_id, '00000000-0000-0000-0000-000000000000'::uuid)
+				    = COALESCE($3::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
+				  AND group_id = $4
 				LIMIT 1
-			`, req.Scope, req.UserID, *req.GroupID).Scan(&exists)
+			`, req.Scope, req.UserID, req.DepartmentID, *req.GroupID).Scan(&exists)
 		}
 		if err == nil {
 			if hasCIDR {
@@ -486,9 +557,9 @@ func CreateIPRule(store *Store) http.HandlerFunc {
 
 		var id uuid.UUID
 		err = store.pool.QueryRow(ctx, `
-			INSERT INTO ip_block_rules (scope, user_id, cidr, group_id, note, created_by)
-			VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
-		`, req.Scope, req.UserID, domainArg, req.GroupID, req.Note, adminID).Scan(&id)
+			INSERT INTO ip_block_rules (scope, user_id, department_id, cidr, group_id, note, created_by)
+			VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id
+		`, req.Scope, req.UserID, req.DepartmentID, domainArg, req.GroupID, req.Note, adminID).Scan(&id)
 		if err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -639,26 +710,46 @@ func IPRuleStatus(store *Store) http.HandlerFunc {
 			unexpandedCount = 0
 		}
 
-		global, user := 0, 0
+		// Department rules are "waiting" only when no member user has an
+		// active peer on any active server.
+		unexpandedDepartmentCount := 0
+		if err := store.pool.QueryRow(ctx, `
+			SELECT count(*) FROM ip_block_rules r
+			WHERE r.scope = 'department' AND NOT EXISTS (
+				SELECT 1 FROM peers p
+				JOIN users u ON u.id = p.user_id
+				JOIN servers s ON s.id = p.server_id
+				WHERE u.department_id = r.department_id AND p.status = 'active' AND s.status = 'active'
+			)
+		`).Scan(&unexpandedDepartmentCount); err != nil {
+			unexpandedDepartmentCount = 0
+		}
+
+		global, user, department := 0, 0, 0
 		for _, rule := range rules {
-			if rule.Scope == "global" {
+			switch rule.Scope {
+			case "global":
 				global++
-			} else {
+			case "department":
+				department++
+			default:
 				user++
 			}
 		}
 
 		resp := map[string]interface{}{
-			"enabled":               os.Getenv("WG_IP_BLOCK") != "0",
-			"rules_total":           len(rules),
-			"global_rules":          global,
-			"user_rules":            user,
-			"expected_entries":      expected,
-			"applied_servers":       applied,
-			"failed_servers":        failed,
-			"local_servers":         servers,
-			"unexpanded_user_rules": unexpandedCount,
-			"conflicts":             conflicts,
+			"enabled":                     os.Getenv("WG_IP_BLOCK") != "0",
+			"rules_total":                 len(rules),
+			"global_rules":                global,
+			"user_rules":                  user,
+			"department_rules":            department,
+			"expected_entries":            expected,
+			"applied_servers":             applied,
+			"failed_servers":              failed,
+			"local_servers":               servers,
+			"unexpanded_user_rules":       unexpandedCount,
+			"unexpanded_department_rules": unexpandedDepartmentCount,
+			"conflicts":                   conflicts,
 		}
 		if lastAt, lastErr := lastIPBlockSync(); !lastAt.IsZero() {
 			resp["last_sync_at"] = lastAt.UTC().Format(time.RFC3339)

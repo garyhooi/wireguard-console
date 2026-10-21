@@ -87,9 +87,10 @@ type Server struct {
 }
 
 type DomainRule struct {
-	ID     uuid.UUID  `json:"id"`
-	Scope  string     `json:"scope"`
-	UserID *uuid.UUID `json:"user_id"`
+	ID           uuid.UUID  `json:"id"`
+	Scope        string     `json:"scope"`
+	UserID       *uuid.UUID `json:"user_id"`
+	DepartmentID *uuid.UUID `json:"department_id,omitempty"`
 	// Domain is empty for group rules (see GroupID).
 	Domain    string     `json:"domain"`
 	GroupID   *uuid.UUID `json:"group_id,omitempty"`
@@ -98,9 +99,10 @@ type DomainRule struct {
 }
 
 type IPBlockRule struct {
-	ID     uuid.UUID  `json:"id"`
-	Scope  string     `json:"scope"`
-	UserID *uuid.UUID `json:"user_id"`
+	ID           uuid.UUID  `json:"id"`
+	Scope        string     `json:"scope"`
+	UserID       *uuid.UUID `json:"user_id"`
+	DepartmentID *uuid.UUID `json:"department_id,omitempty"`
 	// CIDR is empty for group rules (see GroupID).
 	CIDR      string     `json:"cidr"`
 	GroupID   *uuid.UUID `json:"group_id,omitempty"`
