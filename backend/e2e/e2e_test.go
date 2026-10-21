@@ -1504,7 +1504,7 @@ func TestEndToEnd(t *testing.T) {
 	})
 	expectStatus(t, badEmailResp, 400, "PATCH /api/users/{id} invalid email")
 
-	// ---- Per-IP login lockout (3 wrong passwords -> 60s) ----
+	// ---- Login lockout: 3 wrong passwords -> 60s for the IP AND the account ----
 	lockIP := "198.51.100.77"
 	lockLogin := func(password string) (*http.Response, map[string]interface{}) {
 		payload, _ := json.Marshal(map[string]string{"email": "e2e@console.test", "password": password})
@@ -1562,19 +1562,43 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatalf("correct password during lockout: status %d, want 429", resp.StatusCode)
 	}
 
-	// Changing network must not inherit an account-level lock: only the IP
-	// that guessed wrong is locked, and the DB legacy lock is no longer enforced.
-	otherPayload, _ := json.Marshal(map[string]string{"email": "e2e@console.test", "password": "e2e-NewPassw0rd!"})
-	otherReq, _ := http.NewRequest("POST", baseURL+"/api/auth/login", bytes.NewReader(otherPayload))
-	otherReq.Header.Set("Content-Type", "application/json")
-	otherReq.Header.Set("X-Forwarded-For", "198.51.100.88")
-	otherResp, err := http.DefaultClient.Do(otherReq)
-	if err != nil {
-		t.Fatalf("login from a different IP: %v", err)
+	// Account lock: the same account is refused from a DIFFERENT IP too, so
+	// switching network cannot bypass the 60s brake.
+	otherLogin := func(ip, password string) *http.Response {
+		payload, _ := json.Marshal(map[string]string{"email": "e2e@console.test", "password": password})
+		req, err := http.NewRequest("POST", baseURL+"/api/auth/login", bytes.NewReader(payload))
+		if err != nil {
+			t.Fatalf("new other-IP login request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Forwarded-For", ip)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("other-IP login request: %v", err)
+		}
+		defer resp.Body.Close()
+		return resp
 	}
-	otherResp.Body.Close()
-	if otherResp.StatusCode != 200 {
-		t.Fatalf("login from a different IP: status %d, want 200 (no account lock)", otherResp.StatusCode)
+	if resp := otherLogin("198.51.100.88", "e2e-NewPassw0rd!"); resp.StatusCode != 429 {
+		t.Fatalf("correct password from a different IP: status %d, want 429 (account locked)", resp.StatusCode)
+	}
+
+	// The status endpoint reports the ACCOUNT lock even from another IP, which
+	// lets a refreshed login page resume the countdown after an IP change.
+	acctStatusReq, _ := http.NewRequest("GET", baseURL+"/api/auth/lockout-status?email=e2e%40console.test", nil)
+	acctStatusReq.Header.Set("X-Forwarded-For", "198.51.100.88")
+	acctStatusResp, err := http.DefaultClient.Do(acctStatusReq)
+	if err != nil {
+		t.Fatalf("account lockout status: %v", err)
+	}
+	var acctStatusOut map[string]interface{}
+	json.NewDecoder(acctStatusResp.Body).Decode(&acctStatusOut)
+	acctStatusResp.Body.Close()
+	if locked, _ := acctStatusOut["locked"].(bool); !locked {
+		t.Fatalf("account lockout-status locked = false, want true (%v)", acctStatusOut)
+	}
+	if secs, _ := acctStatusOut["retry_after_seconds"].(float64); secs <= 0 {
+		t.Fatalf("account lockout-status retry_after_seconds = %v, want > 0", acctStatusOut["retry_after_seconds"])
 	}
 	// Cleanup: delete local server (cascade peers) must succeed
 	resp, _ = api(t, "DELETE", "/api/servers/"+serverID, token, map[string]string{

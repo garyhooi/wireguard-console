@@ -230,16 +230,45 @@ func Login(store *Store) http.HandlerFunc {
 			return
 		}
 
-		// Note: the old per-admin 15-minute lock (5 wrong passwords) is gone.
-		// It followed the account across IPs (so changing network did not help)
-		// and punished honest typos; brute-force protection now lives in the
-		// per-IP lockout above. A successful login clears any legacy DB lock.
+		// Account-level lockout: 3 wrong passwords lock the ACCOUNT for 60s as
+		// well as the IP, so changing network does not bypass the brake. It is
+		// intentionally short (60s) — unlike the old 15-minute account lock.
+		if admin.LockedUntil != nil {
+			if remaining := time.Until(*admin.LockedUntil); remaining > 0 {
+				respondLocked(w, lockoutSeconds(remaining))
+				return
+			}
+			// Expired lock (e.g. legacy DB row): clear it lazily.
+			store.pool.Exec(ctx, `
+				UPDATE admins SET failed_login_count = 0, locked_until = NULL WHERE id = $1
+			`, admin.ID)
+			admin.FailedLoginCount = 0
+			admin.LockedUntil = nil
+		}
 
 		if !verifyPassword(req.Password, admin.PasswordHash) {
 			log.Printf("Password verification failed for admin: %s", admin.Email)
-			// Third wrong password (or later) locks this IP for 60s so the UI
-			// can show a precise countdown instead of a generic error.
-			if locked := ipLoginLockout.recordFailure(clientIP, time.Now()); locked > 0 {
+
+			// Third wrong password locks BOTH the IP (fresh guesses) and the
+			// account (guesses hopping between IPs) for 60s.
+			admin.FailedLoginCount++
+			var accountLock time.Duration
+			if admin.FailedLoginCount >= loginLockoutThreshold {
+				until := time.Now().Add(loginLockoutDuration)
+				admin.LockedUntil = &until
+				admin.FailedLoginCount = 0
+				accountLock = loginLockoutDuration
+			}
+			store.pool.Exec(ctx, `
+				UPDATE admins SET failed_login_count = $1, locked_until = $2, updated_at = now() WHERE id = $3
+			`, admin.FailedLoginCount, admin.LockedUntil, admin.ID)
+
+			ipLock := ipLoginLockout.recordFailure(clientIP, time.Now())
+			if accountLock > 0 || ipLock > 0 {
+				locked := accountLock
+				if ipLock > locked {
+					locked = ipLock
+				}
 				respondLocked(w, lockoutSeconds(locked))
 				return
 			}

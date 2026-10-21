@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"math"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -123,9 +125,24 @@ func respondLocked(w http.ResponseWriter, seconds int) {
 
 // LoginLockoutStatus lets the login page resume a countdown after a refresh
 // (the lock lives server-side per IP, so the browser has no other way to know).
-func LoginLockoutStatus() http.HandlerFunc {
+func LoginLockoutStatus(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		remaining := ipLoginLockout.remaining(getClientIP(r), time.Now())
+		ctx := context.Background()
+		now := time.Now()
+
+		// Either lock keeps the countdown alive: the IP lock (this network) or
+		// the account lock (this email, regardless of network).
+		remaining := ipLoginLockout.remaining(getClientIP(r), now)
+		if email := strings.TrimSpace(r.URL.Query().Get("email")); email != "" {
+			var lockedUntil *time.Time
+			err := store.pool.QueryRow(ctx, `SELECT locked_until FROM admins WHERE email = $1`, email).Scan(&lockedUntil)
+			if err == nil && lockedUntil != nil && lockedUntil.After(now) {
+				if account := lockedUntil.Sub(now); account > remaining {
+					remaining = account
+				}
+			}
+		}
+
 		seconds := lockoutSeconds(remaining)
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"locked":              seconds > 0,
