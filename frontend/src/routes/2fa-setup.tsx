@@ -1,10 +1,10 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import QRCode from 'qrcode'
 import { PrimaryButton, inputCls, labelCls } from '../lib/ui'
 import { HoloPageBackground } from '../components/HoloPageBackground'
-import { apiFetch } from '../lib/api'
+import { apiFetch, setCsrfToken } from '../lib/api'
 
 interface TOTPSetupResponse {
   secret: string
@@ -14,6 +14,7 @@ interface TOTPSetupResponse {
 interface Enable2FAResponse {
   backup_codes: string[]
   message: string
+  csrf_token?: string
 }
 
 export const Route = createFileRoute('/2fa-setup')({
@@ -21,6 +22,15 @@ export const Route = createFileRoute('/2fa-setup')({
 })
 
 function Setup2FAPage() {
+  // Forced enrollment: Login grants no session for an admin without TOTP;
+  // the pending cookie only authorizes the *-pending endpoints. This mode
+  // starts automatically and mints the real session after the first code.
+  const forced =
+    typeof window !== 'undefined' &&
+    new URLSearchParams(window.location.search).get('forced') === '1'
+  const setupPath = forced ? '/api/auth/2fa/setup-pending' : '/api/auth/2fa/setup'
+  const enablePath = forced ? '/api/auth/2fa/enable-pending' : '/api/auth/2fa/enable'
+
   const [step, setStep] = useState<'setup' | 'verify' | 'complete'>('setup')
   const [totpData, setTotpData] = useState<TOTPSetupResponse | null>(null)
   const [qrDataUrl, setQrDataUrl] = useState('')
@@ -29,7 +39,11 @@ function Setup2FAPage() {
 
   const setupMutation = useMutation({
     mutationFn: async () => {
-      const res = await apiFetch('/api/auth/2fa/setup', { method: 'POST' })
+      const res = await apiFetch(setupPath, {
+        method: 'POST',
+        skipCsrf: true,
+        noAuthRedirect: true,
+      })
       if (!res.ok) throw new Error('Failed to setup 2FA')
       return res.json() as Promise<TOTPSetupResponse>
     },
@@ -44,8 +58,10 @@ function Setup2FAPage() {
 
   const enableMutation = useMutation({
     mutationFn: async (code: string) => {
-      const res = await apiFetch('/api/auth/2fa/enable', {
+      const res = await apiFetch(enablePath, {
         method: 'POST',
+        skipCsrf: true,
+        noAuthRedirect: true,
         body: {
           secret: totpData?.secret,
           code,
@@ -55,10 +71,20 @@ function Setup2FAPage() {
       return res.json() as Promise<Enable2FAResponse>
     },
     onSuccess: (data) => {
+      // Forced enrollment returns a fresh session CSRF token (the pending
+      // cookie was swapped for a real session cookie by the server).
+      if (data.csrf_token) setCsrfToken(data.csrf_token)
       setBackupCodes(data.backup_codes)
       setStep('complete')
     },
   })
+
+  // In forced mode the user cannot do anything else, so generate the secret
+  // immediately instead of making them press an extra button.
+  useEffect(() => {
+    if (forced) setupMutation.mutate()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [forced])
 
   const handleSetup = () => {
     setupMutation.mutate()
@@ -79,11 +105,31 @@ function Setup2FAPage() {
         {step === 'setup' && (
           <div>
             <p className="text-zinc-400 text-sm mb-6 leading-relaxed">
-              Add an extra layer of security to your account. You'll need an authenticator app like Google Authenticator, Authy, or 1Password.
+              {forced ? (
+                <>
+                  <span className="block text-amber-400/90 mb-2">
+                    Two-factor authentication is required before you can use the console.
+                  </span>
+                  Set it up now with an authenticator app like Google Authenticator, Authy, or
+                  1Password — you will use a code on every future sign-in.
+                </>
+              ) : (
+                'Add an extra layer of security to your account. You will need an authenticator app like Google Authenticator, Authy, or 1Password.'
+              )}
             </p>
-            <PrimaryButton onClick={handleSetup} disabled={setupMutation.isPending} className="w-full">
-              {setupMutation.isPending ? 'Generating…' : 'Setup 2FA'}
-            </PrimaryButton>
+            {!forced && (
+              <PrimaryButton onClick={handleSetup} disabled={setupMutation.isPending} className="w-full">
+                {setupMutation.isPending ? 'Generating…' : 'Setup 2FA'}
+              </PrimaryButton>
+            )}
+            {forced && setupMutation.isPending && (
+              <p className="text-zinc-400 text-sm">Generating your setup key…</p>
+            )}
+            {forced && setupMutation.isError && (
+              <p className="text-red-400 text-sm">
+                Setup session expired. Sign in again to continue.
+              </p>
+            )}
           </div>
         )}
 

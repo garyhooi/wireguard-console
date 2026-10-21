@@ -11,6 +11,7 @@ import { LoginLockoutOverlay } from '../components/LoginLockoutOverlay'
 interface LoginResponse {
   csrf_token?: string
   pending_2fa?: boolean
+  pending_2fa_setup?: boolean
   admin?: {
     id: string
     email: string
@@ -120,6 +121,12 @@ export function LoginPage() {
       return res.json() as Promise<LoginResponse>
     },
     onSuccess: (data) => {
+      if (data.pending_2fa_setup) {
+        // 2FA enrolment is mandatory before a session is issued. The pending
+        // cookie set by the server authorizes the setup page only.
+        window.location.href = '/2fa-setup?forced=1'
+        return
+      }
       if (data.pending_2fa) {
         // The pending-2FA token rides in the wgc_pending2fa HttpOnly cookie
         // set by the server — nothing to store client-side. Not a completed
