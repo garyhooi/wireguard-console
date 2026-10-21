@@ -1,4 +1,4 @@
-// Cyberpunk/hologram backdrop for the branded block page.
+// Holographic backdrop for the branded block page.
 //
 // External file (CSP script-src 'self'): the block page is served under a
 // strict Content-Security-Policy, so no inline <script> is allowed. Plain

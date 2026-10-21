@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 
-// Cyberpunk hologram backdrop for the login screen. Pure canvas 2D (no deps,
+// Holographic backdrop for the sign-in screen. Pure canvas 2D (no deps,
 // no WebGL): a perspective grid floor, rotating HUD rings behind the card,
 // falling glyph columns, a slow holographic scan sweep, drifting data motes
 // and an occasional subtle glitch band. Everything is dimmed by a vignette in
@@ -136,7 +136,7 @@ export function HoloBackground() {
       ctx.fillStyle = haze
       ctx.fillRect(0, 0, width, height)
 
-      // Falling glyph rain (cyberpunk data columns), dim enough to sit behind
+      // Falling glyph rain (data columns), dim enough to sit behind
       // the card. Bright columns occasionally flash.
       ctx.save()
       ctx.font = '12px ui-monospace, SFMono-Regular, Menlo, monospace'
