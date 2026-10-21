@@ -2,6 +2,7 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { PrimaryButton, inputCls, labelCls } from '../lib/ui'
+import { HoloPageBackground } from '../components/HoloPageBackground'
 import { apiFetch, setCsrfToken } from '../lib/api'
 
 interface Verify2FAResponse {
@@ -45,8 +46,9 @@ function Verify2FAPage() {
   }
 
   return (
-    <div className="min-h-screen bg-zinc-950 flex items-center justify-center px-4">
-      <div className="w-full max-w-md bg-zinc-900/60 border border-zinc-800 rounded-xl p-8 shadow-2xl">
+    <div className="relative min-h-screen overflow-hidden bg-[#04060c] flex items-center justify-center px-4">
+      <HoloPageBackground />
+      <div className="relative z-10 w-full max-w-md bg-[#080d16]/80 backdrop-blur-md border border-teal-500/25 rounded-xl p-8 shadow-[0_0_60px_-18px_rgba(45,212,191,0.55)]">
         <h1 className="text-xl font-semibold tracking-tight text-zinc-100 mb-1">
           Enter Authentication Code
         </h1>

@@ -56,8 +56,9 @@ http://:80 {
 		file_server
 	}
 	header {
-		# The block page has no user content and its only script is the
-		# external /blocked-hostname.js, so keep it strict. It carries an
+		# The block page has no user content; its only scripts are the
+		# external /blocked-hostname.js and /blocked-holo.js, so keep it
+		# strict. It carries an
 		# inline <style> → style-src 'unsafe-inline'.
 		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 		X-Frame-Options "DENY"
@@ -82,8 +83,9 @@ http://:80 {
 		file_server
 	}
 	header {
-		# The block page has no user content and its only script is the
-		# external /blocked-hostname.js, so keep it strict. It carries an
+		# The block page has no user content; its only scripts are the
+		# external /blocked-hostname.js and /blocked-holo.js, so keep it
+		# strict. It carries an
 		# inline <style> → style-src 'unsafe-inline'.
 		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 		X-Frame-Options "DENY"

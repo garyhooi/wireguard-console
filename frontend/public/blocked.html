@@ -7,31 +7,53 @@
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     min-height: 100dvh; display: flex; align-items: center; justify-content: center;
-    background: radial-gradient(1200px 600px at 20% -10%, #0f172a, #09090b 60%);
-    color: #e4e4e7; padding: 24px;
+    background: #04060c;
+    color: #e4e4e7; padding: 24px; overflow: hidden;
   }
-  .card { max-width: 460px; width: 100%; text-align: center; }
+  #holo { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 0; }
+  .vignette {
+    position: fixed; inset: 0; pointer-events: none; z-index: 1;
+    background: radial-gradient(ellipse at center, rgba(4,6,12,.15) 0%, rgba(4,6,12,.72) 62%, rgba(4,6,12,.94) 100%);
+  }
+  .scanlines {
+    position: fixed; inset: 0; pointer-events: none; z-index: 1; opacity: .05;
+    background-image: repeating-linear-gradient(0deg, rgba(226,232,240,.9) 0px, rgba(226,232,240,.9) 1px, transparent 1px, transparent 3px);
+  }
+  .card {
+    position: relative; z-index: 2;
+    max-width: 460px; width: 100%; text-align: center;
+    background: rgba(8,13,22,.8);
+    -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+    border: 1px solid rgba(45,212,191,.25); border-radius: 14px; padding: 36px 32px;
+    box-shadow: 0 0 60px -18px rgba(45,212,191,.55);
+  }
+  .card::before {
+    content: ""; position: absolute; left: 40px; right: 40px; top: -1px; height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(94,234,212,.7), transparent);
+  }
   .badge {
     display: inline-flex; align-items: center; gap: 8px;
-    border: 1px solid #14b8a6; color: #2dd4bf;
-    background: #14b8a610; border-radius: 999px;
-    padding: 6px 14px; font-size: 13px; font-weight: 600; letter-spacing: .4px;
+    border: 1px solid #14b8a6; color: #2dd4bf; background: #14b8a610;
+    border-radius: 999px; padding: 6px 14px; font-size: 13px; font-weight: 600; letter-spacing: .4px;
   }
-  .badge .dot { width: 8px; height: 8px; border-radius: 50%; background: #14b8a6; }
-  h1 { margin: 20px 0 10px; font-size: 26px; font-weight: 700; color: #fff; }
+  .badge .dot { width: 8px; height: 8px; border-radius: 50%; background: #14b8a6; box-shadow: 0 0 10px #14b8a6; }
+  h1 {
+    margin: 20px 0 10px; font-size: 26px; font-weight: 700; color: #fff;
+    text-shadow: 0 0 24px rgba(45,212,191,.28);
+  }
   .domain {
     display: inline-block; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 13px; color: #a1a1aa; background: #18181b; border: 1px solid #27272a;
+    font-size: 13px; color: #a1a1aa; background: rgba(24,24,27,.85); border: 1px solid #27272a;
     padding: 4px 10px; border-radius: 6px; margin-bottom: 16px; max-width: 100%;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   p.desc { color: #a1a1aa; font-size: 15px; line-height: 1.6; }
   .sep { height: 1px; background: #27272a; margin: 22px 0; }
   .foot { color: #52525b; font-size: 12px; }
-  /* Floating GitHub corner link — same placement as the app's React pages. */
   .github-corner {
     position: fixed; right: 20px; bottom: 20px; z-index: 50;
     display: inline-flex; align-items: center; gap: 8px;
@@ -46,9 +68,14 @@
   .github-corner:hover { color: #f4f4f5; border-color: #3f3f46; background: #27272acc; }
   .github-corner:active { transform: scale(.96); }
   .github-corner svg { width: 16px; height: 16px; fill: none; }
+  @media (max-width: 480px) { .card { padding: 28px 22px; } h1 { font-size: 22px; } }
 </style>
 </head>
 <body>
+  <canvas id="holo" aria-hidden="true"></canvas>
+  <div class="vignette" aria-hidden="true"></div>
+  <div class="scanlines" aria-hidden="true"></div>
+
   <div class="card">
     <span class="badge"><span class="dot"></span> VPN Policy</span>
     <h1>Access blocked</h1>
@@ -58,7 +85,9 @@
     <div class="sep"></div>
     <p class="foot">Blocked by the WireGuard Console domain filter</p>
   </div>
+
   <script src="/blocked-hostname.js"></script>
+  <script src="/blocked-holo.js"></script>
   <a class="github-corner" href="https://github.com/garyhooi/wireguard-console" target="_blank" rel="noopener noreferrer" title="View source on GitHub" aria-label="View source on GitHub">
     <svg viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 19c-4.3 1.4 -4.3 -2.5 -6 -3m12 5v-3.5c0-1 .1-1.4-.5-2c2.8-.3 5.5-1.4 5.5-6a4.6 4.6 0 0 0 -1.3-3.2a4.2 4.2 0 0 0 -.1-3.2s-1.1-.3-3.5 1.3a12.3 12.3 0 0 0 -6.2 0C6.5 2.8 5.4 3.1 5.4 3.1a4.2 4.2 0 0 0 -.1 3.2A4.6 4.6 0 0 0 4 9.5c0 4.6 2.7 5.7 5.5 6c-.6.6-.6 1.2-.5 2V21"/></svg>
     GitHub

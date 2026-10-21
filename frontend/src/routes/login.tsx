@@ -4,7 +4,7 @@ import { useMutation } from '@tanstack/react-query'
 import { IconShieldLock } from '@tabler/icons-react'
 import { PrimaryButton, inputCls, labelCls } from '../lib/ui'
 import { apiFetch, setCsrfToken } from '../lib/api'
-import { HoloBackground } from '../components/HoloBackground'
+import { HoloPageBackground } from '../components/HoloPageBackground'
 
 interface LoginResponse {
   csrf_token?: string
@@ -60,15 +60,7 @@ export function LoginPage() {
   return (
     <div className="relative min-h-screen flex items-center justify-center overflow-hidden bg-[#04060c] px-4">
       {/* Animated cyberpunk/hologram backdrop (canvas, no dependencies). */}
-      <HoloBackground />
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_center,rgba(4,6,12,0.15)_0%,rgba(4,6,12,0.72)_62%,rgba(4,6,12,0.94)_100%)]"
-      />
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute inset-0 opacity-[0.05] [background-image:repeating-linear-gradient(0deg,rgba(226,232,240,0.9)_0px,rgba(226,232,240,0.9)_1px,transparent_1px,transparent_3px)]"
-      />
+      <HoloPageBackground />
 
       <div className="relative z-10 w-full max-w-md">
         <div className="relative bg-[#080d16]/80 backdrop-blur-md border border-teal-500/25 rounded-xl p-8 shadow-[0_0_60px_-18px_rgba(45,212,191,0.55)]">
