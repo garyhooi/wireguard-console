@@ -71,6 +71,12 @@ export interface ApiFetchOptions extends Omit<RequestInit, 'body'> {
   body?: unknown
   /** Do not auto-attach X-CSRF-Token (login/2FA endpoints are pre-session). */
   skipCsrf?: boolean
+  /**
+   * Do not treat a 401 as an expired session. Pre-session endpoints (login,
+   * 2FA verify) answer 401 for bad credentials; redirecting there would
+   * reload the page and swallow the error/verification animation.
+   */
+  noAuthRedirect?: boolean
 }
 
 /**
@@ -78,7 +84,7 @@ export interface ApiFetchOptions extends Omit<RequestInit, 'body'> {
  * CSRF token to non-GET calls, and routes 401s to the login page.
  */
 export async function apiFetch(path: string, options: ApiFetchOptions = {}): Promise<Response> {
-  const { body, skipCsrf, headers, ...rest } = options
+  const { body, skipCsrf, noAuthRedirect, headers, ...rest } = options
 
   const h = new Headers(headers)
   const isForm = body instanceof FormData
@@ -104,7 +110,7 @@ export async function apiFetch(path: string, options: ApiFetchOptions = {}): Pro
     body: body === undefined ? undefined : isForm ? (body as FormData) : JSON.stringify(body),
   })
 
-  if (res.status === 401) {
+  if (res.status === 401 && !noAuthRedirect) {
     // Session expired/revoked — clear in-memory state and send to login.
     csrfToken = ''
     sessionChecked = false

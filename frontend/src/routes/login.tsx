@@ -1,11 +1,12 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { IconShieldLock } from '@tabler/icons-react'
 import { PrimaryButton, inputCls, labelCls } from '../lib/ui'
 import { apiFetch, setCsrfToken } from '../lib/api'
 import { HoloPageBackground } from '../components/HoloPageBackground'
 import { AuthStatusOverlay } from '../components/AuthStatusOverlay'
+import { LoginLockoutOverlay } from '../components/LoginLockoutOverlay'
 
 interface LoginResponse {
   csrf_token?: string
@@ -20,6 +21,15 @@ interface LoginResponse {
   }
 }
 
+// 429 from the login endpoint: the server locked this IP out for a while.
+class LoginLockedError extends Error {
+  seconds: number
+  constructor(seconds: number, message: string) {
+    super(message)
+    this.seconds = seconds
+  }
+}
+
 export const Route = createFileRoute('/login')({
   component: LoginPage,
 })
@@ -30,6 +40,30 @@ export function LoginPage() {
   // Full-page verification animation: green on success, red on failure.
   const [authOutcome, setAuthOutcome] = useState<'success' | 'failure' | null>(null)
   const redirectRef = useRef<string | null>(null)
+  // Remaining seconds of a server-enforced IP lockout (null = not locked).
+  const [lockoutSeconds, setLockoutSeconds] = useState<number | null>(null)
+
+  // Refresh-safe lockout: on load, ask the server whether this IP is still
+  // locked so the countdown resumes where it stopped.
+  useEffect(() => {
+    let cancelled = false
+    apiFetch('/api/auth/lockout-status', { noAuthRedirect: true })
+      .then(async (res) => {
+        if (!res.ok) return
+        const data = (await res.json().catch(() => null)) as
+          | { locked?: boolean; retry_after_seconds?: number }
+          | null
+        if (!cancelled && data?.locked && (data.retry_after_seconds ?? 0) > 0) {
+          setLockoutSeconds(data.retry_after_seconds as number)
+        }
+      })
+      .catch(() => {
+        // Lockout status is best-effort: a failed probe must not block login.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const loginMutation = useMutation({
     mutationFn: async (credentials: { email: string; password: string }) => {
@@ -37,10 +71,22 @@ export function LoginPage() {
         method: 'POST',
         body: credentials,
         skipCsrf: true,
+        // A 401 here means "wrong email/password", not an expired session;
+        // without this the client would reload /login and swallow the red
+        // verification animation.
+        noAuthRedirect: true,
       })
       if (!res.ok) {
-        const err = await res.json().catch(() => null)
-        throw new Error((err as { error?: string } | null)?.error || 'Login failed')
+        const err = (await res.json().catch(() => null)) as
+          | { error?: string; retry_after_seconds?: number }
+          | null
+        if (res.status === 429 && (err?.retry_after_seconds ?? 0) > 0) {
+          throw new LoginLockedError(
+            err?.retry_after_seconds as number,
+            err?.error || 'Too many failed login attempts',
+          )
+        }
+        throw new Error(err?.error || 'Login failed')
       }
       return res.json() as Promise<LoginResponse>
     },
@@ -56,7 +102,11 @@ export function LoginPage() {
       redirectRef.current = '/dashboard'
       setAuthOutcome('success')
     },
-    onError: () => {
+    onError: (error) => {
+      if (error instanceof LoginLockedError) {
+        setLockoutSeconds(error.seconds)
+        return
+      }
       setAuthOutcome('failure')
     },
   })
@@ -123,7 +173,11 @@ export function LoginPage() {
               <div className="text-red-400 text-sm text-center">{loginMutation.error.message}</div>
             )}
 
-            <PrimaryButton type="submit" disabled={loginMutation.isPending} className="w-full py-2.5">
+            <PrimaryButton
+              type="submit"
+              disabled={loginMutation.isPending || lockoutSeconds !== null}
+              className="w-full py-2.5"
+            >
               {loginMutation.isPending ? 'Signing in…' : 'Sign in'}
             </PrimaryButton>
           </form>
@@ -133,6 +187,16 @@ export function LoginPage() {
           Secure remote access to your private mesh.
         </p>
       </div>
+
+      {lockoutSeconds !== null && (
+        <LoginLockoutOverlay
+          seconds={lockoutSeconds}
+          onUnlock={() => {
+            setLockoutSeconds(null)
+            loginMutation.reset()
+          }}
+        />
+      )}
 
       {authOutcome && (
         <AuthStatusOverlay

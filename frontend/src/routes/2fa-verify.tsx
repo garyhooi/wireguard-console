@@ -27,6 +27,9 @@ function Verify2FAPage() {
         method: 'POST',
         body: { code },
         skipCsrf: true,
+        // Bad/expired pending sessions are pre-auth 401s; reloading would
+        // swallow the failure animation and the error message.
+        noAuthRedirect: true,
       })
       if (!res.ok) {
         const error = await res.json().catch(() => null)
