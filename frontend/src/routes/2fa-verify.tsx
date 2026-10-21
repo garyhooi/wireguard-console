@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { PrimaryButton, inputCls, labelCls } from '../lib/ui'
 import { HoloPageBackground } from '../components/HoloPageBackground'
+import { AuthStatusOverlay } from '../components/AuthStatusOverlay'
 import { apiFetch, setCsrfToken } from '../lib/api'
 
 interface Verify2FAResponse {
@@ -15,6 +16,7 @@ export const Route = createFileRoute('/2fa-verify')({
 
 function Verify2FAPage() {
   const [code, setCode] = useState('')
+  const [authOutcome, setAuthOutcome] = useState<'success' | 'failure' | null>(null)
 
   const verifyMutation = useMutation({
     mutationFn: async (code: string) => {
@@ -34,7 +36,10 @@ function Verify2FAPage() {
     },
     onSuccess: (data) => {
       setCsrfToken(data.csrf_token)
-      window.location.href = '/dashboard'
+      setAuthOutcome('success')
+    },
+    onError: () => {
+      setAuthOutcome('failure')
     },
   })
 
@@ -82,6 +87,20 @@ function Verify2FAPage() {
           </PrimaryButton>
         </form>
       </div>
+
+      {authOutcome && (
+        <AuthStatusOverlay
+          status={authOutcome}
+          message={authOutcome === 'failure' ? verifyMutation.error?.message : undefined}
+          onDone={() => {
+            if (authOutcome === 'success') {
+              window.location.href = '/dashboard'
+              return
+            }
+            setAuthOutcome(null)
+          }}
+        />
+      )}
     </div>
   )
 }

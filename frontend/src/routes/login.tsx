@@ -1,10 +1,11 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { IconShieldLock } from '@tabler/icons-react'
 import { PrimaryButton, inputCls, labelCls } from '../lib/ui'
 import { apiFetch, setCsrfToken } from '../lib/api'
 import { HoloPageBackground } from '../components/HoloPageBackground'
+import { AuthStatusOverlay } from '../components/AuthStatusOverlay'
 
 interface LoginResponse {
   csrf_token?: string
@@ -26,6 +27,9 @@ export const Route = createFileRoute('/login')({
 export function LoginPage() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  // Full-page verification animation: green on success, red on failure.
+  const [authOutcome, setAuthOutcome] = useState<'success' | 'failure' | null>(null)
+  const redirectRef = useRef<string | null>(null)
 
   const loginMutation = useMutation({
     mutationFn: async (credentials: { email: string; password: string }) => {
@@ -43,12 +47,17 @@ export function LoginPage() {
     onSuccess: (data) => {
       if (data.pending_2fa) {
         // The pending-2FA token rides in the wgc_pending2fa HttpOnly cookie
-        // set by the server — nothing to store client-side.
+        // set by the server — nothing to store client-side. Not a completed
+        // sign-in yet, so no "verified" animation: continue to the code step.
         window.location.href = '/2fa-verify'
-      } else {
-        setCsrfToken(data.csrf_token)
-        window.location.href = '/dashboard'
+        return
       }
+      setCsrfToken(data.csrf_token)
+      redirectRef.current = '/dashboard'
+      setAuthOutcome('success')
+    },
+    onError: () => {
+      setAuthOutcome('failure')
     },
   })
 
@@ -59,7 +68,7 @@ export function LoginPage() {
 
   return (
     <div className="relative min-h-screen flex items-center justify-center overflow-hidden bg-[#04060c] px-4">
-      {/* Animated cyberpunk/hologram backdrop (canvas, no dependencies). */}
+      {/* Animated holographic backdrop (canvas, no dependencies). */}
       <HoloPageBackground />
 
       <div className="relative z-10 w-full max-w-md">
@@ -124,6 +133,20 @@ export function LoginPage() {
           Secure remote access to your private mesh.
         </p>
       </div>
+
+      {authOutcome && (
+        <AuthStatusOverlay
+          status={authOutcome}
+          message={authOutcome === 'failure' ? loginMutation.error?.message : undefined}
+          onDone={() => {
+            if (authOutcome === 'success' && redirectRef.current) {
+              window.location.href = redirectRef.current
+              return
+            }
+            setAuthOutcome(null)
+          }}
+        />
+      )}
     </div>
   )
 }
