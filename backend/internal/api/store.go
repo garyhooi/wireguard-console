@@ -178,9 +178,10 @@ type sessionResponse struct {
 }
 
 type loginResponse struct {
-	CSRFToken  string         `json:"csrf_token,omitempty"`
-	Pending2FA bool           `json:"pending_2fa,omitempty"`
-	Admin      *adminResponse `json:"admin,omitempty"`
+	CSRFToken       string         `json:"csrf_token,omitempty"`
+	Pending2FA      bool           `json:"pending_2fa,omitempty"`
+	Pending2FASetup bool           `json:"pending_2fa_setup,omitempty"`
+	Admin           *adminResponse `json:"admin,omitempty"`
 }
 
 func Login(store *Store) http.HandlerFunc {
@@ -326,6 +327,29 @@ func Login(store *Store) http.HandlerFunc {
 			setSessionCookie(w, r, pending2FACookieName, token, int(pending2FALife.Seconds()))
 
 			resp.Pending2FA = true
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
+
+		// No second factor enrolled yet: force enrollment before granting a
+		// session. The pending cookie only authorizes the setup endpoints
+		// (see forced_2fa_setup.go); protected APIs stay closed until the
+		// authenticator code is confirmed.
+		if !admin.TOTPEnabled {
+			token, err := generateToken()
+			if err != nil {
+				log.Printf("Failed to generate 2FA setup token: %v", err)
+				writeError(w, http.StatusInternalServerError, "Failed to start 2FA setup")
+				return
+			}
+			if _, err := createSession(ctx, store, admin.ID, token, r, pending2FALife, false); err != nil {
+				log.Printf("Failed to create pending 2FA setup session: admin_id=%s, err=%v", admin.ID, err)
+				writeError(w, http.StatusInternalServerError, "Failed to start 2FA setup")
+				return
+			}
+			setSessionCookie(w, r, pending2FACookieName, token, int(pending2FALife.Seconds()))
+
+			resp.Pending2FASetup = true
 			writeJSON(w, http.StatusOK, resp)
 			return
 		}

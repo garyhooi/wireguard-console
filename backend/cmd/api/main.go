@@ -142,6 +142,9 @@ func main() {
 		// after a refresh (no session exists yet while locked out).
 		r.Get("/auth/lockout-status", api.LoginLockoutStatus(store))
 		r.Post("/auth/2fa/verify", api.Verify2FA(store))
+		// Forced 2FA enrollment for accounts without TOTP (pending cookie only).
+		r.Post("/auth/2fa/setup-pending", api.Setup2FAPending(store))
+		r.Post("/auth/2fa/enable-pending", api.Enable2FAPending(store))
 		r.Post("/auth/logout", api.Logout(store))
 		r.Post("/claim", api.ClaimUser(store))
 		r.Get("/peer-config/{token}", api.GetPeerConfigByToken(store))
