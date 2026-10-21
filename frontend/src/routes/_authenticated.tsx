@@ -1,5 +1,5 @@
 import { createFileRoute, Link, Outlet, redirect } from '@tanstack/react-router'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   IconBan,
@@ -25,6 +25,7 @@ import { apiFetch, clearSessionCache, fetchSession } from '../lib/api'
 import { ensureTimezone } from '../lib/timezone'
 import { ConsoleVersionControl } from '../components/ConsoleVersionControl'
 import { AmbientBackdrop } from '../components/AmbientBackdrop'
+import { SignOutOverlay } from '../components/SignOutOverlay'
 
 interface Stats {
   total_peers: number
@@ -134,17 +135,23 @@ function AuthenticatedLayout() {
     refetchInterval: 15000,
   })
 
-  // Server-side logout: revoke the session row (kills the token everywhere)
-  // then clear the in-memory cache. The HttpOnly cookie is cleared by the
-  // server's response; no localStorage token exists to remove.
-  const logout = async () => {
-    try {
-      await apiFetch('/api/auth/logout', { method: 'POST' })
-    } catch {
-      // Even if the network call fails we must still leave the authed shell.
-    }
-    clearSessionCache()
-    window.location.href = '/login'
+  // Sign out: revoke the session server-side immediately, play the
+  // "hologram power-down" overlay, then land on /login. The overlay's onDone
+  // awaits the logout call so a slow network can never leave the session
+  // alive while we redirect.
+  const [signingOut, setSigningOut] = useState(false)
+  const logoutRequest = useRef<Promise<void> | null>(null)
+  const logout = () => {
+    if (signingOut) return
+    setSigningOut(true)
+    logoutRequest.current = (async () => {
+      try {
+        await apiFetch('/api/auth/logout', { method: 'POST' })
+      } catch {
+        // Even if the network call fails we must still leave the authed shell.
+      }
+      clearSessionCache()
+    })()
   }
 
   const currentPath = window.location.pathname
@@ -278,6 +285,15 @@ function AuthenticatedLayout() {
           <Outlet />
         </main>
       </div>
+
+      {signingOut && (
+        <SignOutOverlay
+          onDone={async () => {
+            await logoutRequest.current
+            window.location.href = '/login'
+          }}
+        />
+      )}
     </div>
   )
 }
