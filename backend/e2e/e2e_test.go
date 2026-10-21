@@ -1561,6 +1561,21 @@ func TestEndToEnd(t *testing.T) {
 	if resp, _ := lockLogin("e2e-NewPassw0rd!"); resp.StatusCode != 429 {
 		t.Fatalf("correct password during lockout: status %d, want 429", resp.StatusCode)
 	}
+
+	// Changing network must not inherit an account-level lock: only the IP
+	// that guessed wrong is locked, and the DB legacy lock is no longer enforced.
+	otherPayload, _ := json.Marshal(map[string]string{"email": "e2e@console.test", "password": "e2e-NewPassw0rd!"})
+	otherReq, _ := http.NewRequest("POST", baseURL+"/api/auth/login", bytes.NewReader(otherPayload))
+	otherReq.Header.Set("Content-Type", "application/json")
+	otherReq.Header.Set("X-Forwarded-For", "198.51.100.88")
+	otherResp, err := http.DefaultClient.Do(otherReq)
+	if err != nil {
+		t.Fatalf("login from a different IP: %v", err)
+	}
+	otherResp.Body.Close()
+	if otherResp.StatusCode != 200 {
+		t.Fatalf("login from a different IP: status %d, want 200 (no account lock)", otherResp.StatusCode)
+	}
 	// Cleanup: delete local server (cascade peers) must succeed
 	resp, _ = api(t, "DELETE", "/api/servers/"+serverID, token, map[string]string{
 		"code": actorCode(),

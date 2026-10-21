@@ -186,14 +186,12 @@ type loginResponse struct {
 func Login(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		clientIP := getClientIP(r)
-		// IP lockout after repeated wrong passwords (60s). Checked before the
-		// broader rate limiter so the UI always gets a precise countdown.
+		// The only brute-force gate is the per-IP lockout: 3 wrong passwords
+		// lock that IP for 60s. (An older in-memory 5-attempts/15-minutes
+		// limiter used to sit here too; it counted successful logins, could
+		// not be reset, and reported a misleading 60s — removed.)
 		if remaining := ipLoginLockout.remaining(clientIP, time.Now()); remaining > 0 {
 			respondLocked(w, lockoutSeconds(remaining))
-			return
-		}
-		if loginRateLimiter.isLimited(clientIP) {
-			respondLocked(w, lockoutSeconds(loginLockoutDuration))
 			return
 		}
 
@@ -232,25 +230,13 @@ func Login(store *Store) http.HandlerFunc {
 			return
 		}
 
-		if admin.LockedUntil != nil && time.Now().Before(*admin.LockedUntil) {
-			writeError(w, http.StatusTooManyRequests, "Account is temporarily locked")
-			return
-		}
+		// Note: the old per-admin 15-minute lock (5 wrong passwords) is gone.
+		// It followed the account across IPs (so changing network did not help)
+		// and punished honest typos; brute-force protection now lives in the
+		// per-IP lockout above. A successful login clears any legacy DB lock.
 
 		if !verifyPassword(req.Password, admin.PasswordHash) {
 			log.Printf("Password verification failed for admin: %s", admin.Email)
-			admin.FailedLoginCount++
-			if admin.FailedLoginCount >= 5 {
-				lockUntil := time.Now().Add(15 * time.Minute)
-				admin.LockedUntil = &lockUntil
-				admin.FailedLoginCount = 0
-			}
-			store.pool.Exec(ctx, `
-				UPDATE admins 
-				SET failed_login_count = $1, locked_until = $2, updated_at = now()
-				WHERE id = $3
-			`, admin.FailedLoginCount, admin.LockedUntil, admin.ID)
-
 			// Third wrong password (or later) locks this IP for 60s so the UI
 			// can show a precise countdown instead of a generic error.
 			if locked := ipLoginLockout.recordFailure(clientIP, time.Now()); locked > 0 {
@@ -643,8 +629,6 @@ func (rl *rateLimiter) isLimited(key string) bool {
 	rl.attempts[key] = append(rl.attempts[key], now)
 	return false
 }
-
-var loginRateLimiter = newRateLimiter(15*time.Minute, 5)
 
 func Setup2FA(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
