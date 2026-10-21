@@ -111,6 +111,29 @@ export function LoginPage() {
     },
   })
 
+  // The client timer can drift; before unlocking, ask the server. If the
+  // lock is somehow still active (clock skew, another tab), keep counting the
+  // server-reported remaining time instead of letting the user retry early.
+  const handleLockoutUnlock = async () => {
+    try {
+      const res = await apiFetch('/api/auth/lockout-status', { noAuthRedirect: true })
+      const data = res.ok
+        ? ((await res.json().catch(() => null)) as
+            | { locked?: boolean; retry_after_seconds?: number }
+            | null)
+        : null
+      const seconds = Math.ceil(Number(data?.retry_after_seconds ?? 0))
+      if (data?.locked && seconds > 0) {
+        setLockoutSeconds(seconds)
+        return
+      }
+    } catch {
+      // Status probe failed: fall through and unlock optimistically.
+    }
+    setLockoutSeconds(null)
+    loginMutation.reset()
+  }
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     loginMutation.mutate({ email, password })
@@ -192,8 +215,7 @@ export function LoginPage() {
         <LoginLockoutOverlay
           seconds={lockoutSeconds}
           onUnlock={() => {
-            setLockoutSeconds(null)
-            loginMutation.reset()
+            void handleLockoutUnlock()
           }}
         />
       )}
