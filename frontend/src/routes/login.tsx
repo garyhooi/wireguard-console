@@ -4,6 +4,7 @@ import { useMutation } from '@tanstack/react-query'
 import { IconShieldLock } from '@tabler/icons-react'
 import { PrimaryButton, inputCls, labelCls } from '../lib/ui'
 import { apiFetch, setCsrfToken } from '../lib/api'
+import { HoloBackground } from '../components/HoloBackground'
 
 interface LoginResponse {
   csrf_token?: string
@@ -22,7 +23,7 @@ export const Route = createFileRoute('/login')({
   component: LoginPage,
 })
 
-function LoginPage() {
+export function LoginPage() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
 
@@ -57,15 +58,32 @@ function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-zinc-950 px-4">
-      <div className="w-full max-w-md">
-        <div className="bg-zinc-900/60 border border-zinc-800 rounded-xl p-8 shadow-2xl">
+    <div className="relative min-h-screen flex items-center justify-center overflow-hidden bg-[#04060c] px-4">
+      {/* Animated cyberpunk/hologram backdrop (canvas, no dependencies). */}
+      <HoloBackground />
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_center,rgba(4,6,12,0.15)_0%,rgba(4,6,12,0.72)_62%,rgba(4,6,12,0.94)_100%)]"
+      />
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 opacity-[0.05] [background-image:repeating-linear-gradient(0deg,rgba(226,232,240,0.9)_0px,rgba(226,232,240,0.9)_1px,transparent_1px,transparent_3px)]"
+      />
+
+      <div className="relative z-10 w-full max-w-md">
+        <div className="relative bg-[#080d16]/80 backdrop-blur-md border border-teal-500/25 rounded-xl p-8 shadow-[0_0_60px_-18px_rgba(45,212,191,0.55)]">
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-x-10 -top-px h-px bg-gradient-to-r from-transparent via-teal-300/70 to-transparent"
+          />
           <div className="flex flex-col items-center text-center">
-            <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-teal-500/10 ring-1 ring-teal-500/20 mb-4">
-              <IconShieldLock size={24} stroke={1.6} className="text-teal-400" aria-hidden="true" />
+            <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-teal-500/10 ring-1 ring-teal-400/30 mb-4 shadow-[0_0_24px_-6px_rgba(45,212,191,0.65)]">
+              <IconShieldLock size={24} stroke={1.6} className="text-teal-300" aria-hidden="true" />
             </span>
-            <h1 className="text-2xl font-semibold tracking-tight text-zinc-100">WireGuard Console</h1>
-            <p className="mt-2 text-sm text-zinc-500">Sign in to your account</p>
+            <h1 className="text-2xl font-semibold tracking-tight text-zinc-50 [text-shadow:0_0_24px_rgba(45,212,191,0.28)]">
+              WireGuard Console
+            </h1>
+            <p className="mt-2 text-sm text-zinc-400">Sign in to your account</p>
           </div>
 
           <form className="mt-8 space-y-5" onSubmit={handleSubmit}>
@@ -110,7 +128,7 @@ function LoginPage() {
           </form>
         </div>
 
-        <p className="mt-6 text-center text-xs text-zinc-600">
+        <p className="mt-6 text-center text-xs tracking-wide text-zinc-500">
           Secure remote access to your private mesh.
         </p>
       </div>
