@@ -1,10 +1,11 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import QRCode from 'qrcode'
 import { IconDownload } from '@tabler/icons-react'
 import { PrimaryButton, inputCls, labelCls } from '../lib/ui'
 import { HoloPageBackground } from '../components/HoloPageBackground'
+import { LinkInvalidOverlay } from '../components/LinkInvalidOverlay'
 
 interface ClaimResponse {
   peer_id: string
@@ -17,10 +18,33 @@ export const Route = createFileRoute('/claim/$token')({
 
 function ClaimPage() {
   const { token } = Route.useParams()
+  const [linkStatus, setLinkStatus] = useState<'checking' | 'valid' | 'expired' | 'invalid' | 'used'>('checking')
   const [step, setStep] = useState<'form' | 'success'>('form')
   const [fullName, setFullName] = useState('')
   const [response, setResponse] = useState<ClaimResponse | null>(null)
   const [qrDataUrl, setQrDataUrl] = useState('')
+
+  // Check the invite before showing the form: expired / used / unknown links
+  // get a persistent full-screen error instead of a form that cannot succeed.
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/claim/' + encodeURIComponent(token) + '/status')
+      .then(async (res) => (res.ok ? res.json() : { valid: true }))
+      .then((s: { valid?: boolean; reason?: string }) => {
+        if (cancelled) return
+        if (s.valid) {
+          setLinkStatus('valid')
+          return
+        }
+        setLinkStatus(s.reason === 'expired' || s.reason === 'used' ? s.reason : 'invalid')
+      })
+      .catch(() => {
+        if (!cancelled) setLinkStatus('valid')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [token])
 
   const claimMutation = useMutation({
     mutationFn: async (data: { token: string; full_name: string; public_key: string }) => {
@@ -29,7 +53,20 @@ function ClaimPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
       })
-      if (!res.ok) throw new Error('Failed to claim account')
+      if (!res.ok) {
+        // The link may have been used/expired between page load and submit;
+        // resolve the reason so the persistent error overlay can take over.
+        if (res.status === 404) {
+          const s = (await fetch('/api/claim/' + encodeURIComponent(token) + '/status')
+            .then((r2) => (r2.ok ? r2.json() : null))
+            .catch(() => null)) as { valid?: boolean; reason?: string } | null
+          if (s && !s.valid) {
+            setLinkStatus(s.reason === 'expired' || s.reason === 'used' ? s.reason : 'invalid')
+            throw new Error('This link is no longer valid')
+          }
+        }
+        throw new Error('Failed to claim account')
+      }
       return res.json() as Promise<ClaimResponse>
     },
     onSuccess: (data) => {
@@ -45,6 +82,41 @@ function ClaimPage() {
     // Keys are generated server-side; the config (with the private key)
     // comes back in the response.
     claimMutation.mutate({ token, full_name: fullName, public_key: '' })
+  }
+
+  if (linkStatus === 'checking') {
+    return (
+      <div className="relative min-h-screen overflow-hidden bg-[#04060c] flex items-center justify-center px-4">
+        <HoloPageBackground />
+        <div className="relative z-10 w-full max-w-md bg-[#080d16]/80 backdrop-blur-md border border-teal-500/25 rounded-xl p-8 text-center">
+          <p className="text-zinc-400 text-sm">Checking your invite link…</p>
+        </div>
+      </div>
+    )
+  }
+  if (linkStatus === 'expired') {
+    return (
+      <LinkInvalidOverlay
+        title="LINK EXPIRED"
+        detail="This invite link has expired. Ask your administrator to send you a new one."
+      />
+    )
+  }
+  if (linkStatus === 'used') {
+    return (
+      <LinkInvalidOverlay
+        title="LINK ALREADY USED"
+        detail="This invite link has already been used to claim an account. Ask your administrator for a new link."
+      />
+    )
+  }
+  if (linkStatus === 'invalid') {
+    return (
+      <LinkInvalidOverlay
+        title="LINK INVALID"
+        detail="This invite link is not valid. Check the link in your email or ask your administrator."
+      />
+    )
   }
 
   const downloadConfig = () => {

@@ -147,6 +147,7 @@ func main() {
 		r.Post("/auth/2fa/enable-pending", api.Enable2FAPending(store))
 		r.Post("/auth/logout", api.Logout(store))
 		r.Post("/claim", api.ClaimUser(store))
+		r.Get("/claim/{token}/status", api.GetClaimLinkStatus(store))
 		r.Get("/peer-config/{token}", api.GetPeerConfigByToken(store))
 
 		// Protected routes group

@@ -149,3 +149,37 @@ func ClaimUser(store *Store) http.HandlerFunc {
 		})
 	}
 }
+
+// GetClaimLinkStatus lets the public claim page check an invite before showing
+// the form, so an expired / already-used / unknown link can render a persistent
+// full-screen error instead of a form that cannot succeed. Always 200 so the
+// UI can distinguish the reasons without treating them as transport errors.
+func GetClaimLinkStatus(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := r.PathValue("token")
+		if token == "" {
+			writeJSON(w, http.StatusOK, map[string]interface{}{"valid": false, "reason": "invalid"})
+			return
+		}
+
+		ctx := context.Background()
+		var acceptedAt *time.Time
+		var expiresAt time.Time
+		err := store.pool.QueryRow(ctx, `
+			SELECT accepted_at, expires_at FROM invites WHERE token_hash = $1
+		`, hashToken(token)).Scan(&acceptedAt, &expiresAt)
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]interface{}{"valid": false, "reason": "invalid"})
+			return
+		}
+		if acceptedAt != nil {
+			writeJSON(w, http.StatusOK, map[string]interface{}{"valid": false, "reason": "used"})
+			return
+		}
+		if !time.Now().Before(expiresAt) {
+			writeJSON(w, http.StatusOK, map[string]interface{}{"valid": false, "reason": "expired"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"valid": true, "reason": "ok"})
+	}
+}

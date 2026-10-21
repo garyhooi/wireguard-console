@@ -5,6 +5,7 @@ import QRCode from 'qrcode'
 import { IconDownload } from '@tabler/icons-react'
 import { PrimaryButton } from '../lib/ui'
 import { HoloPageBackground } from '../components/HoloPageBackground'
+import { LinkInvalidOverlay } from '../components/LinkInvalidOverlay'
 
 interface PeerConfigResponse {
   peer_name: string
@@ -37,6 +38,16 @@ function PeerConfigPage() {
 
   const config = data?.config
 
+  // Invalid / expired / revoked link: persistent full-screen red status.
+  if (isError) {
+    return (
+      <LinkInvalidOverlay
+        title="LINK EXPIRED OR INVALID"
+        detail="This configuration link is no longer valid. Ask the administrator who set up your device to send a fresh link."
+      />
+    )
+  }
+
   const downloadConfig = () => {
     if (!config) return
     const blob = new Blob([config], { type: 'text/plain' })
@@ -58,17 +69,6 @@ function PeerConfigPage() {
 
         {isLoading && (
           <p className="text-zinc-400 text-sm">Loading your configuration…</p>
-        )}
-
-        {isError && (
-          <div>
-            <p className="text-red-400 text-sm mb-4">
-              This link is invalid or has expired.
-            </p>
-            <p className="text-zinc-400 text-sm">
-              Ask the administrator who set up your device to send a fresh link.
-            </p>
-          </div>
         )}
 
         {data && config && (

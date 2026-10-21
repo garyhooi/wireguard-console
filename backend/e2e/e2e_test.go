@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -912,6 +913,61 @@ func TestEndToEnd(t *testing.T) {
 	})
 	expectStatus(t, reuseResp, 404, "POST /api/claim (reuse)")
 
+	// ---- Claim link status (public page pre-check) ----
+	// The claim page asks this before showing the form so an expired / used /
+	// unknown link can render a persistent full-screen error.
+	statusInvResp, statusInvOut := api(t, "POST", "/api/users", token, map[string]string{
+		"email": "statuslink@example.com", "full_name": "Status Link",
+	})
+	expectStatus(t, statusInvResp, 201, "POST /api/users (status link)")
+	statusLink, _ := statusInvOut["invite_link"].(string)
+	statusToken := strings.TrimPrefix(statusLink, "https://console.test/claim/")
+	claimStatus := func(tok string) map[string]interface{} {
+		resp, out := api(t, "GET", "/api/claim/"+tok+"/status", "", nil)
+		expectStatus(t, resp, 200, "GET /api/claim/{token}/status")
+		return out
+	}
+	if st := claimStatus(statusToken); st["valid"] != true {
+		t.Fatalf("fresh claim status = %v, want valid", st)
+	}
+	if st := claimStatus("not-a-real-token"); st["valid"] != false || st["reason"] != "invalid" {
+		t.Fatalf("unknown claim status = %v, want invalid", st)
+	}
+
+	tokenHash := func(tok string) string {
+		h := sha256.Sum256([]byte(tok))
+		return hex.EncodeToString(h[:])
+	}
+	poolX, err := pgxpool.New(context.Background(), dbURL)
+	if err != nil {
+		t.Fatalf("claim status pool: %v", err)
+	}
+	defer poolX.Close()
+
+	// Used link.
+	if _, err := poolX.Exec(context.Background(),
+		`UPDATE invites SET accepted_at = now() WHERE token_hash = $1`, tokenHash(statusToken)); err != nil {
+		t.Fatalf("mark invite used: %v", err)
+	}
+	if st := claimStatus(statusToken); st["valid"] != false || st["reason"] != "used" {
+		t.Fatalf("used claim status = %v, want used", st)
+	}
+
+	// Expired link: status reports "expired" and claiming is refused.
+	expStatusResp, expStatusOut := api(t, "POST", "/api/users", token, map[string]string{
+		"email": "statuseXpired@example.com", "full_name": "Status Expired",
+	})
+	expectStatus(t, expStatusResp, 201, "POST /api/users (expired status link)")
+	expLink, _ := expStatusOut["invite_link"].(string)
+	expToken := strings.TrimPrefix(expLink, "https://console.test/claim/")
+	if _, err := poolX.Exec(context.Background(),
+		`UPDATE invites SET expires_at = now() - interval '1 minute' WHERE token_hash = $1`, tokenHash(expToken)); err != nil {
+		t.Fatalf("expire invite: %v", err)
+	}
+	if st := claimStatus(expToken); st["valid"] != false || st["reason"] != "expired" {
+		t.Fatalf("expired claim status = %v, want expired", st)
+	}
+
 	// ---- Admins: list scan regression + invite + reset password ----
 	adminList := rawGet(t, baseURL+"/api/admins", token)
 	var adminRows []map[string]interface{}
@@ -1754,13 +1810,13 @@ func TestEndToEnd(t *testing.T) {
 	// The status endpoint drives the refresh-safe UI countdown.
 	statusReq, _ := http.NewRequest("GET", baseURL+"/api/auth/lockout-status", nil)
 	statusReq.Header.Set("X-Forwarded-For", lockIP)
-	statusResp, err := http.DefaultClient.Do(statusReq)
+	statusResp2, err := http.DefaultClient.Do(statusReq)
 	if err != nil {
 		t.Fatalf("lockout status: %v", err)
 	}
 	var statusOut map[string]interface{}
-	json.NewDecoder(statusResp.Body).Decode(&statusOut)
-	statusResp.Body.Close()
+	json.NewDecoder(statusResp2.Body).Decode(&statusOut)
+	statusResp2.Body.Close()
 	if locked, _ := statusOut["locked"].(bool); !locked {
 		t.Fatalf("lockout-status locked = false, want true (%v)", statusOut)
 	}
