@@ -203,6 +203,10 @@ func Login(store *Store) http.HandlerFunc {
 
 		ctx := context.Background()
 
+		// Configured lockout policy (Configuration → Security); defaults are
+		// 3 attempts / 60s IP window / 60s account window.
+		policy := loadLoginPolicy(ctx, store.pool)
+
 		var admin db.Admin
 		err := store.pool.QueryRow(ctx, `
 			SELECT id, email, password_hash, role, totp_enabled, status, failed_login_count, locked_until, last_login_at, created_at, updated_at
@@ -217,7 +221,7 @@ func Login(store *Store) http.HandlerFunc {
 		if err != nil {
 			// Unknown email is a failed credential attempt too (same timing /
 			// lockout semantics as a wrong password).
-			if locked := ipLoginLockout.recordFailure(clientIP, time.Now()); locked > 0 {
+			if locked := ipLoginLockout.recordFailure(clientIP, time.Now(), policy.MaxAttempts, policy.IPLockout); locked > 0 {
 				respondLocked(w, lockoutSeconds(locked))
 				return
 			}
@@ -249,21 +253,21 @@ func Login(store *Store) http.HandlerFunc {
 		if !verifyPassword(req.Password, admin.PasswordHash) {
 			log.Printf("Password verification failed for admin: %s", admin.Email)
 
-			// Third wrong password locks BOTH the IP (fresh guesses) and the
-			// account (guesses hopping between IPs) for 60s.
+			// The configured number of wrong passwords locks BOTH the IP
+			// (fresh guesses) and the account (guesses hopping between IPs).
 			admin.FailedLoginCount++
 			var accountLock time.Duration
-			if admin.FailedLoginCount >= loginLockoutThreshold {
-				until := time.Now().Add(loginLockoutDuration)
+			if admin.FailedLoginCount >= policy.MaxAttempts {
+				until := time.Now().Add(policy.AccountLockout)
 				admin.LockedUntil = &until
 				admin.FailedLoginCount = 0
-				accountLock = loginLockoutDuration
+				accountLock = policy.AccountLockout
 			}
 			store.pool.Exec(ctx, `
 				UPDATE admins SET failed_login_count = $1, locked_until = $2, updated_at = now() WHERE id = $3
 			`, admin.FailedLoginCount, admin.LockedUntil, admin.ID)
 
-			ipLock := ipLoginLockout.recordFailure(clientIP, time.Now())
+			ipLock := ipLoginLockout.recordFailure(clientIP, time.Now(), policy.MaxAttempts, policy.IPLockout)
 			if accountLock > 0 || ipLock > 0 {
 				locked := accountLock
 				if ipLock > locked {

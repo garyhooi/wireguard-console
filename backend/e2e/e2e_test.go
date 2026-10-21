@@ -1504,6 +1504,50 @@ func TestEndToEnd(t *testing.T) {
 	})
 	expectStatus(t, badEmailResp, 400, "PATCH /api/users/{id} invalid email")
 
+	// ---- Login lockout policy (Configuration → Security) ----
+	secResp, secOut := api(t, "GET", "/api/config/security", token, nil)
+	expectStatus(t, secResp, 200, "GET /api/config/security")
+	if n, _ := secOut["login_max_attempts"].(float64); n != 3 {
+		t.Fatalf("default login_max_attempts = %v, want 3", secOut["login_max_attempts"])
+	}
+	if n, _ := secOut["login_ip_lockout_seconds"].(float64); n != 60 {
+		t.Fatalf("default login_ip_lockout_seconds = %v, want 60", secOut["login_ip_lockout_seconds"])
+	}
+	if n, _ := secOut["login_account_lockout_seconds"].(float64); n != 60 {
+		t.Fatalf("default login_account_lockout_seconds = %v, want 60", secOut["login_account_lockout_seconds"])
+	}
+
+	// Admins can read the policy but only a super_admin can change it.
+	denySec, _ := api(t, "PATCH", "/api/config/security", op2Tok, map[string]interface{}{
+		"login_max_attempts": 3, "login_ip_lockout_seconds": 60, "login_account_lockout_seconds": 60,
+	})
+	expectStatus(t, denySec, 403, "PATCH /api/config/security (admin denied)")
+
+	saveSec, _ := api(t, "PATCH", "/api/config/security", token, map[string]interface{}{
+		"login_max_attempts": 4, "login_ip_lockout_seconds": 30, "login_account_lockout_seconds": 45,
+	})
+	expectStatus(t, saveSec, 200, "PATCH /api/config/security (super_admin)")
+	_, secOut2 := api(t, "GET", "/api/config/security", token, nil)
+	for key, want := range map[string]float64{
+		"login_max_attempts": 4, "login_ip_lockout_seconds": 30, "login_account_lockout_seconds": 45,
+	} {
+		if got, _ := secOut2[key].(float64); got != want {
+			t.Fatalf("saved %s = %v, want %v", key, secOut2[key], want)
+		}
+	}
+
+	// Out-of-range values are rejected.
+	badSec, _ := api(t, "PATCH", "/api/config/security", token, map[string]interface{}{
+		"login_max_attempts": 0, "login_ip_lockout_seconds": 60, "login_account_lockout_seconds": 60,
+	})
+	expectStatus(t, badSec, 400, "PATCH /api/config/security (invalid attempts)")
+
+	// Restore the defaults so the lockout-behaviour test below uses them.
+	restoreSec, _ := api(t, "PATCH", "/api/config/security", token, map[string]interface{}{
+		"login_max_attempts": 3, "login_ip_lockout_seconds": 60, "login_account_lockout_seconds": 60,
+	})
+	expectStatus(t, restoreSec, 200, "PATCH /api/config/security (restore defaults)")
+
 	// ---- Login lockout: 3 wrong passwords -> 60s for the IP AND the account ----
 	lockIP := "198.51.100.77"
 	lockLogin := func(password string) (*http.Response, map[string]interface{}) {

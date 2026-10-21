@@ -11,15 +11,12 @@ import (
 )
 
 // Per-IP login lockout: too many wrong passwords from one source lock that
-// source out for a short, fixed window. This is separate from the per-admin
-// failed-login lock (5 tries / 15 min) because it protects the endpoint from
-// credential stuffing without punishing an admin whose account is attacked
-// from elsewhere. Tracked in memory: a process restart clears it, which is
-// fine for a 60s anti-guessing brake.
+// source out for a short window. The attempt threshold and duration are
+// configurable in Configuration → Security (see security_config.go); both the
+// IP and the account lock use them. Tracked in memory: a process restart
+// clears it, which is fine for a short anti-guessing brake.
 const (
-	loginLockoutThreshold = 3                // wrong passwords before the IP is locked
-	loginLockoutDuration  = 60 * time.Second // how long the IP stays locked
-	loginLockoutIdleTTL   = 15 * time.Minute // forget idle IPs entirely
+	loginLockoutIdleTTL = 15 * time.Minute // forget idle IPs entirely
 )
 
 type loginLockoutEntry struct {
@@ -72,9 +69,10 @@ func (t *loginLockoutTracker) remaining(ip string, now time.Time) time.Duration 
 	return 0
 }
 
-// recordFailure counts one wrong password for the IP. When the threshold is
-// reached it starts the lockout and returns its duration; otherwise 0.
-func (t *loginLockoutTracker) recordFailure(ip string, now time.Time) time.Duration {
+// recordFailure counts one wrong password for the IP. When the configured
+// threshold is reached it starts a lockout of the configured duration and
+// returns it; otherwise 0.
+func (t *loginLockoutTracker) recordFailure(ip string, now time.Time, threshold int, duration time.Duration) time.Duration {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -91,10 +89,10 @@ func (t *loginLockoutTracker) recordFailure(ip string, now time.Time) time.Durat
 	e.failures++
 	e.lastSeen = now
 
-	if e.failures >= loginLockoutThreshold {
-		e.lockedUntil = now.Add(loginLockoutDuration)
+	if e.failures >= threshold {
+		e.lockedUntil = now.Add(duration)
 		e.failures = 0
-		return loginLockoutDuration
+		return duration
 	}
 	return 0
 }
