@@ -210,13 +210,13 @@ func Login(store *Store) http.HandlerFunc {
 
 		var admin db.Admin
 		err := store.pool.QueryRow(ctx, `
-			SELECT id, email, password_hash, role, totp_enabled, status, failed_login_count, locked_until, last_login_at, created_at, updated_at
+			SELECT id, email, password_hash, role, totp_enabled, status, failed_login_count, locked_until, last_login_at, invite_expires_at, created_at, updated_at
 			FROM admins
 			WHERE email = $1
 		`, req.Email).Scan(
 			&admin.ID, &admin.Email, &admin.PasswordHash, &admin.Role,
 			&admin.TOTPEnabled, &admin.Status, &admin.FailedLoginCount,
-			&admin.LockedUntil, &admin.LastLoginAt, &admin.CreatedAt, &admin.UpdatedAt,
+			&admin.LockedUntil, &admin.LastLoginAt, &admin.InviteExpiresAt, &admin.CreatedAt, &admin.UpdatedAt,
 		)
 
 		if err != nil {
@@ -284,13 +284,21 @@ func Login(store *Store) http.HandlerFunc {
 		// Successful credentials clear this IP's wrong-password counter.
 		ipLoginLockout.reset(clientIP)
 
+		// An invited admin's temporary credentials expire after the window
+		// configured in Configuration → Security.
+		if admin.InviteExpiresAt != nil && time.Now().After(*admin.InviteExpiresAt) {
+			writeError(w, http.StatusForbidden, "This admin invitation has expired — ask a super admin to resend your credentials")
+			return
+		}
+
 		admin.FailedLoginCount = 0
 		admin.LockedUntil = nil
+		admin.InviteExpiresAt = nil // invitation accepted
 		now := time.Now()
 		admin.LastLoginAt = &now
 		store.pool.Exec(ctx, `
 			UPDATE admins 
-			SET failed_login_count = 0, locked_until = NULL, last_login_at = $1, updated_at = now()
+			SET failed_login_count = 0, locked_until = NULL, invite_expires_at = NULL, last_login_at = $1, updated_at = now()
 			WHERE id = $2
 		`, now, admin.ID)
 

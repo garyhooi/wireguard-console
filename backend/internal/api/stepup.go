@@ -46,10 +46,15 @@ func GetStepUpConfig(store *Store) http.HandlerFunc {
 func UpdateStepUpConfig(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			StepUpMinutes int `json:"step_up_minutes"`
+			StepUpMinutes int    `json:"step_up_minutes"`
+			Code          string `json:"code"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
+			return
+		}
+		ctx := context.Background()
+		if !verifyActor2FACode(w, r, ctx, store, getAdminID(r), req.Code) {
 			return
 		}
 		if req.StepUpMinutes < 0 || req.StepUpMinutes > 1440 {
@@ -57,7 +62,6 @@ func UpdateStepUpConfig(store *Store) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
 		adminID := getAdminID(r)
 
 		if _, err := store.pool.Exec(ctx, `

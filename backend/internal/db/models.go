@@ -18,6 +18,7 @@ type Admin struct {
 	FailedLoginCount    int        `json:"failed_login_count"`
 	LockedUntil         *time.Time `json:"locked_until"`
 	LastLoginAt         *time.Time `json:"last_login_at"`
+	InviteExpiresAt     *time.Time `json:"invite_expires_at,omitempty"`
 	CreatedAt           time.Time  `json:"created_at"`
 	UpdatedAt           time.Time  `json:"updated_at"`
 }

@@ -225,7 +225,8 @@ func CreatePeer(store *Store) http.HandlerFunc {
 				writeError(w, http.StatusInternalServerError, "Failed to generate access token")
 				return
 			}
-			expiresAt := time.Now().Add(peerAccessLinkTTL)
+			policy := loadInvitePolicy(ctx, store.pool)
+			expiresAt := time.Now().Add(policy.PeerClaim)
 			if _, err := store.pool.Exec(ctx, `
 				INSERT INTO peer_access_tokens (token_hash, peer_id, expires_at)
 				VALUES ($1, $2, $3)
@@ -495,7 +496,7 @@ func ResendPeerConfigEmail(store *Store) http.HandlerFunc {
 			return
 		}
 
-		configLink, err := issuePeerAccessLink(ctx, store.pool, peerID)
+		configLink, _, err := issuePeerAccessLink(ctx, store.pool, peerID)
 		if err != nil {
 			if err == errPeerNotActive {
 				writeError(w, http.StatusConflict, errPeerNotActive.Error())

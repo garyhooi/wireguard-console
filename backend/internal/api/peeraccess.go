@@ -17,8 +17,8 @@ import (
 // Peer access links give a VPN user a way to fetch their own .conf / scan
 // their QR without the console ever emailing the private key. The link
 // embeds a random bearer token whose sha256 hash is stored (same pattern as
-// user invite tokens). Links expire after peerAccessLinkTTL.
-const peerAccessLinkTTL = 72 * time.Hour
+// user invite tokens). Lifetime is configured in Configuration → Security
+// (default 72h).
 
 // configLinkURL builds the public peer-config URL for a raw token.
 func configLinkURL(token string) string {
@@ -31,35 +31,36 @@ func configLinkURL(token string) string {
 // (generated) private key — that is what lets the link page serve a real
 // client config. Repeated calls are fine: each returns a new token and old
 // ones stay valid until they expire.
-func issuePeerAccessLink(ctx context.Context, pool *pgxpool.Pool, peerID uuid.UUID) (string, error) {
+func issuePeerAccessLink(ctx context.Context, pool *pgxpool.Pool, peerID uuid.UUID) (string, int, error) {
 	var privEnc string
 	var status string
 	err := pool.QueryRow(ctx,
 		`SELECT private_key_encrypted, status FROM peers WHERE id = $1`, peerID).
 		Scan(&privEnc, &status)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	if status != "active" {
-		return "", errPeerNotActive
+		return "", 0, errPeerNotActive
 	}
 	if privEnc == "" {
-		return "", errNoPrivateKey
+		return "", 0, errNoPrivateKey
 	}
 
+	policy := loadInvitePolicy(ctx, pool)
 	token, err := generateToken()
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 
-	expiresAt := time.Now().Add(peerAccessLinkTTL)
+	expiresAt := time.Now().Add(policy.PeerClaim)
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO peer_access_tokens (token_hash, peer_id, expires_at)
 		VALUES ($1, $2, $3)
 	`, hashToken(token), peerID, expiresAt); err != nil {
-		return "", err
+		return "", 0, err
 	}
-	return configLinkURL(token), nil
+	return configLinkURL(token), int(policy.PeerClaim.Hours()), nil
 }
 
 var (
@@ -82,7 +83,7 @@ func CreatePeerAccessLink(store *Store) http.HandlerFunc {
 		ctx := context.Background()
 		adminID := getAdminID(r)
 
-		configLink, err := issuePeerAccessLink(ctx, store.pool, peerID)
+		configLink, expiresInHours, err := issuePeerAccessLink(ctx, store.pool, peerID)
 		if err != nil {
 			if err == errPeerNotActive {
 				writeError(w, http.StatusConflict, errPeerNotActive.Error())
@@ -98,7 +99,7 @@ func CreatePeerAccessLink(store *Store) http.HandlerFunc {
 
 		writeJSON(w, http.StatusCreated, map[string]interface{}{
 			"config_link":      configLink,
-			"expires_in_hours": int(peerAccessLinkTTL.Hours()),
+			"expires_in_hours": expiresInHours,
 		})
 	}
 }

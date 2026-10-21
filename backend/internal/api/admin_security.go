@@ -49,6 +49,25 @@ func verifyActor2FA(w http.ResponseWriter, r *http.Request, ctx context.Context,
 		return false
 	}
 
+	return checkActor2FACode(w, r, ctx, store, actorID, code)
+}
+
+// verifyActor2FACode is the STRICT variant: it always requires a fresh code
+// and never accepts the step-up grace window. Security-policy changes
+// (Configuration → Security) use this so a policy can never be altered by a
+// merely-recently-verified session.
+func verifyActor2FACode(w http.ResponseWriter, r *http.Request, ctx context.Context, store *Store, actorID uuid.UUID, code string) bool {
+	if code == "" {
+		writeError(w, http.StatusBadRequest, "A 2FA code is required for this action")
+		return false
+	}
+	return checkActor2FACode(w, r, ctx, store, actorID, code)
+}
+
+// checkActor2FACode validates a supplied authenticator / backup code.
+func checkActor2FACode(w http.ResponseWriter, r *http.Request, ctx context.Context, store *Store, actorID uuid.UUID, code string) bool {
+	sessionHash := currentSessionTokenHash(r)
+
 	var secretEnc string
 	var enabled bool
 	err := store.pool.QueryRow(ctx,

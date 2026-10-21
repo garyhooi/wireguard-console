@@ -1107,11 +1107,11 @@ func TestEndToEnd(t *testing.T) {
 	}
 	// Enable a 60-minute grace (super_admin only).
 	resp, _ = api(t, "PATCH", "/api/config/step-up", token, map[string]interface{}{
-		"step_up_minutes": 60,
+		"step_up_minutes": 60, "code": actorCode(),
 	})
 	expectStatus(t, resp, 200, "PATCH /api/config/step-up (super_admin)")
 	resp, _ = api(t, "PATCH", "/api/config/step-up", token, map[string]interface{}{
-		"step_up_minutes": 99999,
+		"step_up_minutes": 99999, "code": actorCode(),
 	})
 	expectStatus(t, resp, 400, "PATCH /api/config/step-up (out of range)")
 
@@ -1136,7 +1136,7 @@ func TestEndToEnd(t *testing.T) {
 
 	// Disable the grace again (0) — the very next gated action must ask again.
 	resp, _ = api(t, "PATCH", "/api/config/step-up", token, map[string]interface{}{
-		"step_up_minutes": 0,
+		"step_up_minutes": 0, "code": actorCode(),
 	})
 	expectStatus(t, resp, 200, "PATCH /api/config/step-up (reset to 0)")
 	backToStrict, _ := api(t, "PATCH", "/api/servers/"+serverID, token, map[string]interface{}{
@@ -1614,6 +1614,11 @@ func TestEndToEnd(t *testing.T) {
 	if n, _ := secOut["login_account_lockout_seconds"].(float64); n != 60 {
 		t.Fatalf("default login_account_lockout_seconds = %v, want 60", secOut["login_account_lockout_seconds"])
 	}
+	for _, key := range []string{"vpn_invite_expiry_hours", "peer_claim_expiry_hours", "admin_invite_expiry_hours"} {
+		if n, _ := secOut[key].(float64); n != 72 {
+			t.Fatalf("default %s = %v, want 72", key, secOut[key])
+		}
+	}
 
 	// Admins can read the policy but only a super_admin can change it.
 	denySec, _ := api(t, "PATCH", "/api/config/security", op2Tok, map[string]interface{}{
@@ -1621,8 +1626,18 @@ func TestEndToEnd(t *testing.T) {
 	})
 	expectStatus(t, denySec, 403, "PATCH /api/config/security (admin denied)")
 
+	// Security-policy changes require a fresh 2FA code (strict: a step-up
+	// grace window never waives it).
+	noCodeSec, _ := api(t, "PATCH", "/api/config/security", token, map[string]interface{}{
+		"login_max_attempts": 3, "login_ip_lockout_seconds": 60, "login_account_lockout_seconds": 60,
+		"vpn_invite_expiry_hours": 72, "peer_claim_expiry_hours": 72, "admin_invite_expiry_hours": 72,
+	})
+	expectStatus(t, noCodeSec, 400, "PATCH /api/config/security (no 2FA code)")
+
 	saveSec, _ := api(t, "PATCH", "/api/config/security", token, map[string]interface{}{
 		"login_max_attempts": 4, "login_ip_lockout_seconds": 30, "login_account_lockout_seconds": 45,
+		"vpn_invite_expiry_hours": 72, "peer_claim_expiry_hours": 72, "admin_invite_expiry_hours": 72,
+		"code": actorCode(),
 	})
 	expectStatus(t, saveSec, 200, "PATCH /api/config/security (super_admin)")
 	_, secOut2 := api(t, "GET", "/api/config/security", token, nil)
@@ -1634,15 +1649,69 @@ func TestEndToEnd(t *testing.T) {
 		}
 	}
 
-	// Out-of-range values are rejected.
+	// Custom link lifetimes are applied to newly issued links.
+	saveExpiry, _ := api(t, "PATCH", "/api/config/security", token, map[string]interface{}{
+		"login_max_attempts": 4, "login_ip_lockout_seconds": 30, "login_account_lockout_seconds": 45,
+		"vpn_invite_expiry_hours": 6, "peer_claim_expiry_hours": 6, "admin_invite_expiry_hours": 6,
+		"code": actorCode(),
+	})
+	expectStatus(t, saveExpiry, 200, "PATCH /api/config/security (link expiry)")
+	expInvResp, expInvOut := api(t, "POST", "/api/users", token, map[string]string{
+		"email": "expiryinvite@example.com", "full_name": "Expiry Invite",
+	})
+	expectStatus(t, expInvResp, 201, "POST /api/users (custom invite expiry)")
+	if h, _ := expInvOut["expires_in_hours"].(float64); h != 6 {
+		t.Fatalf("user invite expires_in_hours = %v, want 6", expInvOut["expires_in_hours"])
+	}
+	expAdminResp, expAdminOut := api(t, "POST", "/api/admins", token, map[string]string{
+		"email": "expiryadmin@example.com", "role": "admin",
+	})
+	expectStatus(t, expAdminResp, 201, "POST /api/admins (custom invite expiry)")
+	if h, _ := expAdminOut["expires_in_hours"].(float64); h != 6 {
+		t.Fatalf("admin invite expires_in_hours = %v, want 6", expAdminOut["expires_in_hours"])
+	}
+	// The original e2e peer has been suspended/removed by earlier flows, so
+	// issue a fresh active peer for the claim-link expiry check.
+	newPeerResp, _ := api(t, "POST", "/api/peers", token, map[string]interface{}{
+		"name": "Expiry Claim Peer", "server_id": serverID, "user_id": userID,
+	})
+	expectStatus(t, newPeerResp, 201, "POST /api/peers (expiry claim peer)")
+	var expPeerRows []map[string]interface{}
+	json.Unmarshal([]byte(rawGet(t, baseURL+"/api/peers", token)), &expPeerRows)
+	expPeerID := ""
+	for _, pr := range expPeerRows {
+		if name, _ := pr["name"].(string); name == "Expiry Claim Peer" {
+			expPeerID, _ = pr["id"].(string)
+		}
+	}
+	if expPeerID == "" {
+		t.Fatal("expiry claim peer not found in peer list")
+	}
+	expLinkResp, expLinkOut := api(t, "POST", "/api/peers/"+expPeerID+"/config-link", token, nil)
+	expectStatus(t, expLinkResp, 201, "POST /api/peers/{id}/config-link (custom expiry)")
+	if h, _ := expLinkOut["expires_in_hours"].(float64); h != 6 {
+		t.Fatalf("peer claim expires_in_hours = %v, want 6", expLinkOut["expires_in_hours"])
+	}
+
+	// Out-of-range values are rejected (with a valid code).
 	badSec, _ := api(t, "PATCH", "/api/config/security", token, map[string]interface{}{
 		"login_max_attempts": 0, "login_ip_lockout_seconds": 60, "login_account_lockout_seconds": 60,
+		"vpn_invite_expiry_hours": 72, "peer_claim_expiry_hours": 72, "admin_invite_expiry_hours": 72,
+		"code": actorCode(),
 	})
 	expectStatus(t, badSec, 400, "PATCH /api/config/security (invalid attempts)")
+	badExpiry, _ := api(t, "PATCH", "/api/config/security", token, map[string]interface{}{
+		"login_max_attempts": 3, "login_ip_lockout_seconds": 60, "login_account_lockout_seconds": 60,
+		"vpn_invite_expiry_hours": 0, "peer_claim_expiry_hours": 72, "admin_invite_expiry_hours": 72,
+		"code": actorCode(),
+	})
+	expectStatus(t, badExpiry, 400, "PATCH /api/config/security (invalid invite expiry)")
 
 	// Restore the defaults so the lockout-behaviour test below uses them.
 	restoreSec, _ := api(t, "PATCH", "/api/config/security", token, map[string]interface{}{
 		"login_max_attempts": 3, "login_ip_lockout_seconds": 60, "login_account_lockout_seconds": 60,
+		"vpn_invite_expiry_hours": 72, "peer_claim_expiry_hours": 72, "admin_invite_expiry_hours": 72,
+		"code": actorCode(),
 	})
 	expectStatus(t, restoreSec, 200, "PATCH /api/config/security (restore defaults)")
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -542,14 +543,40 @@ func InviteAdmin(store *Store) http.HandlerFunc {
 
 		ctx := context.Background()
 		adminID := getAdminID(r)
+		policy := loadInvitePolicy(ctx, store.pool)
+		inviteExpiresAt := time.Now().Add(policy.AdminInvite)
 
-		_, err := store.pool.Exec(ctx, `
-			INSERT INTO admins (email, password_hash, role, status)
-			VALUES ($1, $2, $3, 'active')
-		`, req.Email, passwordHash, req.Role)
-
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to invite admin")
+		var existingID uuid.UUID
+		var existingInvite *time.Time
+		err := store.pool.QueryRow(ctx,
+			`SELECT id, invite_expires_at FROM admins WHERE email = $1`, req.Email).
+			Scan(&existingID, &existingInvite)
+		switch {
+		case err == nil:
+			if existingInvite == nil {
+				writeError(w, http.StatusConflict, "An admin with this email already exists")
+				return
+			}
+			// Re-invite: rotate the temporary credentials and refresh the
+			// configured invite window (used when the first email was lost or
+			// its credentials expired).
+			if _, err := store.pool.Exec(ctx, `
+				UPDATE admins SET password_hash = $1, invite_expires_at = $2, updated_at = now()
+				WHERE id = $3
+			`, passwordHash, inviteExpiresAt, existingID); err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to invite admin")
+				return
+			}
+		case errors.Is(err, pgx.ErrNoRows):
+			if _, err := store.pool.Exec(ctx, `
+				INSERT INTO admins (email, password_hash, role, status, invite_expires_at)
+				VALUES ($1, $2, $3, 'active', $4)
+			`, req.Email, passwordHash, req.Role, inviteExpiresAt); err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to invite admin")
+				return
+			}
+		default:
+			writeError(w, http.StatusInternalServerError, "Failed to check existing admins")
 			return
 		}
 
@@ -569,7 +596,10 @@ func InviteAdmin(store *Store) http.HandlerFunc {
 		queue := email.NewQueue(store.pool, nil)
 		_ = queue.EnqueueRenderedEmail(ctx, req.Email, subject, body)
 
-		writeJSON(w, http.StatusCreated, map[string]string{"status": "invited"})
+		writeJSON(w, http.StatusCreated, map[string]interface{}{
+			"status":           "invited",
+			"expires_in_hours": int(policy.AdminInvite.Hours()),
+		})
 	}
 }
 
@@ -827,9 +857,10 @@ func ResetAdminPassword(store *Store) http.HandlerFunc {
 		}
 
 		newPassword := randomPassword(16)
+		policy := loadInvitePolicy(ctx, store.pool)
 		if _, err := store.pool.Exec(ctx, `
-			UPDATE admins SET password_hash = $1, updated_at = now() WHERE id = $2
-		`, hashPassword(newPassword), adminID); err != nil {
+			UPDATE admins SET password_hash = $1, invite_expires_at = $2, updated_at = now() WHERE id = $3
+		`, hashPassword(newPassword), time.Now().Add(policy.AdminInvite), adminID); err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to reset password")
 			return
 		}
@@ -853,7 +884,11 @@ func ResetAdminPassword(store *Store) http.HandlerFunc {
 		}
 
 		logAudit(ctx, store, actorID, "admin.reset_password", "admin", adminID.String(), nil)
-		writeJSON(w, http.StatusOK, map[string]string{"status": "reset", "password": newPassword})
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"status":           "reset",
+			"password":         newPassword,
+			"expires_in_hours": int(policy.AdminInvite.Hours()),
+		})
 	}
 }
 

@@ -161,8 +161,9 @@ func CreateUser(store *Store) http.HandlerFunc {
 			return
 		}
 
-		// Generate invite token + queue the claim email (fresh 72h link).
-		inviteLink, err := issueUserInvite(ctx, store.pool, req.Email, req.FullName)
+		// Generate invite token + queue the claim email (fresh link; lifetime
+		// configured in Configuration → Security, default 72h).
+		inviteLink, inviteHours, err := issueUserInvite(ctx, store.pool, req.Email, req.FullName)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to create invite")
 			return
@@ -173,31 +174,34 @@ func CreateUser(store *Store) http.HandlerFunc {
 		// Always return the invite link: without configured SMTP the email
 		// is never delivered, and even with SMTP the admin may want to
 		// share it directly (or if the mail worker is still catching up).
-		writeJSON(w, http.StatusCreated, map[string]string{
-			"status":      "created",
-			"invite_link": inviteLink,
+		writeJSON(w, http.StatusCreated, map[string]interface{}{
+			"status":           "created",
+			"invite_link":      inviteLink,
+			"expires_in_hours": inviteHours,
 		})
 	}
 }
 
 // issueUserInvite mints a fresh claim invite for the user and queues the
 // invite email (best-effort — SMTP may not be configured yet; the mail
-// worker keeps the job until it is). Returns the public claim link so the
-// admin can share it manually when delivery fails.
-func issueUserInvite(ctx context.Context, pool *pgxpool.Pool, to, fullName string) (string, error) {
+// worker keeps the job until it is). Returns the public claim link and its
+// lifetime in hours so the admin can share it manually when delivery fails.
+// The lifetime is configured in Configuration → Security (default 72h).
+func issueUserInvite(ctx context.Context, pool *pgxpool.Pool, to, fullName string) (string, int, error) {
+	policy := loadInvitePolicy(ctx, pool)
 	token, err := generateToken()
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	tokenHash := hashToken(token)
-	expiresAt := time.Now().Add(72 * time.Hour)
+	expiresAt := time.Now().Add(policy.VPNInvite)
 
 	_, err = pool.Exec(ctx, `
 		INSERT INTO invites (user_id, token_hash, expires_at)
 		VALUES ((SELECT id FROM users WHERE email = $1), $2, $3)
 	`, to, tokenHash, expiresAt)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 
 	// Enqueue email job. CONSOLE_DOMAIN may be a domain or a public IP;
@@ -213,7 +217,7 @@ func issueUserInvite(ctx context.Context, pool *pgxpool.Pool, to, fullName strin
 		log.Printf("Failed to enqueue invite email: %v", err)
 	}
 
-	return inviteLink, nil
+	return inviteLink, int(policy.VPNInvite.Hours()), nil
 }
 
 // ResendUserInvite re-issues the claim email for a user who has not claimed
@@ -241,7 +245,7 @@ func ResendUserInvite(store *Store) http.HandlerFunc {
 			return
 		}
 
-		inviteLink, err := issueUserInvite(ctx, store.pool, to, fullName)
+		inviteLink, inviteHours, err := issueUserInvite(ctx, store.pool, to, fullName)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to create invite")
 			return
@@ -249,9 +253,10 @@ func ResendUserInvite(store *Store) http.HandlerFunc {
 
 		logAudit(ctx, store, adminID, "user.invite.resend", "user", userID.String(), nil)
 
-		writeJSON(w, http.StatusOK, map[string]string{
-			"status":      "resent",
-			"invite_link": inviteLink,
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"status":           "resent",
+			"invite_link":      inviteLink,
+			"expires_in_hours": inviteHours,
 		})
 	}
 }
