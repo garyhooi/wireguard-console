@@ -574,7 +574,7 @@ function SecuritySettings() {
   const valid = Number.isFinite(parsed) && parsed >= 0 && parsed <= 1440
 
   return (
-    <div className="max-w-xl">
+    <div className="max-w-xl space-y-6">
       <div className="border border-zinc-800 rounded-lg bg-zinc-900/50 p-6">
         <div className="flex items-center gap-2 mb-1">
           <IconShieldLock size={18} stroke={1.6} className="text-zinc-400" aria-hidden="true" />
@@ -638,6 +638,167 @@ function SecuritySettings() {
           </div>
         )}
       </div>
+
+      <LoginLockoutSettings isSuperAdmin={isSuperAdmin} />
+    </div>
+  )
+}
+
+interface LoginLockoutConfig {
+  login_max_attempts: number
+  login_ip_lockout_seconds: number
+  login_account_lockout_seconds: number
+}
+
+// Configuration → Security: attempts / lock windows for the login lockout.
+// Readable by every admin; only a super_admin can save it.
+function LoginLockoutSettings({ isSuperAdmin }: { isSuperAdmin: boolean }) {
+  const queryClient = useQueryClient()
+  const [attempts, setAttempts] = useState('3')
+  const [ipSeconds, setIpSeconds] = useState('60')
+  const [accountSeconds, setAccountSeconds] = useState('60')
+  const [message, setMessage] = useState('')
+  const [error, setError] = useState('')
+
+  const { data: cfg, isLoading } = useQuery<LoginLockoutConfig>({
+    queryKey: ['security-config'],
+    queryFn: async () => apiJson<LoginLockoutConfig>('/api/config/security'),
+  })
+
+  useEffect(() => {
+    if (!cfg) return
+    setAttempts(String(cfg.login_max_attempts))
+    setIpSeconds(String(cfg.login_ip_lockout_seconds))
+    setAccountSeconds(String(cfg.login_account_lockout_seconds))
+  }, [cfg])
+
+  const saveMutation = useMutation({
+    mutationFn: async (body: LoginLockoutConfig) => {
+      return apiJson('/api/config/security', { method: 'PATCH', body })
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['security-config'] })
+      setMessage('Saved — new lockouts use these values.')
+      setError('')
+    },
+    onError: (e: Error) => {
+      setError(e.message)
+      setMessage('')
+    },
+  })
+
+  const parsedAttempts = parseInt(attempts, 10)
+  const parsedIp = parseInt(ipSeconds, 10)
+  const parsedAccount = parseInt(accountSeconds, 10)
+  const valid =
+    Number.isFinite(parsedAttempts) && parsedAttempts >= 1 && parsedAttempts <= 20 &&
+    Number.isFinite(parsedIp) && parsedIp >= 5 && parsedIp <= 3600 &&
+    Number.isFinite(parsedAccount) && parsedAccount >= 5 && parsedAccount <= 3600
+  const dirty = !!cfg && (
+    parsedAttempts !== cfg.login_max_attempts ||
+    parsedIp !== cfg.login_ip_lockout_seconds ||
+    parsedAccount !== cfg.login_account_lockout_seconds
+  )
+
+  return (
+    <div className="border border-zinc-800 rounded-lg bg-zinc-900/50 p-6">
+      <div className="flex items-center gap-2 mb-1">
+        <IconShieldLock size={18} stroke={1.6} className="text-zinc-400" aria-hidden="true" />
+        <h2 className="text-base font-semibold text-zinc-100">Login lockout</h2>
+      </div>
+      <p className="text-sm text-zinc-400 mb-4">
+        After this many wrong passwords, both the source IP and the account are locked for the
+        configured windows — changing IP does not bypass the account lock. Defaults: 3 attempts,
+        60 seconds each.
+      </p>
+
+      {error && <p className="text-red-400 text-sm mb-3">{error}</p>}
+      {message && <p className="text-teal-400 text-sm mb-3">{message}</p>}
+
+      {isLoading ? (
+        <p className="text-zinc-400 text-sm">Loading…</p>
+      ) : (
+        <div className="space-y-5">
+          <div className="flex items-baseline justify-between gap-3 text-sm">
+            <span className="text-zinc-500">Currently</span>
+            <span className="text-zinc-100 font-mono tabular-nums">
+              {cfg?.login_max_attempts} attempts · IP {cfg?.login_ip_lockout_seconds}s · account{' '}
+              {cfg?.login_account_lockout_seconds}s
+            </span>
+          </div>
+
+          {isSuperAdmin ? (
+            <div className="space-y-4">
+              <div className="grid gap-4 sm:grid-cols-3">
+                <div>
+                  <label htmlFor="loginMaxAttempts" className={labelCls}>
+                    Failed attempts
+                  </label>
+                  <input
+                    id="loginMaxAttempts"
+                    type="number"
+                    min={1}
+                    max={20}
+                    value={attempts}
+                    onChange={(e) => setAttempts(e.target.value)}
+                    className={inputCls}
+                  />
+                </div>
+                <div>
+                  <label htmlFor="loginIpLockoutSeconds" className={labelCls}>
+                    IP lockout (seconds)
+                  </label>
+                  <input
+                    id="loginIpLockoutSeconds"
+                    type="number"
+                    min={5}
+                    max={3600}
+                    value={ipSeconds}
+                    onChange={(e) => setIpSeconds(e.target.value)}
+                    className={inputCls}
+                  />
+                </div>
+                <div>
+                  <label htmlFor="loginAccountLockoutSeconds" className={labelCls}>
+                    Account lockout (seconds)
+                  </label>
+                  <input
+                    id="loginAccountLockoutSeconds"
+                    type="number"
+                    min={5}
+                    max={3600}
+                    value={accountSeconds}
+                    onChange={(e) => setAccountSeconds(e.target.value)}
+                    className={inputCls}
+                  />
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <PrimaryButton
+                  onClick={() =>
+                    valid &&
+                    saveMutation.mutate({
+                      login_max_attempts: parsedAttempts,
+                      login_ip_lockout_seconds: parsedIp,
+                      login_account_lockout_seconds: parsedAccount,
+                    })
+                  }
+                  disabled={!valid || !dirty || saveMutation.isPending}
+                >
+                  {saveMutation.isPending ? 'Saving…' : 'Save lockout policy'}
+                </PrimaryButton>
+                <p className="text-xs text-zinc-600">
+                  Attempts 1–20, windows 5–3600s (60 = 1 minute). Applies to new lockouts; super_admin only.
+                </p>
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-amber-400/90">
+              Only a super admin can change the login lockout policy.
+            </p>
+          )}
+        </div>
+      )}
     </div>
   )
 }

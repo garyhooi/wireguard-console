@@ -119,3 +119,71 @@ describe('Configuration → Timezone', () => {
     await screen.findByText(/Timezone cleared/)
   })
 })
+
+describe('Configuration → Security login lockout', () => {
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
+
+  it('shows the current policy and saves super-admin edits', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init })
+      const method = (init?.method ?? 'GET').toUpperCase()
+      if (url.includes('/api/config/smtp') && method === 'GET') {
+        return { ok: true, status: 200, json: async () => ({ host: '', configured: false }) } as Response
+      }
+      if (url.includes('/api/admins/me') && method === 'GET') {
+        return { ok: true, status: 200, json: async () => ({ role: 'super_admin' }) } as Response
+      }
+      if (url.includes('/api/config/step-up') && method === 'GET') {
+        return { ok: true, status: 200, json: async () => ({ step_up_minutes: 0 }) } as Response
+      }
+      if (url.includes('/api/config/security') && method === 'GET') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            login_max_attempts: 3,
+            login_ip_lockout_seconds: 60,
+            login_account_lockout_seconds: 60,
+          }),
+        } as Response
+      }
+      if (url.includes('/api/config/security') && method === 'PATCH') {
+        return { ok: true, status: 200, json: async () => ({ status: 'updated' }) } as Response
+      }
+      throw new Error('unexpected fetch: ' + method + ' ' + url)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderPage()
+    await screen.findByRole('button', { name: 'Email (SMTP)' })
+    fireEvent.click(screen.getByRole('button', { name: 'Security' }))
+    await screen.findByText('Login lockout')
+    await waitFor(() => expect(screen.queryByText('Loading…')).toBeNull())
+
+    expect((screen.getByLabelText('Failed attempts') as HTMLInputElement).value).toBe('3')
+    expect((screen.getByLabelText('IP lockout (seconds)') as HTMLInputElement).value).toBe('60')
+    expect((screen.getByLabelText('Account lockout (seconds)') as HTMLInputElement).value).toBe('60')
+
+    fireEvent.change(screen.getByLabelText('Failed attempts'), { target: { value: '4' } })
+    fireEvent.change(screen.getByLabelText('IP lockout (seconds)'), { target: { value: '30' } })
+    fireEvent.change(screen.getByLabelText('Account lockout (seconds)'), { target: { value: '45' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save lockout policy' }))
+
+    await waitFor(() => {
+      const patches = calls.filter(
+        (c) => c.url.includes('/api/config/security') && (c.init?.method ?? 'GET').toUpperCase() === 'PATCH',
+      )
+      expect(patches.length).toBe(1)
+      expect(JSON.parse(String(patches[0].init?.body))).toEqual({
+        login_max_attempts: 4,
+        login_ip_lockout_seconds: 30,
+        login_account_lockout_seconds: 45,
+      })
+    })
+    await screen.findByText(/Saved — new lockouts use these values/)
+  })
+})
