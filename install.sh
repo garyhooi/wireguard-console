@@ -639,6 +639,19 @@ if ! docker compose up -d --build; then
   Then fix the cause and re-run this script."
 fi
 
+# Every update rebuilds the locally-built console/api/wg-helper images. Docker
+# moves the tag to the new image and leaves the previous one dangling (<none>),
+# and nothing referenced it anymore — without this cleanup /var/lib/docker grows
+# by a few hundred MB on every re-run of this installer.
+info "Reclaiming disk space from superseded images..."
+DANGLING_BEFORE="$(docker image ls -q -f dangling=true 2>/dev/null | wc -l | tr -d '[:space:]')"
+if docker image prune -f >/dev/null 2>&1; then
+  [[ "${DANGLING_BEFORE}" != "0" ]] && info "Pruned ${DANGLING_BEFORE} dangling image(s) from earlier builds."
+fi
+# Keep two weeks of BuildKit cache (fast rebuilds) and drop anything older so
+# the builder cache cannot grow unbounded across many updates.
+docker builder prune -f --filter until=336h >/dev/null 2>&1 || true
+
 # ---------------------------------------------------------------------------
 # 10b. AdGuard Home. On a first install this writes AdGuardHome.yaml directly
 #      into its config volume so DNS filtering + the block page work out of
