@@ -65,12 +65,14 @@ export function UsersPage() {
   const [inviteName, setInviteName] = useState('')
   const [inviteDepartmentId, setInviteDepartmentId] = useState('')
   const [inviteLink, setInviteLink] = useState('')
+  const [inviteExpiryHours, setInviteExpiryHours] = useState<number | null>(null)
   // Per-user edit modal (name, email, department) opened from the row action.
   const [editingUser, setEditingUser] = useState<User | null>(null)
   const [editName, setEditName] = useState('')
   const [editEmail, setEditEmail] = useState('')
   const [editDepartmentId, setEditDepartmentId] = useState('')
   const [resendLink, setResendLink] = useState('')
+  const [resendExpiryHours, setResendExpiryHours] = useState<number | null>(null)
   const [resendTarget, setResendTarget] = useState('')
   const [statusFilter, setStatusFilter] = useState('all')
   const [search, setSearch] = useState('')
@@ -105,10 +107,11 @@ export function UsersPage() {
       full_name: string
       department_id?: string
     }) => {
-      return apiJson<{ invite_link?: string }>('/api/users', { method: 'POST', body: data })
+      return apiJson<{ invite_link?: string; expires_in_hours?: number }>('/api/users', { method: 'POST', body: data })
     },
     onSuccess: (data) => {
       setInviteLink(data.invite_link || '')
+      setInviteExpiryHours(data.expires_in_hours ?? null)
       setCopied(false)
       // Keep the modal open so the invite link can be copied; the list
       // refreshes underneath.
@@ -118,12 +121,13 @@ export function UsersPage() {
 
   const resendMutation = useMutation({
     mutationFn: async (u: User) => {
-      return apiJson<{ invite_link?: string }>(`/api/users/${u.id}/resend-invite`, { method: 'POST' })
+      return apiJson<{ invite_link?: string; expires_in_hours?: number }>(`/api/users/${u.id}/resend-invite`, { method: 'POST' })
     },
     onSuccess: (data, u) => {
       // Keep the row's link visible so an SMTP hiccup never strands the
       // invite — the admin can copy/share it manually either way.
       setResendLink(data.invite_link || '')
+      setResendExpiryHours(data.expires_in_hours ?? null)
       setResendTarget(u.email)
       setResendCopied(false)
       refetch()
@@ -403,7 +407,9 @@ export function UsersPage() {
               {resendCopied ? 'Copied' : 'Copy'}
             </GhostButton>
           </div>
-          <p className="text-xs text-zinc-500">The link expires automatically (72h).</p>
+          <p className="text-xs text-zinc-500">
+            The link expires automatically{inviteExpiryHours ? ' (' + inviteExpiryHours + 'h)' : ''}.
+          </p>
           <div className="flex justify-end pt-1">
             <PrimaryButton type="button" onClick={() => setResendLink('')}>
               Done

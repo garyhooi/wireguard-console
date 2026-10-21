@@ -148,6 +148,9 @@ describe('Configuration → Security login lockout', () => {
             login_max_attempts: 3,
             login_ip_lockout_seconds: 60,
             login_account_lockout_seconds: 60,
+            vpn_invite_expiry_hours: 72,
+            peer_claim_expiry_hours: 72,
+            admin_invite_expiry_hours: 72,
           }),
         } as Response
       }
@@ -173,6 +176,11 @@ describe('Configuration → Security login lockout', () => {
     fireEvent.change(screen.getByLabelText('Account lockout (seconds)'), { target: { value: '45' } })
     fireEvent.click(screen.getByRole('button', { name: 'Save lockout policy' }))
 
+    // Security changes require a fresh 2FA code.
+    const codeInput = await screen.findByLabelText('Your 6-digit authenticator code')
+    fireEvent.change(codeInput, { target: { value: '123456' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+
     await waitFor(() => {
       const patches = calls.filter(
         (c) => c.url.includes('/api/config/security') && (c.init?.method ?? 'GET').toUpperCase() === 'PATCH',
@@ -182,8 +190,32 @@ describe('Configuration → Security login lockout', () => {
         login_max_attempts: 4,
         login_ip_lockout_seconds: 30,
         login_account_lockout_seconds: 45,
+        vpn_invite_expiry_hours: 72,
+        peer_claim_expiry_hours: 72,
+        admin_invite_expiry_hours: 72,
+        code: '123456',
       })
     })
     await screen.findByText(/Saved — new lockouts use these values/)
+
+    // Invite/claim expiry card: same 2FA gate, values sent with the rest.
+    await screen.findByText('Invite & claim link expiry')
+    fireEvent.change(screen.getByLabelText('VPN invite link (hours)'), { target: { value: '24' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save link expiry' }))
+    const codeInput2 = await screen.findByLabelText('Your 6-digit authenticator code')
+    fireEvent.change(codeInput2, { target: { value: '654321' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    await waitFor(() => {
+      const patches = calls.filter(
+        (c) => c.url.includes('/api/config/security') && (c.init?.method ?? 'GET').toUpperCase() === 'PATCH',
+      )
+      expect(patches.length).toBe(2)
+      const body = JSON.parse(String(patches[1].init?.body))
+      expect(body.vpn_invite_expiry_hours).toBe(24)
+      expect(body.peer_claim_expiry_hours).toBe(72)
+      expect(body.admin_invite_expiry_hours).toBe(72)
+      expect(body.code).toBe('654321')
+    })
+    await screen.findByText(/Saved — newly issued links use these lifetimes/)
   })
 })

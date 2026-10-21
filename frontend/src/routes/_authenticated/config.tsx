@@ -11,6 +11,7 @@ import {
 } from '@tabler/icons-react'
 import { PageHeader, PrimaryButton, GhostButton, inputCls, labelCls } from '../../lib/ui'
 import { apiJson } from '../../lib/api'
+import { Confirm2FA } from '../../lib/Confirm2FA'
 import { EmailTemplatesSection } from '../../components/EmailTemplatesSection'
 import { getTimezone, setTimezone } from '../../lib/timezone'
 
@@ -527,6 +528,7 @@ function SecuritySettings() {
   const [draft, setDraft] = useState('0')
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
+  const [pending2FA, setPending2FA] = useState<null | ((code: string) => Promise<void>)>(null)
 
   const { data: me } = useQuery<{ role: string }>({
     queryKey: ['me'],
@@ -549,13 +551,14 @@ function SecuritySettings() {
   }, [current])
 
   const saveMutation = useMutation({
-    mutationFn: async (minutes: number) => {
+    mutationFn: async (vars: { minutes: number; code: string }) => {
       return apiJson('/api/config/step-up', {
         method: 'PATCH',
-        body: { step_up_minutes: minutes },
+        body: { step_up_minutes: vars.minutes, code: vars.code },
       })
     },
-    onSuccess: (_d, minutes) => {
+    onSuccess: (_d, vars) => {
+      const minutes = vars.minutes
       queryClient.invalidateQueries({ queryKey: ['stepup-config'] })
       setMessage(
         minutes > 0
@@ -620,8 +623,15 @@ function SecuritySettings() {
                     className={`${inputCls} max-w-[10rem]`}
                   />
                   <PrimaryButton
-                    onClick={() => valid && saveMutation.mutate(parsed)}
-                    disabled={!valid || saveMutation.isPending || parsed === current}
+                    onClick={() =>
+                      valid &&
+                      setPending2FA(
+                        () => async (code: string) => {
+                          await saveMutation.mutateAsync({ minutes: parsed, code })
+                        },
+                      )
+                    }
+                    disabled={!valid || parsed === current}
                   >
                     {saveMutation.isPending ? 'Saving…' : 'Save'}
                   </PrimaryButton>
@@ -640,6 +650,15 @@ function SecuritySettings() {
       </div>
 
       <LoginLockoutSettings isSuperAdmin={isSuperAdmin} />
+      <InviteExpirySettings isSuperAdmin={isSuperAdmin} />
+
+      <Confirm2FA
+        open={pending2FA !== null}
+        onClose={() => setPending2FA(null)}
+        title="Confirm security change"
+        description="Enter your own authenticator code to change the 2FA step-up window. Security settings always require a fresh code, even when a step-up window is configured."
+        onSubmit={pending2FA}
+      />
     </div>
   )
 }
@@ -648,6 +667,9 @@ interface LoginLockoutConfig {
   login_max_attempts: number
   login_ip_lockout_seconds: number
   login_account_lockout_seconds: number
+  vpn_invite_expiry_hours: number
+  peer_claim_expiry_hours: number
+  admin_invite_expiry_hours: number
 }
 
 // Configuration → Security: attempts / lock windows for the login lockout.
@@ -659,6 +681,7 @@ function LoginLockoutSettings({ isSuperAdmin }: { isSuperAdmin: boolean }) {
   const [accountSeconds, setAccountSeconds] = useState('60')
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
+  const [pending2FA, setPending2FA] = useState<null | ((code: string) => Promise<void>)>(null)
 
   const { data: cfg, isLoading } = useQuery<LoginLockoutConfig>({
     queryKey: ['security-config'],
@@ -673,8 +696,11 @@ function LoginLockoutSettings({ isSuperAdmin }: { isSuperAdmin: boolean }) {
   }, [cfg])
 
   const saveMutation = useMutation({
-    mutationFn: async (body: LoginLockoutConfig) => {
-      return apiJson('/api/config/security', { method: 'PATCH', body })
+    mutationFn: async (vars: { body: LoginLockoutConfig; code: string }) => {
+      return apiJson('/api/config/security', {
+        method: 'PATCH',
+        body: { ...vars.body, code: vars.code },
+      })
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['security-config'] })
@@ -775,15 +801,23 @@ function LoginLockoutSettings({ isSuperAdmin }: { isSuperAdmin: boolean }) {
               </div>
               <div className="flex flex-wrap items-center gap-3">
                 <PrimaryButton
-                  onClick={() =>
-                    valid &&
-                    saveMutation.mutate({
+                  onClick={() => {
+                    if (!valid || !cfg) return
+                    const body: LoginLockoutConfig = {
                       login_max_attempts: parsedAttempts,
                       login_ip_lockout_seconds: parsedIp,
                       login_account_lockout_seconds: parsedAccount,
-                    })
-                  }
-                  disabled={!valid || !dirty || saveMutation.isPending}
+                      vpn_invite_expiry_hours: cfg.vpn_invite_expiry_hours,
+                      peer_claim_expiry_hours: cfg.peer_claim_expiry_hours,
+                      admin_invite_expiry_hours: cfg.admin_invite_expiry_hours,
+                    }
+                    setPending2FA(
+                      () => async (code: string) => {
+                        await saveMutation.mutateAsync({ body, code })
+                      },
+                    )
+                  }}
+                  disabled={!valid || !dirty}
                 >
                   {saveMutation.isPending ? 'Saving…' : 'Save lockout policy'}
                 </PrimaryButton>
@@ -799,6 +833,188 @@ function LoginLockoutSettings({ isSuperAdmin }: { isSuperAdmin: boolean }) {
           )}
         </div>
       )}
+
+      <Confirm2FA
+        open={pending2FA !== null}
+        onClose={() => setPending2FA(null)}
+        title="Confirm security change"
+        description="Enter your own authenticator code to change the login lockout policy. Security settings always require a fresh code, even when a step-up window is configured."
+        onSubmit={pending2FA}
+      />
     </div>
   )
 }
+
+// Configuration → Security: how long invite / claim links stay valid.
+// Readable by every admin; only a super_admin can save it (with a fresh 2FA
+// code).
+function InviteExpirySettings({ isSuperAdmin }: { isSuperAdmin: boolean }) {
+  const queryClient = useQueryClient()
+  const [vpnHours, setVpnHours] = useState('72')
+  const [peerHours, setPeerHours] = useState('72')
+  const [adminHours, setAdminHours] = useState('72')
+  const [message, setMessage] = useState('')
+  const [error, setError] = useState('')
+  const [pending2FA, setPending2FA] = useState<null | ((code: string) => Promise<void>)>(null)
+
+  const { data: cfg, isLoading } = useQuery<LoginLockoutConfig>({
+    queryKey: ['security-config'],
+    queryFn: async () => apiJson<LoginLockoutConfig>('/api/config/security'),
+  })
+
+  useEffect(() => {
+    if (!cfg) return
+    setVpnHours(String(cfg.vpn_invite_expiry_hours))
+    setPeerHours(String(cfg.peer_claim_expiry_hours))
+    setAdminHours(String(cfg.admin_invite_expiry_hours))
+  }, [cfg])
+
+  const saveMutation = useMutation({
+    mutationFn: async (vars: { body: LoginLockoutConfig; code: string }) => {
+      return apiJson('/api/config/security', {
+        method: 'PATCH',
+        body: { ...vars.body, code: vars.code },
+      })
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['security-config'] })
+      setMessage('Saved — newly issued links use these lifetimes.')
+      setError('')
+    },
+    onError: (e: Error) => {
+      setError(e.message)
+      setMessage('')
+    },
+  })
+
+  const parsedVpn = parseInt(vpnHours, 10)
+  const parsedPeer = parseInt(peerHours, 10)
+  const parsedAdmin = parseInt(adminHours, 10)
+  const valid =
+    Number.isFinite(parsedVpn) && parsedVpn >= 1 && parsedVpn <= 720 &&
+    Number.isFinite(parsedPeer) && parsedPeer >= 1 && parsedPeer <= 720 &&
+    Number.isFinite(parsedAdmin) && parsedAdmin >= 1 && parsedAdmin <= 720
+  const dirty = !!cfg && (
+    parsedVpn !== cfg.vpn_invite_expiry_hours ||
+    parsedPeer !== cfg.peer_claim_expiry_hours ||
+    parsedAdmin !== cfg.admin_invite_expiry_hours
+  )
+
+  return (
+    <div className="border border-zinc-800 rounded-lg bg-zinc-900/50 p-6">
+      <div className="flex items-center gap-2 mb-1">
+        <IconShieldLock size={18} stroke={1.6} className="text-zinc-400" aria-hidden="true" />
+        <h2 className="text-base font-semibold text-zinc-100">Invite &amp; claim link expiry</h2>
+      </div>
+      <p className="text-sm text-zinc-400 mb-4">
+        How long newly issued links stay usable. VPN invite links and peer claim links are
+        single-use tokens; an invited admin must sign in with the emailed temporary password
+        before its window closes. Defaults: 72 hours each.
+      </p>
+
+      {error && <p className="text-red-400 text-sm mb-3">{error}</p>}
+      {message && <p className="text-teal-400 text-sm mb-3">{message}</p>}
+
+      {isLoading ? (
+        <p className="text-zinc-400 text-sm">Loading…</p>
+      ) : (
+        <div className="space-y-5">
+          <div className="flex items-baseline justify-between gap-3 text-sm">
+            <span className="text-zinc-500">Currently</span>
+            <span className="text-zinc-100 font-mono tabular-nums">
+              VPN invite {cfg?.vpn_invite_expiry_hours}h · peer claim {cfg?.peer_claim_expiry_hours}h · admin invite {cfg?.admin_invite_expiry_hours}h
+            </span>
+          </div>
+
+          {isSuperAdmin ? (
+            <div className="space-y-4">
+              <div className="grid gap-4 sm:grid-cols-3">
+                <div>
+                  <label htmlFor="vpnInviteExpiryHours" className={labelCls}>
+                    VPN invite link (hours)
+                  </label>
+                  <input
+                    id="vpnInviteExpiryHours"
+                    type="number"
+                    min={1}
+                    max={720}
+                    value={vpnHours}
+                    onChange={(e) => setVpnHours(e.target.value)}
+                    className={inputCls}
+                  />
+                </div>
+                <div>
+                  <label htmlFor="peerClaimExpiryHours" className={labelCls}>
+                    Peer claim link (hours)
+                  </label>
+                  <input
+                    id="peerClaimExpiryHours"
+                    type="number"
+                    min={1}
+                    max={720}
+                    value={peerHours}
+                    onChange={(e) => setPeerHours(e.target.value)}
+                    className={inputCls}
+                  />
+                </div>
+                <div>
+                  <label htmlFor="adminInviteExpiryHours" className={labelCls}>
+                    Admin invite (hours)
+                  </label>
+                  <input
+                    id="adminInviteExpiryHours"
+                    type="number"
+                    min={1}
+                    max={720}
+                    value={adminHours}
+                    onChange={(e) => setAdminHours(e.target.value)}
+                    className={inputCls}
+                  />
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <PrimaryButton
+                  onClick={() => {
+                    if (!valid || !cfg) return
+                    const body: LoginLockoutConfig = {
+                      login_max_attempts: cfg.login_max_attempts,
+                      login_ip_lockout_seconds: cfg.login_ip_lockout_seconds,
+                      login_account_lockout_seconds: cfg.login_account_lockout_seconds,
+                      vpn_invite_expiry_hours: parsedVpn,
+                      peer_claim_expiry_hours: parsedPeer,
+                      admin_invite_expiry_hours: parsedAdmin,
+                    }
+                    setPending2FA(
+                      () => async (code: string) => {
+                        await saveMutation.mutateAsync({ body, code })
+                      },
+                    )
+                  }}
+                  disabled={!valid || !dirty}
+                >
+                  Save link expiry
+                </PrimaryButton>
+                <p className="text-xs text-zinc-600">
+                  1–720 hours (72 = 3 days). Applies to newly issued links; super_admin only.
+                </p>
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-amber-400/90">
+              Only a super admin can change link expiry.
+            </p>
+          )}
+        </div>
+      )}
+
+      <Confirm2FA
+        open={pending2FA !== null}
+        onClose={() => setPending2FA(null)}
+        title="Confirm security change"
+        description="Enter your own authenticator code to change invite and claim link lifetimes."
+        onSubmit={pending2FA}
+      />
+    </div>
+  )
+}
+

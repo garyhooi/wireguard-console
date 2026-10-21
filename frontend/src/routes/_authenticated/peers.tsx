@@ -310,7 +310,7 @@ function PeersPage() {
               </GhostButton>
             </div>
             <p className="text-xs text-zinc-500 mt-2">
-              The link expires automatically (72h) and only serves this peer's config.
+              The link expires automatically and only serves this peer's config.
             </p>
             <div className="mt-4 flex justify-end">
               <PrimaryButton type="button" onClick={closeAdd}>
@@ -471,7 +471,7 @@ function PeersPage() {
             </p>
           )}
           <p className="text-xs text-zinc-500">
-            A new 72h link is minted (previous links stay valid). The email contains the link only —
+            A new link is minted (previous links stay valid). The email contains the link only —
             never the config or private key.
           </p>
           <div className="flex justify-end gap-3 pt-1">
@@ -530,7 +530,7 @@ function PeersPage() {
             </div>
           )}
           <p className="text-xs text-zinc-500">
-            The link expires automatically (72h) and only serves this peer's config.
+            The link expires automatically and only serves this peer's config.
           </p>
           <div className="flex justify-end pt-1">
             <PrimaryButton type="button" onClick={() => setResent(null)}>
