@@ -7,22 +7,32 @@ A self-hosted web console for issuing, monitoring, and revoking company WireGuar
 <table>
   <tr>
     <td align="center" width="50%">
-      <img src="docs/demo/dashboard.png" alt="Dashboard" width="100%" />
-      <br /><em>Dashboard — live KPIs and recent peers</em>
+      <img src="docs/demo/login.png" alt="Login" width="100%" />
+      <br /><em>Login — self-hosted sign-in with mandatory 2FA for admins</em>
     </td>
     <td align="center" width="50%">
-      <img src="docs/demo/statistics.png" alt="Statistics" width="100%" />
-      <br /><em>Statistics — traffic chart, top peers and usage report</em>
+      <img src="docs/demo/dashboard.png" alt="Dashboard" width="100%" />
+      <br /><em>Dashboard — live KPIs and recent peers</em>
     </td>
   </tr>
   <tr>
     <td align="center" width="50%">
+      <img src="docs/demo/statistics.png" alt="Statistics" width="100%" />
+      <br /><em>Statistics — traffic chart, top peers and usage report</em>
+    </td>
+    <td align="center" width="50%">
       <img src="docs/demo/peers.png" alt="Peers" width="100%" />
       <br /><em>Peers — active/suspended devices, config &amp; QR actions</em>
     </td>
+  </tr>
+  <tr>
     <td align="center" width="50%">
       <img src="docs/demo/users.png" alt="VPN Users" width="100%" />
-      <br /><em>VPN Users — status tabs, search and invite</em>
+      <br /><em>VPN Users — status tabs, department tags, search and invite</em>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/demo/claim.png" alt="Claim page" width="100%" />
+      <br /><em>Claim — VPN users claim their peer config from the emailed link</em>
     </td>
   </tr>
 </table>
