@@ -11,9 +11,11 @@
   var ctx = canvas.getContext('2d');
   if (!ctx) return;
 
-  var CYAN = '34, 211, 238';
-  var TEAL = '45, 212, 191';
-  var MAGENTA = '232, 121, 249';
+  // Alert palette: the block page is a "denied" state, so the hologram runs
+  // red with a warm amber accent instead of the console's teal.
+  var CYAN = '248, 113, 113';
+  var TEAL = '239, 68, 68';
+  var MAGENTA = '251, 146, 60';
   var GLYPHS = '0123456789ABCDEF<>/\\|=+*';
 
   var mq = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
