@@ -84,7 +84,11 @@
 	# Everything else: a blocked domain that AdGuard resolved to this
 	# server — show the branded block page.
 	handle {
-		rewrite * /blocked.html
+		# Serve the block page's own assets (/blocked-hostname.js,
+		# /blocked-holo.js) normally; only unknown paths (the blocked URL
+		# itself) fall back to the page. A blanket rewrite here would serve
+		# HTML for the .js files, which the CSP + nosniff then refuse to run.
+		try_files {path} /blocked.html
 		file_server
 	}
 }
@@ -94,7 +98,11 @@
 http://:80 {
 	root * /srv
 	handle {
-		rewrite * /blocked.html
+		# Serve the block page's own assets (/blocked-hostname.js,
+		# /blocked-holo.js) normally; only unknown paths (the blocked URL
+		# itself) fall back to the page. A blanket rewrite here would serve
+		# HTML for the .js files, which the CSP + nosniff then refuse to run.
+		try_files {path} /blocked.html
 		file_server
 	}
 	header {
@@ -102,6 +110,9 @@ http://:80 {
 		# external /blocked-hostname.js and /blocked-holo.js, so keep it
 		# strict. It carries an
 		# inline <style> → style-src 'unsafe-inline'.
+		# Block-page assets change between versions; never let a browser keep
+		# a stale page/script pair after an upgrade.
+		Cache-Control "no-store"
 		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 		X-Frame-Options "DENY"
 		X-Content-Type-Options "nosniff"
