@@ -1504,6 +1504,63 @@ func TestEndToEnd(t *testing.T) {
 	})
 	expectStatus(t, badEmailResp, 400, "PATCH /api/users/{id} invalid email")
 
+	// ---- Per-IP login lockout (3 wrong passwords -> 60s) ----
+	lockIP := "198.51.100.77"
+	lockLogin := func(password string) (*http.Response, map[string]interface{}) {
+		payload, _ := json.Marshal(map[string]string{"email": "e2e@console.test", "password": password})
+		req, err := http.NewRequest("POST", baseURL+"/api/auth/login", bytes.NewReader(payload))
+		if err != nil {
+			t.Fatalf("new lockout login request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Forwarded-For", lockIP)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("lockout login request: %v", err)
+		}
+		defer resp.Body.Close()
+		var out map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&out)
+		return resp, out
+	}
+	for i := 1; i <= 2; i++ {
+		resp, _ := lockLogin("definitely-wrong")
+		if resp.StatusCode != 401 {
+			t.Fatalf("lockout attempt %d: status %d, want 401", i, resp.StatusCode)
+		}
+	}
+	lockResp, lockOut := lockLogin("definitely-wrong")
+	if lockResp.StatusCode != 429 {
+		t.Fatalf("third wrong password: status %d, want 429", lockResp.StatusCode)
+	}
+	if secs, _ := lockOut["retry_after_seconds"].(float64); secs <= 0 || secs > 60 {
+		t.Fatalf("retry_after_seconds = %v, want 1..60", lockOut["retry_after_seconds"])
+	}
+	if ra := lockResp.Header.Get("Retry-After"); ra == "" {
+		t.Fatal("429 should carry a Retry-After header")
+	}
+
+	// The status endpoint drives the refresh-safe UI countdown.
+	statusReq, _ := http.NewRequest("GET", baseURL+"/api/auth/lockout-status", nil)
+	statusReq.Header.Set("X-Forwarded-For", lockIP)
+	statusResp, err := http.DefaultClient.Do(statusReq)
+	if err != nil {
+		t.Fatalf("lockout status: %v", err)
+	}
+	var statusOut map[string]interface{}
+	json.NewDecoder(statusResp.Body).Decode(&statusOut)
+	statusResp.Body.Close()
+	if locked, _ := statusOut["locked"].(bool); !locked {
+		t.Fatalf("lockout-status locked = false, want true (%v)", statusOut)
+	}
+	if secs, _ := statusOut["retry_after_seconds"].(float64); secs <= 0 {
+		t.Fatalf("lockout-status retry_after_seconds = %v, want > 0", statusOut["retry_after_seconds"])
+	}
+
+	// A correct password must still be refused while the IP is locked.
+	if resp, _ := lockLogin("e2e-NewPassw0rd!"); resp.StatusCode != 429 {
+		t.Fatalf("correct password during lockout: status %d, want 429", resp.StatusCode)
+	}
 	// Cleanup: delete local server (cascade peers) must succeed
 	resp, _ = api(t, "DELETE", "/api/servers/"+serverID, token, map[string]string{
 		"code": actorCode(),

@@ -138,6 +138,9 @@ func main() {
 		r.Get("/nodes/{id}/state", api.GetNodeState(store))
 		r.Post("/nodes/{id}/report", api.ReportNodeState(store))
 		r.Post("/auth/login", api.Login(store))
+		// Per-IP lockout state so the login page can resume its countdown
+		// after a refresh (no session exists yet while locked out).
+		r.Get("/auth/lockout-status", api.LoginLockoutStatus())
 		r.Post("/auth/2fa/verify", api.Verify2FA(store))
 		r.Post("/auth/logout", api.Logout(store))
 		r.Post("/claim", api.ClaimUser(store))

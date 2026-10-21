@@ -186,8 +186,14 @@ type loginResponse struct {
 func Login(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		clientIP := getClientIP(r)
+		// IP lockout after repeated wrong passwords (60s). Checked before the
+		// broader rate limiter so the UI always gets a precise countdown.
+		if remaining := ipLoginLockout.remaining(clientIP, time.Now()); remaining > 0 {
+			respondLocked(w, lockoutSeconds(remaining))
+			return
+		}
 		if loginRateLimiter.isLimited(clientIP) {
-			writeError(w, http.StatusTooManyRequests, "Too many login attempts. Please try again later.")
+			respondLocked(w, lockoutSeconds(loginLockoutDuration))
 			return
 		}
 
@@ -211,6 +217,12 @@ func Login(store *Store) http.HandlerFunc {
 		)
 
 		if err != nil {
+			// Unknown email is a failed credential attempt too (same timing /
+			// lockout semantics as a wrong password).
+			if locked := ipLoginLockout.recordFailure(clientIP, time.Now()); locked > 0 {
+				respondLocked(w, lockoutSeconds(locked))
+				return
+			}
 			writeJSON(w, http.StatusUnauthorized, loginResponse{})
 			return
 		}
@@ -239,9 +251,18 @@ func Login(store *Store) http.HandlerFunc {
 				WHERE id = $3
 			`, admin.FailedLoginCount, admin.LockedUntil, admin.ID)
 
+			// Third wrong password (or later) locks this IP for 60s so the UI
+			// can show a precise countdown instead of a generic error.
+			if locked := ipLoginLockout.recordFailure(clientIP, time.Now()); locked > 0 {
+				respondLocked(w, lockoutSeconds(locked))
+				return
+			}
 			writeJSON(w, http.StatusUnauthorized, loginResponse{})
 			return
 		}
+
+		// Successful credentials clear this IP's wrong-password counter.
+		ipLoginLockout.reset(clientIP)
 
 		admin.FailedLoginCount = 0
 		admin.LockedUntil = nil
