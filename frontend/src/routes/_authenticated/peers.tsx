@@ -2,6 +2,7 @@ import { createFileRoute } from '@tanstack/react-router'
 import { apiFetch, apiJson } from '../../lib/api'
 import { userLabel } from '../../lib/userLabel'
 import { fmtDateTime } from '../../lib/timezone'
+import { configFileName } from '../../lib/filename'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import QRCode from 'qrcode'
@@ -228,7 +229,7 @@ function PeersPage() {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `${peer.name}.conf`
+    a.download = configFileName(peer.name)
     a.click()
     URL.revokeObjectURL(url)
   }

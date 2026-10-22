@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import QRCode from 'qrcode'
 import { IconDownload } from '@tabler/icons-react'
 import { PrimaryButton } from '../lib/ui'
+import { configFileName } from '../lib/filename'
 import { HoloPageBackground } from '../components/HoloPageBackground'
 import { LinkInvalidOverlay } from '../components/LinkInvalidOverlay'
 
@@ -54,7 +55,7 @@ function PeerConfigPage() {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `${data?.peer_name || 'wireguard'}.conf`
+    a.download = configFileName(data?.peer_name)
     a.click()
     URL.revokeObjectURL(url)
   }

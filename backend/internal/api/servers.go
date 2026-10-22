@@ -433,7 +433,7 @@ func GetServerHostConfig(store *Store) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "text/plain")
-		w.Header().Set("Content-Disposition", "attachment; filename="+ifaceName+".conf")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", configFileName(ifaceName)))
 		w.Write([]byte(sb.String()))
 	}
 }

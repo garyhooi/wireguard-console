@@ -450,7 +450,7 @@ func GetPeerConfig(store *Store) http.HandlerFunc {
 		config := generateWireGuardConfig(&peer, &server, privKey)
 
 		w.Header().Set("Content-Type", "text/plain")
-		w.Header().Set("Content-Disposition", "attachment; filename="+peer.Name+".conf")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", configFileName(peer.Name)))
 		w.Write([]byte(config))
 	}
 }
