@@ -15,20 +15,22 @@
     background: #04060c;
     color: #e4e4e7; padding: 24px; overflow: hidden;
   }
-  #holo { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 0; }
-  .vignette {
-    position: fixed; inset: 0; pointer-events: none; z-index: 1;
-    background: radial-gradient(ellipse at center, rgba(4,6,12,.15) 0%, rgba(4,6,12,.72) 62%, rgba(4,6,12,.94) 100%);
+  /* Hologram backdrop fades in together with the card after the intro, so no
+     intro layer can ever bleed through the translucent card (Safari composites
+     fading fixed layers aggressively). */
+  #backdrop {
+    position: fixed; inset: 0; z-index: 0; pointer-events: none;
+    transition: opacity .45s ease;
   }
-  .scanlines {
-    position: fixed; inset: 0; pointer-events: none; z-index: 1; opacity: .05;
-    background-image: repeating-linear-gradient(0deg, rgba(226,232,240,.9) 0px, rgba(226,232,240,.9) 1px, transparent 1px, transparent 3px);
+  #holo { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 0; }
+  .vignette {
+    position: absolute; inset: 0; pointer-events: none; z-index: 1;
+    background: radial-gradient(ellipse at center, rgba(4,6,12,.15) 0%, rgba(4,6,12,.72) 62%, rgba(4,6,12,.94) 100%);
   }
   .card {
     position: relative; z-index: 2;
     max-width: 460px; width: 100%; text-align: center;
-    background: rgba(8,13,22,.8);
-    -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+    background: rgba(8,13,22,.94);
     border: 1px solid rgba(239,68,68,.28); border-radius: 14px; padding: 36px 32px;
     box-shadow: 0 0 60px -18px rgba(239,68,68,.55);
   }
@@ -77,10 +79,12 @@
   }
   .wgc-intro .card { opacity: 0; transform: translateY(10px) scale(.985); visibility: hidden; }
   .wgc-intro .github-corner { opacity: 0; pointer-events: none; }
+  .wgc-intro #backdrop { opacity: 0; }
   .github-corner { transition: opacity .45s ease, color .15s, border-color .15s, background .15s, transform .1s; }
-  .wgc-intro-done #block-intro { opacity: 0; transition: opacity .45s ease; pointer-events: none; }
-  .wgc-intro-done .card { opacity: 1; transform: none; visibility: visible; }
-  .wgc-intro-done .github-corner { opacity: 1; pointer-events: auto; }
+  /* Phase 1: the intro fades to clean dark (card + backdrop still hidden).
+     Phase 2: the intro is removed from the DOM, then the card and hologram
+     backdrop fade in together - a strict sequential handoff. */
+  .wgc-intro-out #block-intro { opacity: 0; transition: opacity .3s ease; pointer-events: none; }
 
   #block-intro {
     position: fixed; inset: 0; z-index: 40; overflow: hidden;
@@ -161,9 +165,10 @@
 </style>
 </head>
 <body>
-  <canvas id="holo" aria-hidden="true"></canvas>
-  <div class="vignette" aria-hidden="true"></div>
-  <div class="scanlines" aria-hidden="true"></div>
+  <div id="backdrop" aria-hidden="true">
+    <canvas id="holo" aria-hidden="true"></canvas>
+    <div class="vignette" aria-hidden="true"></div>
+  </div>
 
   <!-- Full-screen hologram intro: animation first, then the detail card. -->
   <div id="block-intro" role="status" aria-live="polite">

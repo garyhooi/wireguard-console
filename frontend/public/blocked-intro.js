@@ -12,15 +12,21 @@
 
   root.classList.add('wgc-intro');
 
-  // Keep the animation on screen long enough to read, then fade to the card.
+  // Phase 1 holds the animation long enough to read, then fades it to clean
+  // dark. Phase 2 removes the intro from the DOM and only then fades in the
+  // card + backdrop. Sequential (never overlapping) so Safari cannot leave a
+  // ghost of the intro grid over the translucent card.
   var HOLD_MS = 2400;
-  var FADE_MS = 480;
+  var FADE_OUT_MS = 300;
 
   function reveal() {
-    root.classList.add('wgc-intro-done');
+    root.classList.add('wgc-intro-out');
     window.setTimeout(function () {
+      var el = document.getElementById('block-intro');
+      if (el && el.parentNode) el.parentNode.removeChild(el);
       root.classList.remove('wgc-intro');
-    }, FADE_MS + 80);
+      root.classList.remove('wgc-intro-out');
+    }, FADE_OUT_MS);
   }
 
   if (document.readyState === 'loading') {
