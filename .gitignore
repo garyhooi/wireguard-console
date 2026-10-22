@@ -42,3 +42,6 @@ backend/aghenc.exe
 # Local build caches (sandbox constraint)
 .gocache/
 .gomodcache/
+
+# Local security audit artifacts
+.security-audit/
