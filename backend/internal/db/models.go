@@ -93,10 +93,15 @@ type DomainRule struct {
 	UserID       *uuid.UUID `json:"user_id"`
 	DepartmentID *uuid.UUID `json:"department_id,omitempty"`
 	// Domain is empty for group rules (see GroupID).
-	Domain    string     `json:"domain"`
-	GroupID   *uuid.UUID `json:"group_id,omitempty"`
-	CreatedBy *uuid.UUID `json:"created_by"`
-	CreatedAt time.Time  `json:"created_at"`
+	Domain  string     `json:"domain"`
+	GroupID *uuid.UUID `json:"group_id,omitempty"`
+	// PeerIDs optionally narrows a user-scoped rule to a subset of the user's
+	// peers. Always stored sorted and de-duplicated; empty means every peer of
+	// the user (legacy behaviour) and is the only valid value for
+	// global/department rules.
+	PeerIDs   []uuid.UUID `json:"peer_ids"`
+	CreatedBy *uuid.UUID  `json:"created_by"`
+	CreatedAt time.Time   `json:"created_at"`
 }
 
 type IPBlockRule struct {
@@ -105,11 +110,16 @@ type IPBlockRule struct {
 	UserID       *uuid.UUID `json:"user_id"`
 	DepartmentID *uuid.UUID `json:"department_id,omitempty"`
 	// CIDR is empty for group rules (see GroupID).
-	CIDR      string     `json:"cidr"`
-	GroupID   *uuid.UUID `json:"group_id,omitempty"`
-	Note      string     `json:"note"`
-	CreatedBy *uuid.UUID `json:"created_by"`
-	CreatedAt time.Time  `json:"created_at"`
+	CIDR    string     `json:"cidr"`
+	GroupID *uuid.UUID `json:"group_id,omitempty"`
+	// PeerIDs optionally narrows a user-scoped rule to a subset of the user's
+	// peers. Always stored sorted and de-duplicated; empty means every peer of
+	// the user (legacy behaviour) and is the only valid value for
+	// global/department rules.
+	PeerIDs   []uuid.UUID `json:"peer_ids"`
+	Note      string      `json:"note"`
+	CreatedBy *uuid.UUID  `json:"created_by"`
+	CreatedAt time.Time   `json:"created_at"`
 }
 
 type IPGroup struct {

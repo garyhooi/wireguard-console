@@ -118,16 +118,18 @@ func RequestIPBlockSync(store *Store) {
 // ipRuleRow is the API shape of a rule with its user joined in.
 type ipRuleRow struct {
 	db.IPBlockRule
-	UserEmail          string `json:"user_email"`
-	UserFullName       string `json:"user_full_name"`
-	UserDepartmentName string `json:"user_department_name"`
-	DepartmentName     string `json:"department_name"`
-	GroupName          string `json:"group_name,omitempty"`
+	UserEmail          string   `json:"user_email"`
+	UserFullName       string   `json:"user_full_name"`
+	UserDepartmentName string   `json:"user_department_name"`
+	DepartmentName     string   `json:"department_name"`
+	GroupName          string   `json:"group_name,omitempty"`
+	PeerNames          []string `json:"peer_names"`
 }
 
 func loadIPBlockRules(ctx context.Context, pool *pgxpool.Pool) ([]db.IPBlockRule, error) {
 	rows, err := pool.Query(ctx, `
-		SELECT id, scope, user_id, department_id, cidr, group_id, note, created_by, created_at
+		SELECT id, scope, user_id, department_id, cidr, group_id, note, created_by, created_at,
+		       COALESCE(array_to_string(peer_ids, ','), '')
 		FROM ip_block_rules
 		ORDER BY created_at DESC
 	`)
@@ -140,11 +142,13 @@ func loadIPBlockRules(ctx context.Context, pool *pgxpool.Pool) ([]db.IPBlockRule
 	for rows.Next() {
 		var rule db.IPBlockRule
 		var cidr sql.NullString
+		var peerIDsRaw string
 		if err := rows.Scan(&rule.ID, &rule.Scope, &rule.UserID, &rule.DepartmentID, &cidr, &rule.GroupID,
-			&rule.Note, &rule.CreatedBy, &rule.CreatedAt); err != nil {
+			&rule.Note, &rule.CreatedBy, &rule.CreatedAt, &peerIDsRaw); err != nil {
 			return nil, fmt.Errorf("scan IP rule: %w", err)
 		}
 		rule.CIDR = cidr.String
+		rule.PeerIDs = parseStoredPeerIDs(peerIDsRaw)
 		rules = append(rules, rule)
 	}
 	return rules, rows.Err()
@@ -173,11 +177,18 @@ type ipBlockConflict struct {
 	Reason string    `json:"reason"`
 }
 
-// peersByUserForServer maps each user to the tunnel IPs of their active peers
-// on this server (the source addresses used by per-user blocking rules).
-func peersByUserForServer(ctx context.Context, pool *pgxpool.Pool, serverID uuid.UUID) (map[uuid.UUID][]string, error) {
+// serverPeer is one active peer as seen by one server: its id (used to filter
+// peer-scoped rules) and its tunnel IP (the source address in the drop rule).
+type serverPeer struct {
+	ID uuid.UUID
+	IP string
+}
+
+// peersByUserForServer maps each user to their active peers on this server
+// (peer id + tunnel IP), the source data for per-user blocking rules.
+func peersByUserForServer(ctx context.Context, pool *pgxpool.Pool, serverID uuid.UUID) (map[uuid.UUID][]serverPeer, error) {
 	rows, err := pool.Query(ctx, `
-		SELECT user_id, host(allowed_ip) FROM peers
+		SELECT user_id, id, host(allowed_ip) FROM peers
 		WHERE server_id = $1 AND status = 'active'
 		ORDER BY allowed_ip
 	`, serverID)
@@ -186,14 +197,14 @@ func peersByUserForServer(ctx context.Context, pool *pgxpool.Pool, serverID uuid
 	}
 	defer rows.Close()
 
-	out := map[uuid.UUID][]string{}
+	out := map[uuid.UUID][]serverPeer{}
 	for rows.Next() {
-		var userID uuid.UUID
+		var userID, peerID uuid.UUID
 		var ip string
-		if err := rows.Scan(&userID, &ip); err != nil {
+		if err := rows.Scan(&userID, &peerID, &ip); err != nil {
 			return nil, err
 		}
-		out[userID] = append(out[userID], ip)
+		out[userID] = append(out[userID], serverPeer{ID: peerID, IP: ip})
 	}
 	return out, rows.Err()
 }
@@ -226,12 +237,13 @@ func peersByDepartmentForServer(ctx context.Context, pool *pgxpool.Pool, serverI
 }
 
 // expandIPBlockRules turns stored rules into the exact per-server drop list:
-// global rules once with an empty source, per-user rules once per active peer,
-// source/destination family pairs kept consistent, and control-plane conflicts
-// filtered out. Pure function (unit-testable).
+// global rules once with an empty source, per-user rules once per active peer
+// (narrowed to the rule's peer selection when it has one), source/destination
+// family pairs kept consistent, and control-plane conflicts filtered out. Pure
+// function (unit-testable).
 func expandIPBlockRules(
 	rules []db.IPBlockRule,
-	peersByUser map[uuid.UUID][]string,
+	peersByUser map[uuid.UUID][]serverPeer,
 	peersByDepartment map[uuid.UUID][]string,
 	groupCIDRs map[uuid.UUID][]string,
 	gatewayIP, blockPageIP string,
@@ -276,11 +288,17 @@ func expandIPBlockRules(
 			}
 
 			if rule.Scope == "user" && rule.UserID != nil {
-				for _, peerIP := range peersByUser[*rule.UserID] {
-					if cidrIsIPv4(dest) != isIPv4Address(peerIP) {
+				peerFilter := peerIDSet(rule.PeerIDs)
+				for _, peer := range peersByUser[*rule.UserID] {
+					// A peer-scoped rule expands only to its selected peers; an
+					// empty selection keeps the legacy all-peers behaviour.
+					if peerFilter != nil && !peerFilter[peer.ID] {
+						continue
+					}
+					if cidrIsIPv4(dest) != isIPv4Address(peer.IP) {
 						continue // no valid source of this family on this server
 					}
-					add(peerIP, dest)
+					add(peer.IP, dest)
 					ruleAdded = true
 				}
 				continue
@@ -361,8 +379,11 @@ func ListIPRules(store *Store) http.HandlerFunc {
 
 		rows, err := store.pool.Query(ctx, `
 			SELECT r.id, r.scope, r.user_id, r.department_id, r.cidr, r.group_id, r.note, r.created_by, r.created_at,
+			       COALESCE(array_to_string(r.peer_ids, ','), ''),
 			       COALESCE(u.email, ''), COALESCE(u.full_name, ''), COALESCE(d.name, ''),
-			       COALESCE(dd.name, ''), COALESCE(g.name, '')
+			       COALESCE(dd.name, ''), COALESCE(g.name, ''),
+			       COALESCE((SELECT array_agg(p.name ORDER BY p.name)
+			                 FROM peers p WHERE p.id = ANY(r.peer_ids)), ARRAY[]::text[])
 			FROM ip_block_rules r
 			LEFT JOIN users u ON u.id = r.user_id
 			LEFT JOIN departments d ON d.id = u.department_id
@@ -380,13 +401,18 @@ func ListIPRules(store *Store) http.HandlerFunc {
 		for rows.Next() {
 			var rule ipRuleRow
 			var cidr sql.NullString
+			var peerIDsRaw string
 			if err := rows.Scan(&rule.ID, &rule.Scope, &rule.UserID, &rule.DepartmentID, &cidr, &rule.GroupID,
-				&rule.Note, &rule.CreatedBy, &rule.CreatedAt, &rule.UserEmail, &rule.UserFullName,
-				&rule.UserDepartmentName, &rule.DepartmentName, &rule.GroupName); err != nil {
+				&rule.Note, &rule.CreatedBy, &rule.CreatedAt, &peerIDsRaw, &rule.UserEmail, &rule.UserFullName,
+				&rule.UserDepartmentName, &rule.DepartmentName, &rule.GroupName, &rule.PeerNames); err != nil {
 				writeError(w, http.StatusInternalServerError, "Failed to scan IP rule")
 				return
 			}
 			rule.CIDR = cidr.String
+			rule.PeerIDs = parseStoredPeerIDs(peerIDsRaw)
+			if rule.PeerNames == nil {
+				rule.PeerNames = []string{}
+			}
 			rules = append(rules, rule)
 		}
 		writeJSON(w, http.StatusOK, rules)
@@ -396,10 +422,14 @@ func ListIPRules(store *Store) http.HandlerFunc {
 func getIPRule(ctx context.Context, pool *pgxpool.Pool, id uuid.UUID) (ipRuleRow, error) {
 	var rule ipRuleRow
 	var cidr sql.NullString
+	var peerIDsRaw string
 	err := pool.QueryRow(ctx, `
 		SELECT r.id, r.scope, r.user_id, r.department_id, r.cidr, r.group_id, r.note, r.created_by, r.created_at,
+		       COALESCE(array_to_string(r.peer_ids, ','), ''),
 		       COALESCE(u.email, ''), COALESCE(u.full_name, ''), COALESCE(d.name, ''),
-		       COALESCE(dd.name, ''), COALESCE(g.name, '')
+		       COALESCE(dd.name, ''), COALESCE(g.name, ''),
+		       COALESCE((SELECT array_agg(p.name ORDER BY p.name)
+		                 FROM peers p WHERE p.id = ANY(r.peer_ids)), ARRAY[]::text[])
 		FROM ip_block_rules r
 		LEFT JOIN users u ON u.id = r.user_id
 		LEFT JOIN departments d ON d.id = u.department_id
@@ -407,9 +437,13 @@ func getIPRule(ctx context.Context, pool *pgxpool.Pool, id uuid.UUID) (ipRuleRow
 		LEFT JOIN ip_groups g ON g.id = r.group_id
 		WHERE r.id = $1
 	`, id).Scan(&rule.ID, &rule.Scope, &rule.UserID, &rule.DepartmentID, &cidr, &rule.GroupID, &rule.Note,
-		&rule.CreatedBy, &rule.CreatedAt, &rule.UserEmail, &rule.UserFullName,
-		&rule.UserDepartmentName, &rule.DepartmentName, &rule.GroupName)
+		&rule.CreatedBy, &rule.CreatedAt, &peerIDsRaw, &rule.UserEmail, &rule.UserFullName,
+		&rule.UserDepartmentName, &rule.DepartmentName, &rule.GroupName, &rule.PeerNames)
 	rule.CIDR = cidr.String
+	rule.PeerIDs = parseStoredPeerIDs(peerIDsRaw)
+	if rule.PeerNames == nil {
+		rule.PeerNames = []string{}
+	}
 	return rule, err
 }
 
@@ -424,6 +458,7 @@ func CreateIPRule(store *Store) http.HandlerFunc {
 			CIDR         string     `json:"cidr"`
 			GroupID      *uuid.UUID `json:"group_id"`
 			Note         string     `json:"note"`
+			PeerIDs      []string   `json:"peer_ids"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
@@ -517,6 +552,29 @@ func CreateIPRule(store *Store) http.HandlerFunc {
 			}
 		}
 
+		// Optional peer selection: only user-scoped rules may target a subset
+		// of the user's peers (empty/absent = all peers, legacy behaviour).
+		peerIDs, peerErr := parseRulePeerIDs(req.PeerIDs)
+		if peerErr != nil {
+			writeError(w, http.StatusBadRequest, peerErr.Error())
+			return
+		}
+		if len(peerIDs) > 0 && req.Scope != "user" {
+			writeError(w, http.StatusBadRequest, "Peer selection is only valid for user-scoped rules")
+			return
+		}
+		if len(peerIDs) > 0 {
+			ok, err := peersOwnedByUser(ctx, store.pool, *req.UserID, peerIDs)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to check peers")
+				return
+			}
+			if !ok {
+				writeError(w, http.StatusBadRequest, "Selected peers do not belong to the chosen user")
+				return
+			}
+		}
+
 		var exists bool
 		var err error
 		if hasCIDR {
@@ -528,8 +586,9 @@ func CreateIPRule(store *Store) http.HandlerFunc {
 				  AND COALESCE(department_id, '00000000-0000-0000-0000-000000000000'::uuid)
 				    = COALESCE($3::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
 				  AND cidr = $4
+				  AND peer_ids = $5::text[]::uuid[]
 				LIMIT 1
-			`, req.Scope, req.UserID, req.DepartmentID, cidr).Scan(&exists)
+			`, req.Scope, req.UserID, req.DepartmentID, cidr, peerIDStrings(peerIDs)).Scan(&exists)
 		} else {
 			err = store.pool.QueryRow(ctx, `
 				SELECT true FROM ip_block_rules
@@ -539,14 +598,19 @@ func CreateIPRule(store *Store) http.HandlerFunc {
 				  AND COALESCE(department_id, '00000000-0000-0000-0000-000000000000'::uuid)
 				    = COALESCE($3::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
 				  AND group_id = $4
+				  AND peer_ids = $5::text[]::uuid[]
 				LIMIT 1
-			`, req.Scope, req.UserID, req.DepartmentID, *req.GroupID).Scan(&exists)
+			`, req.Scope, req.UserID, req.DepartmentID, *req.GroupID, peerIDStrings(peerIDs)).Scan(&exists)
 		}
 		if err == nil {
+			suffix := " for this scope"
+			if len(peerIDs) > 0 {
+				suffix = " for the chosen peers"
+			}
 			if hasCIDR {
-				writeError(w, http.StatusConflict, fmt.Sprintf("%s is already blocked for this scope", cidr))
+				writeError(w, http.StatusConflict, fmt.Sprintf("%s is already blocked%s", cidr, suffix))
 			} else {
-				writeError(w, http.StatusConflict, fmt.Sprintf("group %q is already blocked for this scope", groupName))
+				writeError(w, http.StatusConflict, fmt.Sprintf("group %q is already blocked%s", groupName, suffix))
 			}
 			return
 		}
@@ -557,9 +621,9 @@ func CreateIPRule(store *Store) http.HandlerFunc {
 
 		var id uuid.UUID
 		err = store.pool.QueryRow(ctx, `
-			INSERT INTO ip_block_rules (scope, user_id, department_id, cidr, group_id, note, created_by)
-			VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id
-		`, req.Scope, req.UserID, req.DepartmentID, domainArg, req.GroupID, req.Note, adminID).Scan(&id)
+			INSERT INTO ip_block_rules (scope, user_id, department_id, cidr, group_id, note, created_by, peer_ids)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8::text[]::uuid[]) RETURNING id
+		`, req.Scope, req.UserID, req.DepartmentID, domainArg, req.GroupID, req.Note, adminID, peerIDStrings(peerIDs)).Scan(&id)
 		if err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -697,7 +761,8 @@ func IPRuleStatus(store *Store) http.HandlerFunc {
 			servers = append(servers, sv)
 		}
 
-		// A user rule is "waiting" only when the user has no active peer on ANY
+		// A user rule is "waiting" only when none of its target peers (the whole
+		// user when peer-scoped with an empty selection) has an active peer on ANY
 		// active server; partial expansion elsewhere still enforces it.
 		unexpandedCount := 0
 		if err := store.pool.QueryRow(ctx, `
@@ -705,6 +770,7 @@ func IPRuleStatus(store *Store) http.HandlerFunc {
 			WHERE r.scope = 'user' AND NOT EXISTS (
 				SELECT 1 FROM peers p JOIN servers s ON s.id = p.server_id
 				WHERE p.user_id = r.user_id AND p.status = 'active' AND s.status = 'active'
+				  AND (cardinality(r.peer_ids) = 0 OR p.id = ANY(r.peer_ids))
 			)
 		`).Scan(&unexpandedCount); err != nil {
 			unexpandedCount = 0

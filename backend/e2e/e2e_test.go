@@ -1442,6 +1442,168 @@ func TestEndToEnd(t *testing.T) {
 	ipDelAgainResp, _ := api(t, "DELETE", "/api/ip-rules/"+ipV4ID, token, nil)
 	expectStatus(t, ipDelAgainResp, 404, "DELETE /api/ip-rules/{id} twice")
 
+	// ---- Peer-scoped user rules (domain + IP) ----
+	// A user-scoped blocking rule may target a subset of the user's peers;
+	// empty/absent peer_ids keeps the legacy "all peers of the user" behaviour.
+	scopeUserResp, _ := api(t, "POST", "/api/users", token, map[string]string{
+		"email": "peer-scope@example.com", "full_name": "Peer Scope User",
+	})
+	expectStatus(t, scopeUserResp, 201, "POST /api/users (peer-scope)")
+	scopeUserID := ""
+	{
+		var scopeUsers []map[string]interface{}
+		json.Unmarshal([]byte(rawGet(t, baseURL+"/api/users", token)), &scopeUsers)
+		for _, usr := range scopeUsers {
+			if email, _ := usr["email"].(string); email == "peer-scope@example.com" {
+				scopeUserID, _ = usr["id"].(string)
+			}
+		}
+	}
+	if scopeUserID == "" {
+		t.Fatal("peer-scope user not listed")
+	}
+	createScopePeer := func(name string) string {
+		resp, out := api(t, "POST", "/api/peers", token, map[string]interface{}{
+			"name": name, "server_id": serverID, "user_id": scopeUserID,
+		})
+		expectStatus(t, resp, 201, "POST /api/peers ("+name+")")
+		pub, _ := out["public_key"].(string)
+		var peers []map[string]interface{}
+		json.Unmarshal([]byte(rawGet(t, baseURL+"/api/peers", token)), &peers)
+		for _, p := range peers {
+			if k, _ := p["public_key"].(string); k == pub {
+				if id, _ := p["id"].(string); id != "" {
+					return id
+				}
+			}
+		}
+		t.Fatalf("peer %q not found in peer list after create", name)
+		return ""
+	}
+	scopePeerA := createScopePeer("Scope Peer A")
+	scopePeerB := createScopePeer("Scope Peer B")
+
+	// The list shape: peer_ids is always an array; peer_names is ordered by
+	// name and empty for all-peers / global / department rules.
+	peerIDsOf := func(v interface{}) []string {
+		arr, _ := v.([]interface{})
+		out := make([]string, 0, len(arr))
+		for _, it := range arr {
+			if s, ok := it.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	peerNamesOf := peerIDsOf
+	findDomainRule := func(domain string) []map[string]interface{} {
+		var rows []map[string]interface{}
+		json.Unmarshal([]byte(rawGet(t, baseURL+"/api/domain-rules", token)), &rows)
+		var out []map[string]interface{}
+		for _, rr := range rows {
+			if d, _ := rr["domain"].(string); d == domain {
+				out = append(out, rr)
+			}
+		}
+		return out
+	}
+
+	// Domain rule for one selected peer.
+	scopeDomainResp, _ := api(t, "POST", "/api/domain-rules", token, map[string]interface{}{
+		"scope": "user", "user_id": scopeUserID, "domain": "peer-scope.example.com",
+		"peer_ids": []string{scopePeerA},
+	})
+	expectStatus(t, scopeDomainResp, 201, "POST /api/domain-rules (peer-scoped)")
+	domainRows := findDomainRule("peer-scope.example.com")
+	if len(domainRows) != 1 {
+		t.Fatalf("peer-scoped domain rule count = %d, want 1", len(domainRows))
+	}
+	if ids := peerIDsOf(domainRows[0]["peer_ids"]); len(ids) != 1 || ids[0] != scopePeerA {
+		t.Fatalf("domain rule peer_ids = %v, want [%s]", ids, scopePeerA)
+	}
+	if names := peerNamesOf(domainRows[0]["peer_names"]); len(names) != 1 || names[0] != "Scope Peer A" {
+		t.Fatalf("domain rule peer_names = %v, want [Scope Peer A]", names)
+	}
+	// Legacy global rules list keep the peer arrays empty (never null).
+	if globalRows := findDomainRule("example.com"); len(globalRows) == 1 {
+		if ids := peerIDsOf(globalRows[0]["peer_ids"]); len(ids) != 0 {
+			t.Fatalf("global rule peer_ids = %v, want empty", ids)
+		}
+		if names := peerNamesOf(globalRows[0]["peer_names"]); len(names) != 0 {
+			t.Fatalf("global rule peer_names = %v, want empty", names)
+		}
+	}
+
+	// Uniqueness is per target AND peer subset.
+	scopeDupResp, _ := api(t, "POST", "/api/domain-rules", token, map[string]interface{}{
+		"scope": "user", "user_id": scopeUserID, "domain": "peer-scope.example.com",
+		"peer_ids": []string{scopePeerA},
+	})
+	expectStatus(t, scopeDupResp, 409, "POST /api/domain-rules (same peer subset)")
+	scopeOtherResp, _ := api(t, "POST", "/api/domain-rules", token, map[string]interface{}{
+		"scope": "user", "user_id": scopeUserID, "domain": "peer-scope.example.com",
+		"peer_ids": []string{scopePeerB},
+	})
+	expectStatus(t, scopeOtherResp, 201, "POST /api/domain-rules (different peer subset)")
+
+	// Validation: peers must belong to the chosen user, and peer selection is
+	// only offered for user scope.
+	foreignPeerResp, _ := api(t, "POST", "/api/domain-rules", token, map[string]interface{}{
+		"scope": "user", "user_id": scopeUserID, "domain": "peer-scope-foreign.example.com",
+		"peer_ids": []string{claimPeerID},
+	})
+	expectStatus(t, foreignPeerResp, 400, "POST /api/domain-rules (peer of another user)")
+	globalPeerResp, _ := api(t, "POST", "/api/domain-rules", token, map[string]interface{}{
+		"scope": "global", "domain": "peer-scope-global.example.com", "peer_ids": []string{scopePeerA},
+	})
+	expectStatus(t, globalPeerResp, 400, "POST /api/domain-rules (global + peer_ids)")
+	badPeerResp, _ := api(t, "POST", "/api/domain-rules", token, map[string]interface{}{
+		"scope": "user", "user_id": scopeUserID, "domain": "peer-scope-baduuid.example.com",
+		"peer_ids": []string{"not-a-uuid"},
+	})
+	expectStatus(t, badPeerResp, 400, "POST /api/domain-rules (invalid peer id)")
+
+	// IP rule for BOTH peers: the create response carries the deduped peer ids
+	// and name-ordered peer_names; the list exposes the same.
+	scopeIPResp, scopeIPOut := api(t, "POST", "/api/ip-rules", token, map[string]interface{}{
+		"scope": "user", "user_id": scopeUserID, "cidr": "198.18.7.0/24",
+		"note": "peer-scoped e2e", "peer_ids": []string{scopePeerB, scopePeerA},
+	})
+	expectStatus(t, scopeIPResp, 201, "POST /api/ip-rules (peer-scoped)")
+	if ids := peerIDsOf(scopeIPOut["peer_ids"]); len(ids) != 2 || !((ids[0] == scopePeerA && ids[1] == scopePeerB) || (ids[0] == scopePeerB && ids[1] == scopePeerA)) {
+		t.Fatalf("IP rule peer_ids = %v, want both scope peers", ids)
+	}
+	if names := peerNamesOf(scopeIPOut["peer_names"]); len(names) != 2 || names[0] != "Scope Peer A" || names[1] != "Scope Peer B" {
+		t.Fatalf("IP rule peer_names = %v, want name-sorted scope peers", names)
+	}
+	var scopeIPRules []map[string]interface{}
+	json.Unmarshal([]byte(rawGet(t, baseURL+"/api/ip-rules", token)), &scopeIPRules)
+	foundScopeIP := false
+	for _, rr := range scopeIPRules {
+		if c, _ := rr["cidr"].(string); c == "198.18.7.0/24" {
+			foundScopeIP = true
+			if ids := peerIDsOf(rr["peer_ids"]); len(ids) != 2 {
+				t.Fatalf("listed IP rule peer_ids = %v, want 2", ids)
+			}
+			if names := peerNamesOf(rr["peer_names"]); len(names) != 2 || names[0] != "Scope Peer A" {
+				t.Fatalf("listed IP rule peer_names = %v", names)
+			}
+		}
+	}
+	if !foundScopeIP {
+		t.Fatal("peer-scoped IP rule missing from list")
+	}
+	// Peer ownership is enforced for IP rules too.
+	ipForeignPeerResp, _ := api(t, "POST", "/api/ip-rules", token, map[string]interface{}{
+		"scope": "user", "user_id": scopeUserID, "cidr": "198.18.9.0/24",
+		"peer_ids": []string{claimPeerID},
+	})
+	expectStatus(t, ipForeignPeerResp, 400, "POST /api/ip-rules (peer of another user)")
+	ipGlobalPeerResp, _ := api(t, "POST", "/api/ip-rules", token, map[string]interface{}{
+		"scope": "global", "cidr": "198.18.10.0/24", "peer_ids": []string{scopePeerA},
+	})
+	expectStatus(t, ipGlobalPeerResp, 400, "POST /api/ip-rules (global + peer_ids)")
+
 	// ---- IP groups ----
 	ipGroupResp, ipGroupOut := api(t, "POST", "/api/ip-groups", token, map[string]interface{}{
 		"name":  "E2E CDN edges",
@@ -1585,6 +1747,18 @@ func TestEndToEnd(t *testing.T) {
 		"scope": "department", "cidr": "203.0.113.78",
 	})
 	expectStatus(t, badDeptIP, 400, "POST /api/ip-rules (department without id)")
+
+	// Peer selection is not offered for department scope.
+	deptPeerDomain, _ := api(t, "POST", "/api/domain-rules", token, map[string]interface{}{
+		"scope": "department", "department_id": deptID, "domain": "dept-peer.example.com",
+		"peer_ids": []string{scopePeerA},
+	})
+	expectStatus(t, deptPeerDomain, 400, "POST /api/domain-rules (department + peer_ids)")
+	deptPeerIP, _ := api(t, "POST", "/api/ip-rules", token, map[string]interface{}{
+		"scope": "department", "department_id": deptID, "cidr": "203.0.113.79",
+		"peer_ids": []string{scopePeerA},
+	})
+	expectStatus(t, deptPeerIP, 400, "POST /api/ip-rules (department + peer_ids)")
 
 	// Lists expose the department name; status counts department rules.
 	var deptDomainRules []map[string]interface{}

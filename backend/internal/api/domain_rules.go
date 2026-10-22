@@ -90,7 +90,8 @@ func RequestDomainRuleSync(store *Store) {
 
 func loadDomainRules(ctx context.Context, store *Store) ([]db.DomainRule, error) {
 	rows, err := store.pool.Query(ctx, `
-		SELECT id, scope, user_id, department_id, domain, group_id, created_by, created_at
+		SELECT id, scope, user_id, department_id, domain, group_id, created_by, created_at,
+		       COALESCE(array_to_string(peer_ids, ','), '')
 		FROM domain_block_rules
 		ORDER BY created_at DESC
 	`)
@@ -103,11 +104,13 @@ func loadDomainRules(ctx context.Context, store *Store) ([]db.DomainRule, error)
 	for rows.Next() {
 		var rule db.DomainRule
 		var domain sql.NullString
+		var peerIDsRaw string
 		if err := rows.Scan(&rule.ID, &rule.Scope, &rule.UserID, &rule.DepartmentID, &domain, &rule.GroupID,
-			&rule.CreatedBy, &rule.CreatedAt); err != nil {
+			&rule.CreatedBy, &rule.CreatedAt, &peerIDsRaw); err != nil {
 			return nil, fmt.Errorf("scan domain rule: %w", err)
 		}
 		rule.Domain = domain.String
+		rule.PeerIDs = parseStoredPeerIDs(peerIDsRaw)
 		rules = append(rules, rule)
 	}
 	if err := rows.Err(); err != nil {
@@ -241,17 +244,21 @@ func ListDomainRules(store *Store) http.HandlerFunc {
 		// applies to (same shape as ListPeers: user_email/user_full_name).
 		type domainRuleRow struct {
 			db.DomainRule
-			UserEmail          string `json:"user_email"`
-			UserFullName       string `json:"user_full_name"`
-			UserDepartmentName string `json:"user_department_name"`
-			DepartmentName     string `json:"department_name"`
-			GroupName          string `json:"group_name,omitempty"`
+			UserEmail          string   `json:"user_email"`
+			UserFullName       string   `json:"user_full_name"`
+			UserDepartmentName string   `json:"user_department_name"`
+			DepartmentName     string   `json:"department_name"`
+			GroupName          string   `json:"group_name,omitempty"`
+			PeerNames          []string `json:"peer_names"`
 		}
 		var rules []domainRuleRow
 		rows, err := store.pool.Query(ctx, `
 			SELECT dr.id, dr.scope, dr.user_id, dr.department_id, dr.domain, dr.group_id, dr.created_by, dr.created_at,
+			       COALESCE(array_to_string(dr.peer_ids, ','), ''),
 			       COALESCE(u.email, ''), COALESCE(u.full_name, ''), COALESCE(d.name, ''),
-			       COALESCE(dd.name, ''), COALESCE(g.name, '')
+			       COALESCE(dd.name, ''), COALESCE(g.name, ''),
+			       COALESCE((SELECT array_agg(p.name ORDER BY p.name)
+			                 FROM peers p WHERE p.id = ANY(dr.peer_ids)), ARRAY[]::text[])
 			FROM domain_block_rules dr
 			LEFT JOIN users u ON u.id = dr.user_id
 			LEFT JOIN departments d ON d.id = u.department_id
@@ -268,13 +275,18 @@ func ListDomainRules(store *Store) http.HandlerFunc {
 		for rows.Next() {
 			var rule domainRuleRow
 			var domain sql.NullString
+			var peerIDsRaw string
 			if err := rows.Scan(&rule.ID, &rule.Scope, &rule.UserID, &rule.DepartmentID, &domain, &rule.GroupID,
-				&rule.CreatedBy, &rule.CreatedAt, &rule.UserEmail, &rule.UserFullName,
-				&rule.UserDepartmentName, &rule.DepartmentName, &rule.GroupName); err != nil {
+				&rule.CreatedBy, &rule.CreatedAt, &peerIDsRaw, &rule.UserEmail, &rule.UserFullName,
+				&rule.UserDepartmentName, &rule.DepartmentName, &rule.GroupName, &rule.PeerNames); err != nil {
 				writeError(w, http.StatusInternalServerError, "Failed to scan domain rule")
 				return
 			}
 			rule.Domain = domain.String
+			rule.PeerIDs = parseStoredPeerIDs(peerIDsRaw)
+			if rule.PeerNames == nil {
+				rule.PeerNames = []string{}
+			}
 			rules = append(rules, rule)
 		}
 
@@ -290,6 +302,7 @@ func CreateDomainRule(store *Store) http.HandlerFunc {
 			DepartmentID *uuid.UUID `json:"department_id"`
 			Domain       string     `json:"domain"`
 			GroupID      *uuid.UUID `json:"group_id"`
+			PeerIDs      []string   `json:"peer_ids"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
@@ -326,6 +339,31 @@ func CreateDomainRule(store *Store) http.HandlerFunc {
 			return
 		}
 
+		ctx := context.Background()
+
+		// Optional peer selection: only user-scoped rules may target a subset
+		// of the user's peers (empty/absent = all peers, legacy behaviour).
+		peerIDs, peerErr := parseRulePeerIDs(req.PeerIDs)
+		if peerErr != nil {
+			writeError(w, http.StatusBadRequest, peerErr.Error())
+			return
+		}
+		if len(peerIDs) > 0 && req.Scope != "user" {
+			writeError(w, http.StatusBadRequest, "Peer selection is only valid for user-scoped rules")
+			return
+		}
+		if len(peerIDs) > 0 {
+			ok, err := peersOwnedByUser(ctx, store.pool, *req.UserID, peerIDs)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to check peers")
+				return
+			}
+			if !ok {
+				writeError(w, http.StatusBadRequest, "Selected peers do not belong to the chosen user")
+				return
+			}
+		}
+
 		hasDomain := strings.TrimSpace(req.Domain) != ""
 		hasGroup := req.GroupID != nil
 		if hasDomain == hasGroup {
@@ -333,7 +371,6 @@ func CreateDomainRule(store *Store) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
 		adminID := getAdminID(r)
 
 		var domain string
@@ -356,10 +393,15 @@ func CreateDomainRule(store *Store) http.HandlerFunc {
 				  AND COALESCE(department_id, '00000000-0000-0000-0000-000000000000'::uuid)
 				    = COALESCE($3::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
 				  AND domain = $4
+				  AND peer_ids = $5::text[]::uuid[]
 				LIMIT 1
-			`, req.Scope, req.UserID, req.DepartmentID, domain).Scan(&exists)
+			`, req.Scope, req.UserID, req.DepartmentID, domain, peerIDStrings(peerIDs)).Scan(&exists)
 			if err == nil {
-				writeError(w, http.StatusConflict, fmt.Sprintf("%s is already blocked for this scope", domain))
+				msg := fmt.Sprintf("%s is already blocked for this scope", domain)
+				if len(peerIDs) > 0 {
+					msg = fmt.Sprintf("%s is already blocked for the chosen peers", domain)
+				}
+				writeError(w, http.StatusConflict, msg)
 				return
 			}
 			if !errors.Is(err, pgx.ErrNoRows) {
@@ -389,10 +431,15 @@ func CreateDomainRule(store *Store) http.HandlerFunc {
 				  AND COALESCE(department_id, '00000000-0000-0000-0000-000000000000'::uuid)
 				    = COALESCE($3::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
 				  AND group_id = $4
+				  AND peer_ids = $5::text[]::uuid[]
 				LIMIT 1
-			`, req.Scope, req.UserID, req.DepartmentID, *req.GroupID).Scan(&exists)
+			`, req.Scope, req.UserID, req.DepartmentID, *req.GroupID, peerIDStrings(peerIDs)).Scan(&exists)
 			if err == nil {
-				writeError(w, http.StatusConflict, fmt.Sprintf("group %q is already blocked for this scope", groupName))
+				msg := fmt.Sprintf("group %q is already blocked for this scope", groupName)
+				if len(peerIDs) > 0 {
+					msg = fmt.Sprintf("group %q is already blocked for the chosen peers", groupName)
+				}
+				writeError(w, http.StatusConflict, msg)
 				return
 			}
 			if !errors.Is(err, pgx.ErrNoRows) {
@@ -407,9 +454,9 @@ func CreateDomainRule(store *Store) http.HandlerFunc {
 			domainArg = &domain
 		}
 		_, err := store.pool.Exec(ctx, `
-			INSERT INTO domain_block_rules (scope, user_id, department_id, domain, group_id, created_by)
-			VALUES ($1, $2, $3, $4, $5, $6)
-		`, req.Scope, req.UserID, req.DepartmentID, domainArg, req.GroupID, adminID)
+			INSERT INTO domain_block_rules (scope, user_id, department_id, domain, group_id, created_by, peer_ids)
+			VALUES ($1, $2, $3, $4, $5, $6, $7::text[]::uuid[])
+		`, req.Scope, req.UserID, req.DepartmentID, domainArg, req.GroupID, adminID, peerIDStrings(peerIDs))
 		if err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -540,7 +587,7 @@ func CheckDomainRule(store *Store) http.HandlerFunc {
 				writeError(w, http.StatusBadRequest, "Invalid user ID")
 				return
 			}
-			ips, err := userPeerIPs(ctx, store, uid)
+			ips, err := userPeerIPs(ctx, store, uid, nil)
 			if err == nil && len(ips) > 0 {
 				clientIP = ips[0]
 			}

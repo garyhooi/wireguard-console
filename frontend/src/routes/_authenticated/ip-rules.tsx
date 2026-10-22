@@ -34,6 +34,10 @@ interface IPRule {
   user_full_name: string
   /** Joined department name (newer backends); absorbs into the user label. */
   user_department_name?: string
+  /** Selected peers for user-scoped rules. Empty/absent = every peer of the user. */
+  peer_ids?: string[]
+  /** Names of the selected peers, ordered by name (empty for all-peers rules). */
+  peer_names?: string[]
   /** Set for department-scoped rules. */
   department_id?: string | null
   department_name?: string
@@ -59,6 +63,22 @@ interface Department {
   name: string
   user_count: number
   created_at: string
+}
+
+interface PeerOption {
+  id: string
+  user_id: string
+  name: string
+  allowed_ip: string
+  status: string
+}
+
+/** Compact qualifier for user-scoped rules: which peers the rule applies to. */
+function peerScopeLabel(rule: { peer_ids?: string[]; peer_names?: string[] }): string {
+  const ids = rule.peer_ids ?? []
+  if (ids.length === 0) return 'All peers'
+  const names = (rule.peer_names ?? []).filter(Boolean)
+  return names.length > 0 ? `Peers: ${names.join(', ')}` : `Peers: ${ids.length}`
 }
 
 interface DeleteGroupResult {
@@ -180,6 +200,7 @@ export function IPBlockingPage() {
   const [scope, setScope] = useState<RuleScope>('global')
   const [target, setTarget] = useState<'cidr' | 'group'>('cidr')
   const [userId, setUserId] = useState('')
+  const [peerIds, setPeerIds] = useState<string[]>([])
   const [departmentId, setDepartmentId] = useState('')
   const [cidr, setCidr] = useState('')
   const [groupId, setGroupId] = useState('')
@@ -227,6 +248,19 @@ export function IPBlockingPage() {
     enabled: scope === 'user',
   })
 
+  // Peers of the selected user — a user rule can target only some of them.
+  // No selection means every peer of the user.
+  const { data: peersData, isLoading: peersLoading } = useQuery<PeerOption[]>({
+    queryKey: ['peers'],
+    queryFn: async () => {
+      return apiJson<PeerOption[]>('/api/peers')
+    },
+    enabled: scope === 'user' && userId !== '',
+  })
+  const userPeers = (Array.isArray(peersData) ? peersData : []).filter(
+    (peer) => peer.user_id === userId && peer.status !== 'removed',
+  )
+
   // Departments are loaded for the scope picker and as a fallback label for
   // department rows when an older API response omits department_name.
   const { data: departmentsData } = useQuery<Department[]>({
@@ -260,6 +294,7 @@ export function IPBlockingPage() {
     mutationFn: async (body: {
       scope: RuleScope
       user_id?: string
+      peer_ids?: string[]
       department_id?: string
       cidr?: string
       group_id?: string
@@ -272,6 +307,7 @@ export function IPBlockingPage() {
       setScope('global')
       setTarget('cidr')
       setUserId('')
+      setPeerIds([])
       setDepartmentId('')
       setCidr('')
       setGroupId('')
@@ -333,6 +369,7 @@ export function IPBlockingPage() {
     setScope('global')
     setTarget('cidr')
     setUserId('')
+    setPeerIds([])
     setDepartmentId('')
     setCidr('')
     setGroupId('')
@@ -352,6 +389,7 @@ export function IPBlockingPage() {
     const body: {
       scope: RuleScope
       user_id?: string
+      peer_ids?: string[]
       department_id?: string
       cidr?: string
       group_id?: string
@@ -359,6 +397,8 @@ export function IPBlockingPage() {
     } = { scope }
     if (scope === 'user' && userId) {
       body.user_id = userId
+      // No peer selection = the rule applies to every peer of the user.
+      if (peerIds.length > 0) body.peer_ids = peerIds
     }
     if (scope === 'department') {
       if (!departmentId) return
@@ -615,11 +655,18 @@ export function IPBlockingPage() {
                             <span className="text-zinc-300">{departmentLabel(rule)}</span>
                           </span>
                         ) : (
-                          userLabel(
-                            rule.user_full_name,
-                            rule.user_email,
-                            rule.user_department_name,
-                          )
+                          <div className="space-y-0.5">
+                            <div>
+                              {userLabel(
+                                rule.user_full_name,
+                                rule.user_email,
+                                rule.user_department_name,
+                              )}
+                            </div>
+                            <div className="text-[11px] text-zinc-500">
+                              {peerScopeLabel(rule)}
+                            </div>
+                          </div>
                         )}
                       </td>
                       <td className={tdCls}>
@@ -667,6 +714,7 @@ export function IPBlockingPage() {
               onChange={(e) => {
                 setScope(e.target.value as RuleScope)
                 setUserId('')
+                setPeerIds([])
                 setDepartmentId('')
                 addMutation.reset()
               }}
@@ -688,6 +736,7 @@ export function IPBlockingPage() {
                 value={userId}
                 onChange={(e) => {
                   setUserId(e.target.value)
+                  setPeerIds([])
                   addMutation.reset()
                 }}
               >
@@ -698,6 +747,53 @@ export function IPBlockingPage() {
                   </option>
                 ))}
               </select>
+            </div>
+          )}
+
+          {/* Optional peer subset for user-scoped rules. Unchecked = all peers. */}
+          {scope === 'user' && userId !== '' && (
+            <div>
+              <span className={labelCls}>Peers</span>
+              {peersLoading ? (
+                <p className="text-xs text-zinc-500">Loading peers…</p>
+              ) : userPeers.length === 0 ? (
+                <p className="text-xs text-zinc-500">
+                  No peers yet — the rule will apply to all current and future peers of this
+                  user.
+                </p>
+              ) : (
+                <>
+                  <div className="max-h-40 divide-y divide-zinc-800/60 overflow-auto rounded-md border border-zinc-700 bg-zinc-800/40">
+                    {userPeers.map((peer) => (
+                      <label
+                        key={peer.id}
+                        className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm text-zinc-300 transition-colors hover:bg-zinc-800/60"
+                      >
+                        <input
+                          type="checkbox"
+                          value={peer.id}
+                          checked={peerIds.includes(peer.id)}
+                          onChange={(e) =>
+                            setPeerIds((ids) =>
+                              e.target.checked
+                                ? [...ids, peer.id]
+                                : ids.filter((id) => id !== peer.id),
+                            )
+                          }
+                          className="h-4 w-4 rounded border-zinc-700 bg-zinc-800 accent-teal-500"
+                        />
+                        <span className="min-w-0 flex-1 truncate">{peer.name}</span>
+                        <span className="shrink-0 font-mono text-[11px] text-zinc-500">
+                          {peer.allowed_ip}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                  <p className="mt-1 text-xs text-zinc-500">
+                    Leave all unchecked to apply to every peer of this user.
+                  </p>
+                </>
+              )}
             </div>
           )}
 
@@ -923,7 +1019,8 @@ export function IPBlockingPage() {
           <li>• IPv4 and IPv6 addresses and CIDR ranges are both supported</li>
           <li>
             • <strong className="text-zinc-200">Global rules</strong> apply to every VPN user;{' '}
-            <strong className="text-zinc-200">user rules</strong> apply only to that user&apos;s peers
+            <strong className="text-zinc-200">user rules</strong> apply to all or selected peers of
+            that user
           </li>
           <li>• Applies to all traffic from VPN peers — not just DNS</li>
           <li>• Destination addresses only — combine with Domain Blocking to block names</li>

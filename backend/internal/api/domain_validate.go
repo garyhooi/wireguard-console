@@ -223,7 +223,7 @@ func buildAdGuardRules(ctx context.Context, store *Store, rules []db.DomainRule)
 		}
 
 		if rule.Scope == "user" && rule.UserID != nil {
-			ips, err := userPeerIPs(ctx, store, *rule.UserID)
+			ips, err := userPeerIPs(ctx, store, *rule.UserID, rule.PeerIDs)
 			if err != nil {
 				return out, fmt.Errorf("expand user rule %s: %w", rule.ID, err)
 			}
@@ -286,15 +286,23 @@ func loadGroupDomains(ctx context.Context, store *Store) (map[uuid.UUID][]string
 }
 
 // userPeerIPs returns the tunnel IPs of a user's active peers on active
-// servers (AdGuard identifies clients by DNS packet source IP).
-func userPeerIPs(ctx context.Context, store *Store, userID uuid.UUID) ([]string, error) {
-	rows, err := store.pool.Query(ctx, `
+// servers (AdGuard identifies clients by DNS packet source IP). When peerIDs
+// is non-empty the result is narrowed to exactly those peers; an empty list
+// keeps the legacy "all peers of the user" behaviour.
+func userPeerIPs(ctx context.Context, store *Store, userID uuid.UUID, peerIDs []uuid.UUID) ([]string, error) {
+	query := `
 		SELECT DISTINCT host(p.allowed_ip)
 		FROM peers p
 		JOIN servers s ON s.id = p.server_id
-		WHERE p.user_id = $1 AND p.status = 'active' AND s.status = 'active'
-		ORDER BY 1
-	`, userID)
+		WHERE p.user_id = $1 AND p.status = 'active' AND s.status = 'active'`
+	args := []any{userID}
+	if len(peerIDs) > 0 {
+		query += ` AND p.id = ANY($2::text[]::uuid[])`
+		args = append(args, peerIDStrings(peerIDs))
+	}
+	query += ` ORDER BY 1`
+
+	rows, err := store.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

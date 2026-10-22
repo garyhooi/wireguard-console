@@ -79,6 +79,48 @@ const status = {
   conflicts: [],
 }
 
+const users = [
+  { id: 'u1', email: 'alice@example.com', full_name: 'Alice Tan' },
+  { id: 'u2', email: 'bob@example.com', full_name: 'Bob Lee' },
+]
+
+// u1 owns two active peers plus one removed peer; u2's peer must never leak in.
+const peers = [
+  { id: 'p1', user_id: 'u1', name: 'Alice Laptop', allowed_ip: '10.8.0.2/32', status: 'active' },
+  { id: 'p2', user_id: 'u1', name: 'Alice Phone', allowed_ip: '10.8.0.3/32', status: 'active' },
+  { id: 'p3', user_id: 'u2', name: 'Bob Laptop', allowed_ip: '10.8.0.4/32', status: 'active' },
+  { id: 'p-old', user_id: 'u1', name: 'Alice Old', allowed_ip: '10.8.0.9/32', status: 'removed' },
+]
+
+/** Full fetch mock for the Add IP rule modal with a user selected. */
+function userScopeFetchMock(ruleRows: unknown[] = rules) {
+  const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+    if (url === '/api/ip-rules' && init?.method === 'POST') return jsonRes({}, 201)
+    if (url.includes('/api/ip-rules/status')) return jsonRes(status)
+    if (url === '/api/departments') return jsonRes(departments)
+    if (url === '/api/ip-groups') return jsonRes([])
+    if (url === '/api/users') return jsonRes(users)
+    if (url === '/api/peers') return jsonRes(peers)
+    if (url === '/api/ip-rules') return jsonRes(ruleRows)
+    throw new Error(`unexpected fetch: ${url}`)
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
+
+/** Open the Add IP rule modal, switch to user scope, and pick user u1. */
+async function openUserScopedRuleDialog() {
+  fireEvent.click(await screen.findByRole('button', { name: 'Add IP rule' }))
+  const dialog = await screen.findByRole('dialog')
+  fireEvent.change(within(dialog).getByLabelText('Scope'), { target: { value: 'user' } })
+  const userSelect = within(dialog).getByLabelText('User')
+  await waitFor(() =>
+    expect(within(userSelect).getByRole('option', { name: /Alice Tan/ })).toBeTruthy(),
+  )
+  fireEvent.change(userSelect, { target: { value: 'u1' } })
+  return dialog
+}
+
 describe('IPBlockingPage', () => {
   beforeEach(() => {
     vi.stubGlobal(
@@ -450,5 +492,113 @@ describe('IPBlockingPage', () => {
         note: '',
       })
     })
+  })
+
+  it('offers peer checkboxes only for user scope after choosing a user', async () => {
+    userScopeFetchMock()
+    renderWithClient(<IPBlockingPage />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Add IP rule' }))
+    const dialog = await screen.findByRole('dialog')
+
+    // Global scope has no peer selection.
+    expect(within(dialog).queryByText('Peers')).toBeNull()
+
+    fireEvent.change(within(dialog).getByLabelText('Scope'), { target: { value: 'user' } })
+    // A user must be chosen before its peers can be listed.
+    expect(within(dialog).queryByText('Peers')).toBeNull()
+
+    const userSelect = within(dialog).getByLabelText('User')
+    await waitFor(() =>
+      expect(within(userSelect).getByRole('option', { name: /Alice Tan/ })).toBeTruthy(),
+    )
+    fireEvent.change(userSelect, { target: { value: 'u1' } })
+
+    // Only u1's active peers: no other user's peer, no removed peer.
+    expect(await within(dialog).findByRole('checkbox', { name: /Alice Laptop/ })).toBeTruthy()
+    expect(within(dialog).getByRole('checkbox', { name: /Alice Phone/ })).toBeTruthy()
+    expect(within(dialog).queryByRole('checkbox', { name: /Bob Laptop/ })).toBeNull()
+    expect(within(dialog).queryByRole('checkbox', { name: /Alice Old/ })).toBeNull()
+    expect(
+      within(dialog).getByText('Leave all unchecked to apply to every peer of this user.'),
+    ).toBeTruthy()
+  })
+
+  it('sends peer_ids when specific peers are selected', async () => {
+    const fetchMock = userScopeFetchMock()
+    renderWithClient(<IPBlockingPage />)
+    const dialog = await openUserScopedRuleDialog()
+
+    fireEvent.click(await within(dialog).findByRole('checkbox', { name: /Alice Laptop/ }))
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: /Alice Phone/ }))
+    fireEvent.change(within(dialog).getByLabelText('IP address or CIDR'), {
+      target: { value: '198.51.100.0/24' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add rule' }))
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(
+        ([url, init]) => url === '/api/ip-rules' && init?.method === 'POST',
+      )
+      expect(call).toBeTruthy()
+      expect(JSON.parse(String(call![1]?.body))).toEqual({
+        scope: 'user',
+        user_id: 'u1',
+        cidr: '198.51.100.0/24',
+        note: '',
+        peer_ids: ['p1', 'p2'],
+      })
+    })
+  })
+
+  it('omits peer_ids when no peers are selected (all peers of the user)', async () => {
+    const fetchMock = userScopeFetchMock()
+    renderWithClient(<IPBlockingPage />)
+    const dialog = await openUserScopedRuleDialog()
+
+    // Wait for the peers list so an empty selection is a real "all peers" choice.
+    await within(dialog).findByRole('checkbox', { name: /Alice Laptop/ })
+    fireEvent.change(within(dialog).getByLabelText('IP address or CIDR'), {
+      target: { value: '198.51.100.0/24' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add rule' }))
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(
+        ([url, init]) => url === '/api/ip-rules' && init?.method === 'POST',
+      )
+      expect(call).toBeTruthy()
+      expect(JSON.parse(String(call![1]?.body))).toEqual({
+        scope: 'user',
+        user_id: 'u1',
+        cidr: '198.51.100.0/24',
+        note: '',
+      })
+    })
+  })
+
+  it('shows the peer scope for user rules in the rules table', async () => {
+    userScopeFetchMock([
+      {
+        ...rules[1],
+        id: 'r-all-peers',
+        cidr: '198.51.100.0/24',
+        peer_ids: [],
+      },
+      {
+        ...rules[1],
+        id: 'r-some-peers',
+        cidr: '198.51.100.1/32',
+        peer_ids: ['p1', 'p2'],
+        peer_names: ['Alice Laptop', 'Alice Phone'],
+      },
+    ])
+    renderWithClient(<IPBlockingPage />)
+
+    await screen.findByText('198.51.100.0/24')
+    const allRow = screen.getByText('198.51.100.0/24').closest('tr')!
+    expect(within(allRow).getByText('All peers')).toBeTruthy()
+
+    const someRow = screen.getByText('198.51.100.1/32').closest('tr')!
+    expect(within(someRow).getByText('Peers: Alice Laptop, Alice Phone')).toBeTruthy()
   })
 })
