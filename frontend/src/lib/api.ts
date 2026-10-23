@@ -7,7 +7,14 @@
  * in-memory CSRF token (per session, returned by the server on login and
  * /admins/me) to stamp state-changing requests. In-memory only: it vanishes
  * on refresh and is re-fetched from /admins/me on boot.
+ *
+ * Every state-changing request (non-GET/HEAD/OPTIONS) is bracketed by
+ * beginLoading()/endLoading() so the root-route GlobalLoadingOverlay can show
+ * a full-screen progress animation for slow creates/deletes/logins/backups.
+ * GETs are not instrumented — background polling already has skeletons.
  */
+
+import { beginLoading, endLoading } from './loading'
 
 // In-memory CSRF token holder (module scope). Not persisted anywhere.
 let csrfToken = ''
@@ -102,22 +109,28 @@ export async function apiFetch(path: string, options: ApiFetchOptions = {}): Pro
     h.set('X-CSRF-Token', csrfToken)
   }
 
-  const res = await fetch(path, {
-    ...rest,
-    method,
-    headers: h,
-    credentials: 'same-origin',
-    body: body === undefined ? undefined : isForm ? (body as FormData) : JSON.stringify(body),
-  })
+  // Only state-changing calls feed the global overlay; GETs stay quiet.
+  if (isStateChanging) beginLoading()
+  try {
+    const res = await fetch(path, {
+      ...rest,
+      method,
+      headers: h,
+      credentials: 'same-origin',
+      body: body === undefined ? undefined : isForm ? (body as FormData) : JSON.stringify(body),
+    })
 
-  if (res.status === 401 && !noAuthRedirect) {
-    // Session expired/revoked — clear in-memory state and send to login.
-    csrfToken = ''
-    sessionChecked = false
-    redirectToLogin()
+    if (res.status === 401 && !noAuthRedirect) {
+      // Session expired/revoked — clear in-memory state and send to login.
+      csrfToken = ''
+      sessionChecked = false
+      redirectToLogin()
+    }
+
+    return res
+  } finally {
+    if (isStateChanging) endLoading()
   }
-
-  return res
 }
 
 /** Parse the response as JSON; throw ApiError on !ok. */
