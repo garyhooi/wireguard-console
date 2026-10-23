@@ -307,26 +307,34 @@ func (h *Handler) applyState(req applyRequest) []string {
 	}
 
 	// 5. Routing + NAT so clients reach the internet (idempotent).
+	// First make sure the kernel firewall actually admits the WireGuard
+	// UDP port: the installer opens the default port, but a port changed in
+	// the console — or a node host whose firewall install.sh never touched —
+	// would otherwise be dropped by the host's own ruleset while the cloud
+	// Security List already allows the packets.
+	if err := ensureWGPortAccept(req.ListenPort); err != nil {
+		warn("iptables INPUT accept udp/%d: %v", req.ListenPort, err)
+	}
 	run(exec.Command("sysctl", "-w", "net.ipv4.ip_forward=1"))
 	if req.NatCIDR != "" {
-		for _, args := range [][]string{
-			{"-t", "nat", "-C", "POSTROUTING", "-s", req.NatCIDR, "-j", "MASQUERADE"},
-			{"-C", "FORWARD", "-s", req.NatCIDR, "-j", "ACCEPT"},
-			{"-C", "FORWARD", "-d", req.NatCIDR, "-j", "ACCEPT"},
-		} {
-			check := exec.Command("iptables", args...)
-			if err := run(check); err != nil {
-				// Turn the check rule into an add rule (-C -> -A).
-				addArgs := append([]string(nil), args...)
-				for i, a := range addArgs {
-					if a == "-C" {
-						addArgs[i] = "-A"
-						break
-					}
-				}
-				if err := run(exec.Command("iptables", addArgs...)); err != nil {
-					warn("iptables %v: %v", addArgs, err)
-				}
+		if err := run(exec.Command("iptables", "-t", "nat", "-C", "POSTROUTING", "-s", req.NatCIDR, "-j", "MASQUERADE")); err != nil {
+			run(exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING", "-s", req.NatCIDR, "-j", "MASQUERADE"))
+		}
+		// FORWARD ACCEPTs must be reached by the kernel, not merely present:
+		// images such as Oracle Cloud Ubuntu ship a FORWARD chain ending in a
+		// catch-all REJECT, and a rule appended after it never matches — peers
+		// hand-shake fine and then get no internet at all. Insert before that
+		// catch-all when one exists (forwardRuleArgs).
+		listing, _ := exec.Command("iptables", "-nvL", "FORWARD", "--line-numbers").Output()
+		for _, dir := range []string{"-s", "-d"} {
+			rule := []string{dir, req.NatCIDR, "-j", "ACCEPT"}
+			checkArgs := append([]string{"-C", "FORWARD"}, rule...)
+			if err := run(exec.Command("iptables", checkArgs...)); err == nil {
+				continue
+			}
+			args := forwardRuleArgs("FORWARD", rule, string(listing))
+			if err := run(exec.Command("iptables", args...)); err != nil {
+				warn("iptables %v: %v", args, err)
 			}
 		}
 	}
