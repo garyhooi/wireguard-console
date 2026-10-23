@@ -226,6 +226,43 @@ grep -q -- 'ufw allow in on wg0 to any port 53 proto tcp' "$LOG" || fail "ufw di
 grep -q -- 'ufw allow from 172.16.0.0/12 to any port 3000 proto tcp' "$LOG" || fail "ufw did not get the AdGuard API path"
 ok "ufw gets 80/443/51820, wg-scoped DNS and the docker->AdGuard API rule"
 
+echo "== ufw host whose rules are shadowed by an Oracle-style catch-all REJECT =="
+reset_state
+cat > "$(chain_file INPUT)" <<'RULES'
+-m state --state RELATED,ESTABLISHED -j ACCEPT
+-p icmp -j ACCEPT
+-i lo -j ACCEPT
+-p tcp -m tcp --dport 22 -j ACCEPT
+-j REJECT --reject-with icmp-host-prohibited
+-j ufw-before-logging-input
+-j ufw-before-input
+-j ufw-after-input
+-j ufw-reject-input
+RULES
+cat > "$(chain_file FORWARD)" <<'RULES'
+-j DOCKER-USER
+-j REJECT --reject-with icmp-host-prohibited
+-s 10.8.0.0/24 -j ACCEPT
+-d 10.8.0.0/24 -j ACCEPT
+-j ufw-before-forward
+RULES
+export UFW_ACTIVE=1
+export FIREWALLD_ACTIVE=0
+run_fw apply >/dev/null
+if grep -q -- '-j REJECT' "$(chain_file INPUT)"; then
+  fail "INPUT still has the shadowing catch-all REJECT"
+fi
+if grep -q -- '-j REJECT' "$(chain_file FORWARD)"; then
+  fail "FORWARD still has the shadowing catch-all REJECT"
+fi
+[ -n "$(pos_of "$(chain_file INPUT)" '-j ufw-before-input')" ] || fail "ufw jump rules disappeared"
+[ -n "$(pos_of "$(chain_file FORWARD)" '-s 10.8.0.0/24 -j ACCEPT')" ] || fail "FORWARD accept rule disappeared"
+run_fw apply >/dev/null
+if grep -q -- '-j REJECT' "$(chain_file INPUT)"; then
+  fail "shadow REJECT returned on the second run"
+fi
+ok "shadowing catch-all REJECT removed so the ufw rules are reachable"
+
 echo "== firewalld host =="
 reset_state
 export UFW_ACTIVE=0

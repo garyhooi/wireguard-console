@@ -47,6 +47,8 @@ WGCONSOLE_DIR="${WGCONSOLE_DIR:-/opt/wireguard-console}"
 SKIP_PERSIST="${WGC_FIREWALL_SKIP_PERSIST:-0}"
 UNIT_PATH="/etc/systemd/system/wg-console-firewall.service"
 UNIT_BIN="/usr/local/sbin/wgc-firewall.sh"
+PERSIST_RULES_FILES="${WGCONSOLE_PERSIST_RULES:-/etc/iptables/rules.v4 /etc/iptables/rules.v6}"
+SHADOW_REPAIRED=0
 REPO_URL="https://github.com/garyhooi/wireguard-console"
 
 MODE="apply"
@@ -127,9 +129,18 @@ apply_ufw() {
   info "Allowed DNS (53) from WireGuard peers to AdGuard on the tunnel gateway (never from the internet)."
 
   run_q ufw allow from "${DOCKER_SOURCE_CIDR}" to any port 3000 proto tcp comment 'docker bridge -> AdGuard API'
-  info "Allowed docker bridge -> AdGuard API (:3000) so the console can enforce domain rules."
-
-  remove_iptables_unit
+  # On images whose persistent ruleset ships a catch-all REJECT (Oracle Cloud
+  # Ubuntu loads /etc/iptables/rules.v4 via netfilter-persistent) the REJECT is
+  # installed BEFORE ufw appends its own chains, so every ufw allow rule is
+  # unreachable and the VPN still cannot hand-shake. Delete the shadowing rules
+  # now, and keep the boot unit so the repair is repeated after
+  # netfilter-persistent reloads the image ruleset on the next boot.
+  repair_manager_shadow ufw-
+  if [ "$SHADOW_REPAIRED" = "1" ] || persistent_rules_have_catchall; then
+    persist_iptables
+  else
+    remove_iptables_unit
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -201,6 +212,56 @@ delete_spec_line() {
     return 0
   fi
   iptables "${del[@]}" >/dev/null 2>&1 || true
+}
+
+# Rule lines of a chain in evaluation order (the policy line is excluded).
+chain_rule_lines() {
+  iptables -S "$1" 2>/dev/null | grep '^-A ' || true
+}
+
+# Delete catch-all REJECT/DROP rules that appear BEFORE the firewall manager's
+# own jumps - they shadow every rule the manager (ufw) installed after them.
+# Oracle Cloud Ubuntu images load such a REJECT at boot from
+# /etc/iptables/rules.v4 via netfilter-persistent, and ufw appends its chains
+# afterwards, so every ufw allow rule is unreachable: the VPN port stays closed
+# even though ufw allows it. Removing the redundant REJECT is safe because the
+# manager keeps its default DROP policy; everything it does not allow stays
+# denied. SHADOW_REPAIRED records that persist_iptables must run afterwards.
+repair_manager_shadow() {
+  local pat=$1
+  local chain lines catch_idx mgr_idx guard line
+  for chain in INPUT FORWARD; do
+    guard=0
+    while [ "$guard" -lt 10 ]; do
+      guard=$((guard + 1))
+      lines=$(chain_rule_lines "$chain")
+      [ -n "$lines" ] || break
+      catch_idx=$(printf '%s\n' "$lines" | awk 'index($0, "-j REJECT") || index($0, "-j DROP") { print NR; exit }')
+      [ -n "$catch_idx" ] || break
+      mgr_idx=$(printf '%s\n' "$lines" | awk -v pat="$pat" 'index($0, pat) { print NR; exit }')
+      if [ -n "$mgr_idx" ] && [ "$catch_idx" -gt "$mgr_idx" ]; then
+        break
+      fi
+      line=$(printf '%s\n' "$lines" | sed -n "$catch_idx"p)
+      [ -n "$line" ] || break
+      info "removing shadowing catch-all rule from $chain: $line"
+      delete_spec_line "$chain" "$line"
+      SHADOW_REPAIRED=1
+    done
+  done
+}
+
+# True when a persistent ruleset still contains a catch-all REJECT/DROP, i.e.
+# it will be restored at boot and shadow the manager's rules again.
+persistent_rules_have_catchall() {
+  local f
+  for f in $PERSIST_RULES_FILES; do
+    [ -f "$f" ] || continue
+    if grep -Eq '^-A (INPUT|FORWARD) -j (REJECT|DROP)' "$f"; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 # ensure_ipt_rule <chain> <match tokens...> -- <iptables args...>
@@ -335,9 +396,9 @@ persist_iptables() {
   local unit_content
   unit_content="$(cat <<EOF
 [Unit]
-Description=WireGuard Console host firewall exceptions (iptables)
+Description=WireGuard Console host firewall repair
 Documentation=${REPO_URL}
-After=netfilter-persistent.service iptables.service
+After=netfilter-persistent.service iptables.service ufw.service
 ConditionPathExists=${UNIT_BIN}
 
 [Service]
