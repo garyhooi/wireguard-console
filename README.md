@@ -59,13 +59,23 @@ This installs Docker, WireGuard tools and the stack, provisions AdGuard Home, op
 
 **No domain?** Enter the server's public IP when prompted. HTTPS then uses Caddy's internal CA — your browser shows a one-time self-signed warning (the connection is still encrypted). For a trusted certificate without buying a domain, use `CONSOLE_DOMAIN=<your-ip>.sslip.io bash install.sh`.
 
-**Behind Cloudflare?** The installer detects it automatically: when the domain you enter resolves to Cloudflare's IP ranges (i.e. it's proxied through Cloudflare, "orange-cloud"), the installer asks whether Cloudflare is in **Flexible / Automatic SSL** mode — answer **Y** (or just press Enter) and it configures `WGCONSOLE_TLS=external-proxy` for you. If the server has no interactive terminal, it assumes Flexible and enables that mode with a warning. To set it explicitly instead:
+**Behind Cloudflare?** No prompt: the installer derives the origin shape from the TLS mode, and for a hostname the default is **domain mode** — Caddy obtains a public certificate and serves HTTPS on :443. That is what Cloudflare **Full** and **Full (strict)** expect, and it is also what **Automatic SSL/TLS** expects: Automatic probes your origin over both HTTP and HTTPS and only ever *upgrades* the encryption mode (it never downgrades), so an HTTPS origin lets it settle on Full. Automatic is not "plain HTTP on :80".
+
+Only Cloudflare **Flexible** (Cloudflare talks plain HTTP to the origin) needs the other shape, and it is opt-in instead of guessed:
 
 ```bash
-CONSOLE_DOMAIN=vpn.example.com WGCONSOLE_TLS=external-proxy bash install.sh
+curl -fsSL https://raw.githubusercontent.com/garyhooi/wireguard-console/main/install.sh | sudo WGCONSOLE_TLS=external-proxy bash
 ```
 
-With Cloudflare in **Flexible** mode (Cloudflare terminates HTTPS at its edge and reaches your server over plain HTTP), Caddy serves plain HTTP only and — crucially — **does not redirect HTTP→HTTPS**. Without this, Caddy answers Cloudflare's plain-HTTP origin fetch with `308 → https://…`, Cloudflare forwards it, and the browser loops with `ERR_TOO_MANY_REDIRECTS`. Cloudflare's own proxy IP ranges are trusted for `X-Forwarded-*` headers so the API still sees the original client IP and scheme. Cloudflare reaches your server on **port 80 only** (Flexible mode can't reach an HTTPS origin, and the console is deliberately not served on 443 in this mode). If you can use Cloudflare **Full** instead, just leave `WGCONSOLE_TLS` empty — Caddy's own certificate then serves the origin over 443.
+In that mode Caddy serves HTTP only on :80 and — crucially — **does not redirect HTTP→HTTPS**; without it Caddy answers Cloudflare's plain-HTTP origin fetch with `308 → https://…`, Cloudflare forwards it, and the browser loops with `ERR_TOO_MANY_REDIRECTS`. Cloudflare's proxy IP ranges are trusted for `X-Forwarded-*` headers so the API still sees the original client IP and scheme. Prefer switching Cloudflare to **Full** instead — your origin already serves a valid certificate on :443, and Automatic upgrades to Full on its own once it has probed the origin (the rollout is gradual; you can set Full manually right away). After starting the stack the installer probes the public URL and prints the exact fix if it detects the Flexible loop.
+
+**Re-runs are quiet.** The TLS mode is resolved once, stored in `.env`, and never asked again. Change your setup deliberately:
+
+```bash
+CONSOLE_DOMAIN=vpn.example.com sudo bash install.sh   # new domain (WireGuard endpoint follows; peers must re-download their configs)
+WGCONSOLE_TLS=domain sudo bash install.sh             # Caddy HTTPS on :443 (Full / Automatic / DNS-only)
+WGCONSOLE_TLS=external-proxy sudo bash install.sh     # plain-HTTP origin (Cloudflare Flexible)
+```
 
 To add more operators: **System → Admins → Invite Admin**. Add VPN users under **Directory → VPN Users**, then issue peers to them.
 

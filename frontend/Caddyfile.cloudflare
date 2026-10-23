@@ -1,5 +1,5 @@
 # Cloudflare reverse-proxy mode (WGCONSOLE_TLS=external-proxy): the console
-# sits behind Cloudflare in "Flexible"/"Automatic SSL/TLS" mode, where
+# sits behind Cloudflare in "Flexible" mode, where
 # Cloudflare terminates TLS at its edge and talks PLAIN HTTP to this server
 # on port 80. The proxy is in the middle of the browser↔origin TLS — so it
 # never forwards an HTTPS *connection* to us, only HTTP. Caddy therefore
@@ -9,10 +9,9 @@
 # URL → Cloudflare forwards it → repeat forever, ERR_TOO_MANY_REDIRECTS).
 #
 # Origin encryption is provided end-to-end by Cloudflare (edge↔browser TLS).
-# To verify it is really "Flexible", check the SSL/TLS tab in the Cloudflare
-# dashboard — it must show "Flexible" (or "Automatic SSL/TLS" resolving to
-# it). If you can switch the origin to serve HTTPS (Cloudflare "Full"), use
-# the normal domain mode instead (empty WGCONSOLE_TLS).
+# Only use this file for Cloudflare "Flexible". "Full" and "Automatic
+# SSL/TLS" (which upgrades to Full once the origin answers on 443) expect
+# the normal domain mode (WGCONSOLE_TLS=domain).
 {
 	auto_https off
 	# Caddy's automatic HTTPS + HTTP→HTTPS redirect are fully disabled.
