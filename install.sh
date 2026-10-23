@@ -328,9 +328,9 @@ if ! docker volume inspect "${PG_VOLUME}" >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------------
-# 8. Configuration — generate secrets on first install and, on a first
-#    install only, ask for the console address. Everything can be pre-set
-#    as env vars to run this non-interactively.
+# 8. Configuration — generate secrets on first install and ask for the
+#    console address + Cloudflare mode on every run (stored values are
+#    the defaults, so Enter keeps the existing setup).
 # ---------------------------------------------------------------------------
 # An existing install's .env is only kept if it is complete; if it's
 # missing or broken (e.g. an installer run that failed before finishing),
@@ -348,13 +348,20 @@ if [[ "${UPGRADE}" == true ]] \
   # shellcheck disable=SC1091
   source .env
 
-  # Caller overrides: an existing install can change its domain or TLS mode
-  # without a reinstall. Both were snapshotted before `source .env` above, so
-  # the values stored in the file cannot clobber a deliberate override.
-  if [[ -n "${CALLER_CONSOLE_DOMAIN:-}" && "${CALLER_CONSOLE_DOMAIN}" != "${CONSOLE_DOMAIN:-}" ]]; then
-    info "Console domain override: ${CONSOLE_DOMAIN:-<unset>} -> ${CALLER_CONSOLE_DOMAIN}"
-    OLD_CONSOLE_DOMAIN="${CONSOLE_DOMAIN:-}"
-    CONSOLE_DOMAIN="${CALLER_CONSOLE_DOMAIN}"
+  # Every run asks for the console address and the Cloudflare mode, with the
+  # stored values as the defaults (Enter keeps them), so an existing install can
+  # change either without editing .env or wiping data. Non-interactive runs keep
+  # the stored values; CONSOLE_DOMAIN=... / WGCONSOLE_TLS=... on the command
+  # line override them for automation.
+  OLD_CONSOLE_DOMAIN="${CONSOLE_DOMAIN:-}"
+  NEW_CONSOLE_DOMAIN="${CALLER_CONSOLE_DOMAIN:-${OLD_CONSOLE_DOMAIN}}"
+  if [[ -z "${CALLER_CONSOLE_DOMAIN:-}" ]] && true 2>/dev/null < /dev/tty; then
+    read -rp "Console address — domain, public IP, or Enter to keep ${OLD_CONSOLE_DOMAIN}: " DOMAIN_ANSWER < /dev/tty || true
+    NEW_CONSOLE_DOMAIN="${DOMAIN_ANSWER:-${OLD_CONSOLE_DOMAIN}}"
+  fi
+  if [[ -n "${NEW_CONSOLE_DOMAIN}" && "${NEW_CONSOLE_DOMAIN}" != "${OLD_CONSOLE_DOMAIN}" ]]; then
+    info "Console domain override: ${OLD_CONSOLE_DOMAIN} -> ${NEW_CONSOLE_DOMAIN}"
+    CONSOLE_DOMAIN="${NEW_CONSOLE_DOMAIN}"
     sed -i "s|^CONSOLE_DOMAIN=.*|CONSOLE_DOMAIN=${CONSOLE_DOMAIN}|" .env
     # Keep the WireGuard endpoint following the console hostname when it used
     # to be derived from it; a custom endpoint is left untouched.
@@ -365,13 +372,34 @@ if [[ "${UPGRADE}" == true ]] \
     fi
     warn "Existing peer configs still embed the previous endpoint — re-download them from the console after this change."
   fi
+
+  # Cloudflare question, asked on every run. Only "Flexible" needs the
+  # plain-HTTP origin: "Full", "Full (strict)" and "Automatic SSL/TLS" all use
+  # the HTTPS origin that domain mode provides — Automatic only ever upgrades
+  # the encryption mode and probes the origin over both HTTP and HTTPS — so the
+  # default answer is N.
   if [[ -n "${CALLER_WGCONSOLE_TLS:-}" ]]; then
     info "TLS mode override: ${WGCONSOLE_TLS:-<unset>} -> ${CALLER_WGCONSOLE_TLS}"
     WGCONSOLE_TLS="${CALLER_WGCONSOLE_TLS}"
+  elif [[ "${CONSOLE_DOMAIN:-}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+    # A bare IP cannot be fronted by Cloudflare; resolve_tls_mode picks internal.
+    :
+  elif true 2>/dev/null < /dev/tty; then
+    CF_HINT="[y/N]"
+    CF_DEFAULT="n"
+    if [[ "${WGCONSOLE_TLS:-}" == "external-proxy" ]]; then
+      CF_HINT="[Y/n]"
+      CF_DEFAULT="y"
+    fi
+    read -rp "Is Cloudflare SSL/TLS set to Flexible (Cloudflare reaches this server over plain HTTP on port 80)? ${CF_HINT} — answer N for Full / Full (strict) / Automatic SSL, or if there is no proxy: " CF_ANSWER < /dev/tty || true
+    case "${CF_ANSWER:-${CF_DEFAULT}}" in
+      y|Y|yes|YES) WGCONSOLE_TLS="external-proxy" ;;
+      *) WGCONSOLE_TLS="domain" ;;
+    esac
   fi
 
-  # Resolve and persist the TLS mode once. Legacy empty values resolve to
-  # domain mode (internal CA for a bare IP); later runs never ask again.
+  # Resolve (bare IP -> internal) and persist the mode, so the next run shows
+  # it as the default answer instead of re-deriving it.
   resolve_tls_mode "${CONSOLE_DOMAIN:-}"
   sed -i "s|^WGCONSOLE_TLS=.*|WGCONSOLE_TLS=${WGCONSOLE_TLS}|" .env
   # Fresh-DB self-heal: the .env above was kept from a previous install,
@@ -442,12 +470,21 @@ else
   # TLS mode. A bare IPv4 address uses Caddy's internal CA ("internal"). A
   # hostname defaults to "domain" mode: Caddy obtains a public ACME certificate
   # and serves HTTPS on :443 - the origin shape Cloudflare Full / Full (strict)
-  # and "Automatic SSL/TLS" expect. Automatic probes the origin over HTTP and
-  # HTTPS and only ever upgrades the encryption mode (Flexible -> Full once the
-  # origin answers on 443), so serving plain HTTP from the origin would prevent
-  # that upgrade. Cloudflare Flexible is the only case that needs a plain-HTTP
-  # origin ("external-proxy"), and it is opt-in instead of guessed, e.g.:
-  #   curl -fsSL .../install.sh | sudo WGCONSOLE_TLS=external-proxy bash
+  # and "Automatic SSL/TLS" expect. Ask about Cloudflare explicitly (every run,
+  # here and on upgrades): only Flexible needs the plain-HTTP origin, while
+  # Full / Full (strict) / Automatic use this HTTPS origin. Answering N is the
+  # default.
+  if [[ -n "${WGCONSOLE_TLS:-}" ]]; then
+    : # caller-forced (or restored) mode, keep it
+  elif [[ "${CONSOLE_DOMAIN}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+    : # a bare IP cannot be fronted by Cloudflare; resolve_tls_mode picks internal
+  elif true 2>/dev/null < /dev/tty; then
+    read -rp "Is Cloudflare SSL/TLS set to Flexible (Cloudflare reaches this server over plain HTTP on port 80)? [y/N] — answer N for Full / Full (strict) / Automatic SSL, or if there is no proxy: " CF_ANSWER < /dev/tty || true
+    case "${CF_ANSWER:-n}" in
+      y|Y|yes|YES) WGCONSOLE_TLS="external-proxy" ;;
+      *) WGCONSOLE_TLS="domain" ;;
+    esac
+  fi
   resolve_tls_mode "${CONSOLE_DOMAIN}"
   if [[ "${WGCONSOLE_TLS}" == "external-proxy" ]]; then
     if [[ "${CONSOLE_DOMAIN}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
@@ -772,7 +809,7 @@ cat <<SUMMARY
    Install dir:  ${INSTALL_DIR}
    Logs:         docker compose -f ${INSTALL_DIR}/docker-compose.yml logs -f
    Re-run this script any time to update.
-   Re-running never re-asks; override deliberately:
+   Every run asks for the domain and Cloudflare mode (Enter keeps the shown defaults); override non-interactively with:
      sudo CONSOLE_DOMAIN=vpn.example.com bash install.sh
      sudo WGCONSOLE_TLS=domain|external-proxy bash install.sh
 
