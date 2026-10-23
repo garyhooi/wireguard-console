@@ -84,21 +84,22 @@ command -v python3 >/dev/null || error "python3 is required"
 command -v docker >/dev/null || error "docker not found"
 
 # ---------------------------------------------------------------------------
-# Idempotent ufw rule for the api container -> AdGuard API management path.
-# AdGuard runs on the host network; the api container reaches it through the
-# docker bridge gateway (172.x.0.1). With ufw active and default-deny
-# incoming, that INPUT traffic is dropped unless allowed — the console then
-# shows "AdGuard unreachable" forever (rules can't be enforced or re-pushed)
-# while AdGuard itself is perfectly healthy on loopback. install.sh §9 opens
-# the public + tunnel ports but never this one; keeping it here means every
-# install/update self-heals the path, matching the interface-scoped DNS rule
-# pattern. Docker bridge subnets vary per host (172.17/172.18/...), so allow
-# the whole private 172.16.0.0/12 block on port 3000 only — ufw is
-# idempotent, so re-runs are no-ops.
+# Idempotent firewall self-heal for the paths AdGuard needs: the api container
+# -> AdGuard API management path (docker bridge -> host :3000) and the
+# tunnel-scoped DNS exception. AdGuard runs on the host network; the api
+# container reaches it through the docker bridge gateway (172.x.0.1). With a
+# default-deny host firewall that INPUT traffic is dropped unless allowed —
+# the console then shows "AdGuard unreachable" forever (rules can't be
+# enforced or re-pushed) while AdGuard itself is healthy on loopback.
+# scripts/firewall.sh covers ufw, firewalld and bare iptables (Oracle Cloud
+# images ship an iptables REJECT ruleset instead of ufw), so every
+# install/update self-heals the path on all of them. Idempotent: a no-op when
+# the rules are already in place.
 # ---------------------------------------------------------------------------
-if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
-  ufw allow from 172.16.0.0/12 to any port 3000 proto tcp comment 'docker bridge -> AdGuard API' >/dev/null
-  info "ufw active — allowed docker bridge -> AdGuard API (:3000) so the console can enforce rules."
+if [[ -f "${COMPOSE_DIR}/scripts/firewall.sh" ]]; then
+  if ! bash "${COMPOSE_DIR}/scripts/firewall.sh" apply 2>&1 | sed 's/^/  [firewall] /'; then
+    info "Firewall self-heal reported a problem — see the output above."
+  fi
 fi
 
 # ---------------------------------------------------------------------------

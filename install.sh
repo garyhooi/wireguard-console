@@ -9,10 +9,13 @@
 # frees port 53 from systemd-resolved (needed by the built-in DNS filter),
 # enables IP forwarding (required for WireGuard routing), clones/updates
 # this repo into /opt/wireguard-console, generates secrets on first
-# install, opens the firewall if ufw is active (including the interface-
-# scoped DNS exception so tunnel peers can reach AdGuard on the gateway,
-# and the docker-bridge exception so the api container can reach AdGuard's
-# management API), and starts the stack with Docker Compose. AdGuard is
+# install, opens the firewall on whichever host firewall is actually in use
+# (ufw, firewalld, or a bare iptables ruleset — Oracle Cloud's Ubuntu images
+# ship an iptables REJECT ruleset instead of ufw, and managing only ufw left
+# WireGuard's UDP port closed there), including the interface-scoped DNS
+# exception so tunnel peers can reach AdGuard on the gateway and the
+# docker-bridge exception so the api container can reach AdGuard's
+# management API, and starts the stack with Docker Compose. AdGuard is
 # provisioned on first install and left untouched when already healthy on
 # updates (configure-adguard.sh). Re-running it later updates an existing
 # install instead of reinstalling.
@@ -584,46 +587,30 @@ stamp_app_version .env "${CALLER_APP_VERSION:-}"
 stamp_wg_helper_version .env
 
 # ---------------------------------------------------------------------------
-# 9. Firewall — only touch it if ufw is installed AND active, and only add
-#    missing rules (re-runs are idempotent).
-#    80/443 are the console (Caddy); WG_DEFAULT_PORT is the VPN.
+# 9. Firewall — open the console/VPN ports on whichever host firewall is
+#    actually in use: ufw, firewalld, or a bare iptables ruleset. Oracle
+#    Cloud's Ubuntu images ship no ufw but do ship an iptables ruleset with a
+#    catch-all REJECT (/etc/iptables/rules.v4 via netfilter-persistent), so
+#    managing only ufw left UDP 51820 closed and every WireGuard handshake was
+#    dropped at the host ("last handshake: never"). scripts/firewall.sh
+#    handles all three managers idempotently, inserts rules BEFORE any
+#    catch-all REJECT (appending after it does nothing), and installs a
+#    boot-time systemd unit when it has to manage iptables directly.
 #
-#    DNS exception: peers are pointed at the tunnel gateway (e.g. 10.8.0.1),
-#    where AdGuard Home listens on the host network. A query from a peer to
-#    <gateway>:53 arrives as INPUT traffic (destination = the host itself),
-#    so ufw's default-deny incoming policy would drop it and every Apple
-#    device on the VPN would lose internet ("handshake OK, no DNS"). Allow
-#    port 53 ONLY on the WireGuard interface(s) — never on the public one —
-#    so AdGuard stays reachable from the tunnel without turning this box
-#    into an open DNS resolver.
+#    Beyond 80/443 and the WireGuard port it adds the two INPUT exceptions the
+#    stack needs:
+#      * DNS (53) on the WireGuard interface(s) only — peers are pointed at the
+#        tunnel gateway (e.g. 10.8.0.1), so their query arrives as INPUT
+#        traffic; allow it on the tunnel, never on the public interface.
+#      * 3000/tcp from the docker bridge (172.16.0.0/12) so the api container
+#        can reach AdGuard's API and the console can enforce domain rules.
 # ---------------------------------------------------------------------------
-if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
-  info "ufw is active — opening 80/tcp, 443/tcp, ${WG_DEFAULT_PORT}/udp..."
-  ufw allow 80/tcp   >/dev/null
-  ufw allow 443/tcp  >/dev/null
-  ufw allow "${WG_DEFAULT_PORT}/udp" >/dev/null
-
-  # Interfaces that exist right now (upgrades with a live tunnel), falling
-  # back to wg0 — the interface name the console creates for the first
-  # local server when the admin accepts the defaults.
-  WG_IFACES="$(ls -d /sys/class/net/wg* 2>/dev/null | xargs -n1 basename 2>/dev/null | sort -u || true)"
-  [[ -z "${WG_IFACES}" ]] && WG_IFACES="wg0"
-  for iface in ${WG_IFACES}; do
-    ufw allow in on "${iface}" to any port 53 proto udp comment 'WG peers -> AdGuard DNS (UDP)' >/dev/null
-    ufw allow in on "${iface}" to any port 53 proto tcp comment 'WG peers -> AdGuard DNS (TCP)' >/dev/null
-  done
-  info "Allowed DNS (53) from WireGuard peers to AdGuard on the tunnel gateway (interface-scoped: ${WG_IFACES}); port 53 stays closed to the internet."
-
-  # The api container reaches AdGuard Home (host network) through the docker
-  # bridge gateway (172.x.0.1). ufw default-deny incoming would drop that
-  # INPUT traffic, so the console shows "AdGuard unreachable" and can never
-  # enforce/re-push domain rules even though AdGuard is healthy. Docker
-  # bridge subnets vary per host (172.17/172.18/...), so allow the whole
-  # private 172.16.0.0/12 block on port 3000 ONLY — AdGuard's management API
-  # stays closed to the internet (AdGuard is on the host network, not the
-  # bridge, so this only ever matches docker-originated traffic).
-  ufw allow from 172.16.0.0/12 to any port 3000 proto tcp comment 'docker bridge -> AdGuard API' >/dev/null
-  info "Allowed docker bridge -> AdGuard API (:3000) so the console can enforce domain rules."
+info "Opening firewall ports (ufw / firewalld / iptables, whichever is active)..."
+if ! WG_PORT="${WG_DEFAULT_PORT}" WGCONSOLE_DIR="${INSTALL_DIR}" \
+     bash "${INSTALL_DIR}/scripts/firewall.sh" apply; then
+  warn "The firewall step reported a problem — check the output above."
+  warn "Open these manually: 80/tcp, 443/tcp, ${WG_DEFAULT_PORT}/udp, 172.16.0.0/12 -> 3000/tcp,"
+  warn "DNS 53 on the WireGuard interface(s), plus forwarding+MASQUERADE for 10.8.0.0/24."
 fi
 
 # ---------------------------------------------------------------------------

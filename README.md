@@ -55,7 +55,7 @@ Requires: Ubuntu 22.04+, Docker (installed automatically), and either a **domain
 curl -fsSL https://raw.githubusercontent.com/garyhooi/wireguard-console/main/install.sh | sudo bash
 ```
 
-This installs Docker, WireGuard tools and the stack, provisions AdGuard Home, opens the firewall (ufw), and **asks you for your first `super_admin` email, then prints the auto-generated password at the end** — save them, log in, change the password and enroll 2FA. (A fresh database is detected from the Postgres data volume, so re-running after a reset that wiped Docker data prompts for the email again and prints new credentials instead of silently reusing stale ones.)
+This installs Docker, WireGuard tools and the stack, provisions AdGuard Home, opens the firewall on whichever manager is active (ufw, firewalld, or a bare iptables ruleset), and **asks you for your first `super_admin` email, then prints the auto-generated password at the end** — save them, log in, change the password and enroll 2FA. (A fresh database is detected from the Postgres data volume, so re-running after a reset that wiped Docker data prompts for the email again and prints new credentials instead of silently reusing stale ones.)
 
 **No domain?** Enter the server's public IP when prompted. HTTPS then uses Caddy's internal CA — your browser shows a one-time self-signed warning (the connection is still encrypted). For a trusted certificate without buying a domain, use `CONSOLE_DOMAIN=<your-ip>.sslip.io bash install.sh`.
 
@@ -79,7 +79,7 @@ To add more operators: **System → Admins → Invite Admin**. Add VPN users und
 | `53/udp+tcp` | AdGuard DNS for VPN peers (WireGuard interface only) | ✅ on VPN hosts |
 | `51820/udp` | WireGuard (use your custom port if you changed it) | ✅ only if this machine also runs a VPN server |
 
-The installer opens these automatically when ufw is active — port 53 is scoped to the WireGuard interface, so tunnel peers reach AdGuard on the gateway while it stays closed to the internet, and port 3000 is opened **only for Docker's private bridge subnets** (172.16.0.0/12) so the console's api container can reach AdGuard's API — AdGuard itself stays closed to the internet. On a cloud firewall (AWS/Azure/DigitalOcean security group), open 80/443 (and 51820 on VPN hosts) manually; **never** open 3000 publicly.
+The installer opens these on the **host** firewall itself, whichever manager is active: `ufw`, `firewalld`, or a bare `iptables` ruleset. The last case matters on images that ship an iptables ruleset with a catch-all `REJECT` instead of ufw — Oracle Cloud's Ubuntu images do. There, rules are inserted *before* that REJECT (an appended rule never matches, so WireGuard handshakes are silently dropped: "last handshake: never") and re-applied at boot by a `wg-console-firewall.service` unit. Port 53 is scoped to the WireGuard interface, so tunnel peers reach AdGuard on the gateway while it stays closed to the internet, and port 3000 is opened **only for Docker's private bridge subnets** (172.16.0.0/12) so the console's api container can reach AdGuard's API — AdGuard itself stays closed to the internet. On a **cloud** firewall (OCI Security List/NSG, AWS security group, GCP VPC firewall, Azure NSG) open 80/tcp, 443/tcp and 51820/udp yourself; the installer cannot change those. **Never** open 3000 publicly.
 
 ## Distributed nodes (one console, many regions)
 
@@ -103,6 +103,10 @@ A **node** is a machine in another location (e.g. Singapore, Thailand) that runs
    ```bash
    sudo ufw allow 51820/udp    # or your custom WireGuard port
    ```
+   On a host without ufw (e.g. an Oracle Cloud Ubuntu image with its default iptables ruleset), use iptables instead — insert it before the image's catch-all REJECT:
+   ```bash
+   sudo iptables -I INPUT 6 -p udp --dport 51820 -j ACCEPT   # any position before the REJECT
+   ```
    Outbound needs nothing: the agent only polls your console over HTTPS (443).
 
 5. **Create the VPN server on that node** — Console → **Servers → Add Server**:
@@ -113,7 +117,7 @@ A **node** is a machine in another location (e.g. Singapore, Thailand) that runs
    - **Network** → a subnet unique to this location, e.g. `10.9.0.0/24`
    - **DNS servers** → never leave empty (peers default to the tunnel gateway, where nothing listens on 53):
      - public resolver, e.g. `1.1.1.1, 8.8.8.8` — simplest
-     - the console's public IP, to reuse its AdGuard filtering — first allow DNS from this node on the console: `sudo ufw allow from <node-public-ip> to any port 53 proto udp`
+     - the console's public IP, to reuse its AdGuard filtering — first allow DNS from this node on the console: `sudo ufw allow from <node-public-ip> to any port 53 proto udp` (or the equivalent rule for your host firewall).
 
 6. **Wait ~30s and verify.** The console shows the node green/"ok" with a server count; on the node machine `sudo wg show` lists the interface. Add a peer to that server and connect from a device to test the exit.
 
