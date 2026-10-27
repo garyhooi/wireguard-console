@@ -52,6 +52,16 @@ var (
 	fakeHelperRemoves     int
 	fakeHelperIfaces      = map[string]bool{} // interface_name -> present
 	fakeHelperPreseedBoot = false             // seed a present interface at startup (boot-reconcile test)
+
+	// Per-interface apply counts let a test assert that ITS server was
+	// eventually pushed even while earlier tests' async applies are still
+	// settling (the API now applies in the background).
+	fakeHelperAppliesByIface = map[string]int{}
+	// /apply delay models a slow wg-helper. The peer set only exists in the
+	// "kernel" once the delay elapses (see the apply handler), so a test that
+	// POSTs during it proves the HTTP response does not wait for the apply.
+	fakeHelperApplyDelay time.Duration
+	fakeHelperInflight   int
 )
 
 // startFakeWGHelper listens on the given unix socket and answers the
@@ -65,15 +75,32 @@ func startFakeWGHelper(sock string) func() {
 	}
 	mux := http.NewServeMux()
 	apply := func(w http.ResponseWriter, r *http.Request) {
-		fakeHelperMu.Lock()
-		fakeHelperApplies++
 		var req struct {
 			InterfaceName string `json:"interface_name"`
 		}
 		json.NewDecoder(r.Body).Decode(&req)
+
+		fakeHelperMu.Lock()
+		fakeHelperApplies++
+		fakeHelperInflight++
+		if req.InterfaceName != "" {
+			fakeHelperAppliesByIface[req.InterfaceName]++
+		}
+		delay := fakeHelperApplyDelay
+		fakeHelperMu.Unlock()
+
+		// Slow apply: the interface/peers only land in the "kernel" when the
+		// delay elapses. Sleeping outside the lock keeps /stats and other
+		// requests concurrent, like the real helper on separate sockets.
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+
+		fakeHelperMu.Lock()
 		if req.InterfaceName != "" {
 			fakeHelperIfaces[req.InterfaceName] = true
 		}
+		fakeHelperInflight--
 		fakeHelperMu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"status":"ok","warnings":[]}`)
@@ -144,6 +171,94 @@ func fakeApplyCount() int {
 	fakeHelperMu.Lock()
 	defer fakeHelperMu.Unlock()
 	return fakeHelperApplies
+}
+
+// fakeApplyCountFor counts /apply calls for one interface, so tests can take a
+// baseline without assuming anything about other servers' pending applies.
+func fakeApplyCountFor(iface string) int {
+	fakeHelperMu.Lock()
+	defer fakeHelperMu.Unlock()
+	return fakeHelperAppliesByIface[iface]
+}
+
+// setFakeApplyDelay makes subsequent /apply calls take d (0 = instant).
+func setFakeApplyDelay(d time.Duration) {
+	fakeHelperMu.Lock()
+	defer fakeHelperMu.Unlock()
+	fakeHelperApplyDelay = d
+}
+
+// fakeInterfacePresent reports whether /apply created the interface and no
+// /remove has torn it down since.
+func fakeInterfacePresent(iface string) bool {
+	fakeHelperMu.Lock()
+	defer fakeHelperMu.Unlock()
+	return fakeHelperIfaces[iface]
+}
+
+// waitFor polls cond every 100ms until it holds or the deadline passes. The
+// kernel apply is asynchronous now, so apply/presence assertions must poll
+// instead of reading a counter immediately after the API call returns.
+func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if cond() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %s waiting for %s", timeout, what)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// waitForNoInflightApplies waits until no /apply has been in flight for a
+// quiet period. Used before asserting teardown, so the check does not race a
+// slow apply that is still sleeping and about to recreate the interface.
+func waitForNoInflightApplies(t *testing.T, quiet, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var idleSince time.Time
+	for time.Now().Before(deadline) {
+		fakeHelperMu.Lock()
+		inflight := fakeHelperInflight
+		fakeHelperMu.Unlock()
+		if inflight == 0 {
+			if idleSince.IsZero() {
+				idleSince = time.Now()
+			} else if time.Since(idleSince) >= quiet {
+				return
+			}
+		} else {
+			idleSince = time.Time{}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("wg-helper /apply did not go idle within %s", timeout)
+}
+
+// waitForStableApplyCount blocks until no new /apply has been observed for
+// quiet. Tests use it before taking a baseline, so an async apply queued by an
+// earlier API call cannot later look like a regression (e.g. the reconcile
+// worker seemingly re-applying a healthy interface).
+func waitForStableApplyCount(t *testing.T, quiet, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	last := fakeApplyCount()
+	stableSince := time.Now()
+	for time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+		if n := fakeApplyCount(); n != last {
+			last = n
+			stableSince = time.Now()
+			continue
+		}
+		if time.Since(stableSince) >= quiet {
+			return
+		}
+	}
+	t.Fatalf("wg-helper /apply count did not settle for %s within %s", quiet, timeout)
 }
 
 func TestMain(m *testing.M) {
@@ -506,11 +621,12 @@ func TestEndToEnd(t *testing.T) {
 	}
 
 	// The API must push the server's state to wg-helper (fake helper counts
-	// /apply). This covers both the create-path sync and the boot reconcile
-	// worker wiring.
-	if fakeApplyCount() < 1 {
-		t.Fatalf("expected wg-helper /apply after server create, got %d", fakeApplyCount())
-	}
+	// /apply), but the apply is asynchronous now — the create response is sent
+	// first, so poll for the queued apply with a deadline instead of reading
+	// the counter immediately. Covers the create-path sync wiring.
+	waitFor(t, 10*time.Second, "wg-helper /apply after server create", func() bool {
+		return fakeApplyCountFor("wg0") >= 1
+	})
 
 	// User invite -> link
 	resp, invOut := api(t, "POST", "/api/users", token, map[string]string{
@@ -581,7 +697,11 @@ func TestEndToEnd(t *testing.T) {
 	// kernel interface is already present (a re-apply would ReplacePeers and
 	// reset live counters/handshakes). The fake helper marks the interface
 	// present on /apply, so after the create+PATCH applies above the worker's
-	// periodic ticks must not add more /apply calls. Sleep past two 3s ticks.
+	// periodic ticks must not add more /apply calls. The applies are queued
+	// asynchronously now: wait for the queue to settle before taking the
+	// baseline, otherwise a late create-path apply would look like the worker
+	// re-applying. Then sleep past two 3s ticks and require zero growth.
+	waitForStableApplyCount(t, 2*time.Second, 15*time.Second)
 	appliesAfterEdit := fakeApplyCount()
 	time.Sleep(7 * time.Second)
 	if grew := fakeApplyCount(); grew != appliesAfterEdit {
@@ -2726,4 +2846,288 @@ func TestForced2FASetup(t *testing.T) {
 	if pending, _ := out["pending_2fa"].(bool); !pending {
 		t.Fatal("expected pending_2fa=true after forced enrollment")
 	}
+}
+
+// ---- Async peer create + idempotency (the "Load failed" bug) ----------------
+
+// peerNames returns the names of every peer listed by GET /api/peers.
+func peerNames(t *testing.T, a authn) map[string]bool {
+	t.Helper()
+	var rows []map[string]interface{}
+	json.Unmarshal([]byte(rawGet(t, baseURL+"/api/peers", a)), &rows)
+	names := map[string]bool{}
+	for _, p := range rows {
+		if n, _ := p["name"].(string); n != "" {
+			names[n] = true
+		}
+	}
+	return names
+}
+
+// findServerIDByInterface locates a server by its (unique) interface name.
+func findServerIDByInterface(t *testing.T, a authn, iface string) string {
+	t.Helper()
+	var rows []map[string]interface{}
+	json.Unmarshal([]byte(rawGet(t, baseURL+"/api/servers", a)), &rows)
+	for _, s := range rows {
+		if got, _ := s["interface_name"].(string); got == iface {
+			id, _ := s["id"].(string)
+			return id
+		}
+	}
+	t.Fatalf("server with interface %q not found", iface)
+	return ""
+}
+
+// findUserIDByEmail locates a user by email in GET /api/users.
+func findUserIDByEmail(t *testing.T, a authn, email string) string {
+	t.Helper()
+	var rows []map[string]interface{}
+	json.Unmarshal([]byte(rawGet(t, baseURL+"/api/users", a)), &rows)
+	for _, u := range rows {
+		if got, _ := u["email"].(string); got == email {
+			id, _ := u["id"].(string)
+			return id
+		}
+	}
+	t.Fatalf("user with email %q not found", email)
+	return ""
+}
+
+// countPeersByRequestID counts committed idempotency keys directly in the DB:
+// the contract is "exactly one peer row per request_id", which the API list
+// alone cannot prove if a duplicate ever got created with a different key.
+func countPeersByRequestID(t *testing.T, dbURL, requestID string) int {
+	t.Helper()
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("countPeersByRequestID: connect: %v", err)
+	}
+	defer pool.Close()
+	var n int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM peers WHERE create_request_id = $1`, requestID).Scan(&n); err != nil {
+		t.Fatalf("countPeersByRequestID: query: %v", err)
+	}
+	return n
+}
+
+// TestPeerCreateAsyncAndIdempotent reproduces the reported bug against the real
+// API binary: POST /api/peers used to block on the wg-helper apply, so a slow
+// apply outlived the browser/proxy timeout and the UI showed "Load failed" for
+// a peer that was already committed (a retry then duplicated it). Creates now
+// answer immediately after commit and apply in the background; a retry
+// carrying the same request_id replays the original peer.
+func TestPeerCreateAsyncAndIdempotent(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	seedAdmin(dbURL, "async@console.test", "Async-Passw0rd!", "super_admin")
+	act := login(t, "async@console.test", "Async-Passw0rd!")
+	if act.totpSecret == "" {
+		t.Fatal("expected the seeded admin to complete mandatory 2FA enrollment")
+	}
+
+	// Unique interface name so other tests' async applies/interfaces cannot
+	// interfere with this test's counters or removal assertion.
+	const iface = "wgtasync"
+	resp, _ := api(t, "POST", "/api/servers", act, map[string]interface{}{
+		"name": "Async E2E", "public_endpoint": "203.0.113.20:51820",
+		"interface_name": iface,
+	})
+	expectStatus(t, resp, 201, "POST /api/servers (async peer test)")
+	serverID := findServerIDByInterface(t, act, iface)
+
+	resp, _ = api(t, "POST", "/api/users", act, map[string]string{
+		"email": "async-peer@example.com", "full_name": "Async Peer User",
+	})
+	expectStatus(t, resp, 201, "POST /api/users (async peer test)")
+	userID := findUserIDByEmail(t, act, "async-peer@example.com")
+
+	createPeer := func(t *testing.T, name, requestID string) (int, map[string]interface{}, time.Duration) {
+		t.Helper()
+		body := map[string]interface{}{"name": name, "server_id": serverID, "user_id": userID}
+		if requestID != "" {
+			body["request_id"] = requestID
+		}
+		start := time.Now()
+		resp, out := api(t, "POST", "/api/peers", act, body)
+		return resp.StatusCode, out, time.Since(start)
+	}
+
+	// The server create's own apply is queued too; wait for it so the slow-
+	// apply baselines below only measure the peer applies they trigger.
+	waitFor(t, 10*time.Second, "server create apply for "+iface, func() bool {
+		return fakeApplyCountFor(iface) >= 1
+	})
+
+	t.Run("request_id replay returns the committed peer", func(t *testing.T) {
+		requestID := fmt.Sprintf("e2e-idem-%d", time.Now().UnixNano())
+		status, created, _ := createPeer(t, "Idempotent Peer", requestID)
+		if status != 201 {
+			t.Fatalf("first create: status %d, want 201", status)
+		}
+		publicKey, _ := created["public_key"].(string)
+		allowedIP, _ := created["allowed_ip"].(string)
+		if publicKey == "" || allowedIP == "" {
+			t.Fatalf("first create returned no key/ip: %v", created)
+		}
+
+		status, replay, _ := createPeer(t, "Idempotent Peer", requestID)
+		if status != 200 {
+			t.Fatalf("replayed create: status %d, want 200", status)
+		}
+		if got, _ := replay["status"].(string); got != "exists" {
+			t.Fatalf("replayed create status field = %q, want %q", got, "exists")
+		}
+		if got, _ := replay["public_key"].(string); got != publicKey {
+			t.Fatalf("replayed public_key = %q, want %q", got, publicKey)
+		}
+		if got, _ := replay["allowed_ip"].(string); got != allowedIP {
+			t.Fatalf("replayed allowed_ip = %q, want %q", got, allowedIP)
+		}
+		if n := countPeersByRequestID(t, dbURL, requestID); n != 1 {
+			t.Fatalf("peers with request_id %q = %d, want exactly 1", requestID, n)
+		}
+	})
+
+	t.Run("overlapping creates share one request_id", func(t *testing.T) {
+		// Exercise the 23505 backstop: two simultaneous inserts carrying the
+		// same key. Exactly one wins; the loser must re-read it and answer 200
+		// instead of 500 (which would make the retry look failed again).
+		requestID := fmt.Sprintf("e2e-race-%d", time.Now().UnixNano())
+		body, err := json.Marshal(map[string]interface{}{
+			"name": "Concurrent Peer", "server_id": serverID, "user_id": userID,
+			"request_id": requestID,
+		})
+		if err != nil {
+			t.Fatalf("marshal concurrent create: %v", err)
+		}
+		type raceResult struct {
+			status    int
+			publicKey string
+			err       error
+		}
+		results := make(chan raceResult, 2)
+		for i := 0; i < 2; i++ {
+			go func() {
+				req, err := http.NewRequest("POST", baseURL+"/api/peers", bytes.NewReader(body))
+				if err != nil {
+					results <- raceResult{err: err}
+					return
+				}
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("X-CSRF-Token", act.csrf)
+				for _, ck := range act.jar {
+					req.AddCookie(ck)
+				}
+				httpResp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					results <- raceResult{err: err}
+					return
+				}
+				defer httpResp.Body.Close()
+				var out map[string]interface{}
+				json.NewDecoder(httpResp.Body).Decode(&out)
+				publicKey, _ := out["public_key"].(string)
+				results <- raceResult{status: httpResp.StatusCode, publicKey: publicKey}
+			}()
+		}
+		created, replayed := 0, 0
+		var publicKeys []string
+		for i := 0; i < 2; i++ {
+			res := <-results
+			if res.err != nil {
+				t.Fatalf("concurrent create request failed: %v", res.err)
+			}
+			switch res.status {
+			case 201:
+				created++
+			case 200:
+				replayed++
+			default:
+				t.Fatalf("concurrent create: status %d, want 201 (winner) or 200 (replay)", res.status)
+			}
+			publicKeys = append(publicKeys, res.publicKey)
+		}
+		if created != 1 || replayed != 1 {
+			t.Fatalf("overlapping creates: %d created, %d replayed; want exactly 1 and 1", created, replayed)
+		}
+		if len(publicKeys) != 2 || publicKeys[0] == "" || publicKeys[0] != publicKeys[1] {
+			t.Fatalf("overlapping creates returned different peers: %v", publicKeys)
+		}
+		if n := countPeersByRequestID(t, dbURL, requestID); n != 1 {
+			t.Fatalf("peers with request_id %q = %d, want exactly 1", requestID, n)
+		}
+	})
+
+	t.Run("slow kernel apply does not delay the response", func(t *testing.T) {
+		setFakeApplyDelay(2 * time.Second)
+		defer setFakeApplyDelay(0)
+		before := fakeApplyCountFor(iface)
+
+		status, out, elapsed := createPeer(t, "Slow Apply Peer", "")
+		if status != 201 {
+			t.Fatalf("create during slow apply: status %d, want 201", status)
+		}
+		// The wg-helper call is still sleeping for 2s; the HTTP response must
+		// not have waited for it (the pre-fix handler did, which is the bug).
+		if elapsed >= 1500*time.Millisecond {
+			t.Fatalf("POST /api/peers took %s with a 2s kernel apply; it must answer before the apply finishes", elapsed)
+		}
+		if got, _ := out["apply_warning"].(string); got != "" {
+			t.Fatalf("apply_warning = %q, want empty (apply is async)", got)
+		}
+		// Committed and listed although the kernel apply is still in flight.
+		if !peerNames(t, act)["Slow Apply Peer"] {
+			t.Fatal("peer committed but not listed while the apply is in flight")
+		}
+		waitFor(t, 20*time.Second, "eventual /apply for the slow peer", func() bool {
+			return fakeApplyCountFor(iface) > before
+		})
+	})
+
+	t.Run("rapid burst during slow apply", func(t *testing.T) {
+		setFakeApplyDelay(2 * time.Second)
+		defer setFakeApplyDelay(0)
+		var names []string
+		for i := 0; i < 3; i++ {
+			name := fmt.Sprintf("Burst Peer %d", i)
+			names = append(names, name)
+			status, _, elapsed := createPeer(t, name, "")
+			if status != 201 {
+				t.Fatalf("%s: status %d, want 201", name, status)
+			}
+			if elapsed >= 1500*time.Millisecond {
+				t.Fatalf("%s took %s with a 2s kernel apply; creates must not wait for the apply", name, elapsed)
+			}
+		}
+		waitFor(t, 20*time.Second, "all burst peers listed", func() bool {
+			listed := peerNames(t, act)
+			for _, name := range names {
+				if !listed[name] {
+					return false
+				}
+			}
+			return true
+		})
+	})
+
+	// Let the coalesced burst applies finish before deleting: the removal is
+	// ordered after pending applies, but waiting first keeps the teardown
+	// assertion about queue ordering rather than about a multi-second sleep.
+	waitForNoInflightApplies(t, 500*time.Millisecond, 30*time.Second)
+
+	// DeleteServer tears the interface down through the same per-server queue,
+	// so the removal lands after any apply still in flight. The row is gone
+	// before the response, and the teardown is eventually observable.
+	resp, _ = api(t, "DELETE", "/api/servers/"+serverID, act, map[string]string{
+		"code": current2FACode(t, act.totpSecret),
+	})
+	expectStatus(t, resp, 200, "DELETE /api/servers/{id} (async removal)")
+	waitFor(t, 20*time.Second, "wg-helper /remove for "+iface, func() bool {
+		return !fakeInterfacePresent(iface)
+	})
 }

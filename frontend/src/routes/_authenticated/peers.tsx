@@ -4,7 +4,7 @@ import { userLabel } from '../../lib/userLabel'
 import { fmtDateTime } from '../../lib/timezone'
 import { configFileName } from '../../lib/filename'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import QRCode from 'qrcode'
 import { IconCopy, IconDownload, IconMailForward, IconPlus, IconQrcode } from '@tabler/icons-react'
 import {
@@ -54,16 +54,60 @@ interface User {
   status: string
 }
 
+/** Stable idempotency key for one Add-Peer modal session. */
+function generateRequestId(): string {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID()
+    }
+  } catch {
+    // crypto.randomUUID can throw (insecure context / very old browsers) —
+    // fall through to the Math.random fallback.
+  }
+  return `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+const NETWORK_ERROR_RE = /load failed|failed to fetch/i
+
+/**
+ * True when a create never got an HTTP response (offline, connection reset,
+ * browser/proxy abort). Such failures are TypeErrors or the browser's
+ * "Load failed" / "Failed to fetch" message — and they say nothing about
+ * whether the server committed the write.
+ */
+function isNetworkError(e: unknown): boolean {
+  if (e instanceof TypeError) return true
+  const message = e instanceof Error ? e.message : typeof e === 'string' ? e : ''
+  return NETWORK_ERROR_RE.test(message)
+}
+
+const NETWORK_ERROR_HINT =
+  'The create request got no response — the peer may already have been created. ' +
+  'The peers list has been refreshed, and retrying is safe: the same request ID is sent ' +
+  'again, so a duplicate peer cannot be created.'
+
+function createErrorMessage(e: unknown): string {
+  if (isNetworkError(e)) return NETWORK_ERROR_HINT
+  return e instanceof Error && e.message ? e.message : 'Failed to create peer'
+}
+
 export const Route = createFileRoute('/_authenticated/peers')({
   component: PeersPage,
 })
 
 
-function PeersPage() {
+export function PeersPage() {
   const queryClient = useQueryClient()
   const [showAdd, setShowAdd] = useState(false)
   const [editing, setEditing] = useState<Peer | null>(null)
   const [error, setError] = useState('')
+  // Positive outcome line ("Created — peer IP …"), deliberately separate from
+  // `error` so a successful create is never painted as a failure.
+  const [notice, setNotice] = useState('')
+  // Idempotency key for the current Add-Peer session: reused by every retry
+  // of the same modal so the server replays the original peer instead of
+  // creating a duplicate.
+  const requestIdRef = useRef('')
   const [qr, setQr] = useState<{ name: string; dataUrl: string } | null>(null)
   const [form, setForm] = useState({ name: '', server_id: '', user_id: '', send_email: false })
   const [createdLink, setCreatedLink] = useState('')
@@ -107,26 +151,57 @@ function PeersPage() {
 
   const createMutation = useMutation({
     mutationFn: async () => {
-      return apiJson<{ config_link?: string; allowed_ip?: string }>('/api/peers', { method: 'POST', body: form })
+      // One id per modal session; a retry replays the same request instead of
+      // creating a second peer.
+      if (!requestIdRef.current) requestIdRef.current = generateRequestId()
+      return apiJson<{
+        status?: string
+        public_key?: string
+        config_link?: string
+        allowed_ip?: string
+      }>('/api/peers', { method: 'POST', body: { ...form, request_id: requestIdRef.current } })
     },
     onSuccess: (data) => {
+      // The peer is committed (or was already committed by an earlier attempt
+      // replaying this id) — the next modal session gets a fresh id.
+      requestIdRef.current = generateRequestId()
+      setError('')
       if (data?.config_link) {
         // Email (if SMTP is on) contains the same link; show it in the modal
         // so the admin can also copy/share it manually.
         setCreatedLink(data.config_link)
         setCopied(false)
-        setError('')
+        setNotice('')
         setForm({ name: '', server_id: '', user_id: '', send_email: false })
         queryClient.invalidateQueries({ queryKey: ['peers'] })
         return
       }
       setShowAdd(false)
-      setError('')
       setForm({ name: '', server_id: '', user_id: '', send_email: false })
       queryClient.invalidateQueries({ queryKey: ['peers'] })
-      if (data?.allowed_ip) setError(`Created — peer IP ${data.allowed_ip}`)
+      if (data?.allowed_ip) {
+        // A replayed create (status "exists") already landed on an earlier
+        // attempt; say so without implying a second peer was made.
+        setNotice(
+          data.status === 'exists'
+            ? `Created — peer IP ${data.allowed_ip} (no duplicate was created)`
+            : `Created — peer IP ${data.allowed_ip}`,
+        )
+      } else {
+        setNotice(
+          data?.status === 'exists' ? 'Created — no duplicate was created' : 'Peer created.',
+        )
+      }
     },
-    onError: (e: Error) => setError(e.message),
+    onError: () => {
+      // The response never arrived, but the write may still have landed:
+      // refresh now so a committed peer appears even before the admin retries.
+      // The message itself is rendered from the mutation error inside the
+      // modal (see createErrorMessage): network failures become a truthful
+      // "may already have been created" hint instead of a bare "Load failed".
+      setNotice('')
+      queryClient.invalidateQueries({ queryKey: ['peers'] })
+    },
   })
 
   const copyLink = async () => {
@@ -146,13 +221,20 @@ function PeersPage() {
   }
 
   const openAdd = () => {
+    createMutation.reset()
+    // Fresh idempotency key per Add-Peer session: retries within the modal
+    // reuse it; a reopened modal never does.
+    requestIdRef.current = generateRequestId()
     setEditing(null)
     setCreatedLink('')
+    setNotice('')
     setForm({ name: '', server_id: '', user_id: '', send_email: false })
     setShowAdd(true)
   }
 
   const closeAdd = () => {
+    createMutation.reset()
+    requestIdRef.current = generateRequestId()
     setShowAdd(false)
     setEditing(null)
     setCreatedLink('')
@@ -273,6 +355,11 @@ function PeersPage() {
       />
 
       {error && <p className="text-red-400 text-sm mb-3">{error}</p>}
+      {notice && (
+        <p role="status" className="text-teal-400 text-sm mb-3">
+          {notice}
+        </p>
+      )}
 
       {/* Add / edit modal */}
       <Modal
@@ -403,6 +490,16 @@ function PeersPage() {
               />
               Email the user a secure link to download / scan their config (sent when SMTP is configured)
             </label>
+          )}
+          {!editing && createMutation.isError && (
+            <p
+              role="alert"
+              className={`text-sm ${
+                isNetworkError(createMutation.error) ? 'text-amber-300' : 'text-red-400'
+              }`}
+            >
+              {createErrorMessage(createMutation.error)}
+            </p>
           )}
           <div className="flex justify-end gap-3 pt-2">
             <GhostButton type="button" onClick={closeAdd}>

@@ -2,12 +2,15 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/wireguard-console/backend/internal/auth"
 	"github.com/wireguard-console/backend/internal/wgclient"
@@ -122,14 +125,139 @@ func syncServerToKernel(ctx context.Context, pool *pgxpool.Pool, serverID uuid.U
 	return nil
 }
 
-// syncServerLogged wraps syncServerToKernel for mutation handlers, logging
-// any failure and returning a human-readable warning (optional).
-func syncServerLogged(ctx context.Context, pool *pgxpool.Pool, serverID uuid.UUID) string {
-	if err := syncServerToKernel(ctx, pool, serverID); err != nil {
-		log.Printf("wg sync failed for server %s: %v", serverID, err)
-		return fmt.Sprintf("kernel sync: %v", err)
+// Kernel-state sync runs through a per-server coalescing queue — the
+// mutation-handler counterpart to RequestDomainRuleSync. Why: handlers used to
+// apply the full server state to wg-helper synchronously, before answering. A
+// slow kernel apply (many peers, large nftables rule sets) could outlive the
+// browser/proxy timeout, so the UI reported "Load failed" for a peer that was
+// already committed — and the retry created a duplicate. Handlers now commit,
+// answer, and let this queue apply the new state.
+//
+// Per server there is at most one goroutine; a request arriving while it runs
+// sets dirty so exactly one more pass runs. Each pass re-reads the database, so
+// the newest committed state always wins over an earlier pass. Removal (server
+// delete) is the terminal operation: it runs after the in-flight apply, so a
+// delete racing a slow apply can never leave the interface up.
+var (
+	serverSyncMu   sync.Mutex
+	serverSyncJobs = map[uuid.UUID]*serverSyncJob{}
+)
+
+type serverSyncJob struct {
+	pool     *pgxpool.Pool
+	serverID uuid.UUID
+	running  bool
+	dirty    bool   // a request arrived during the current pass: run one more
+	remove   bool   // teardown requested: terminal, no further apply passes
+	iface    string // interface to tear down (captured while the row still exists)
+}
+
+// requestServerSync queues an async apply of one server's desired state to
+// wg-helper. It never blocks on the kernel and never returns an error: the DB
+// is re-read when the pass runs, so callers only have to enqueue after commit.
+func requestServerSync(pool *pgxpool.Pool, serverID uuid.UUID) {
+	serverSyncMu.Lock()
+	job := serverSyncJobs[serverID]
+	if job != nil && job.remove {
+		// Teardown is terminal: a straggler apply for an already-deleted
+		// server must not resurrect its interface.
+		serverSyncMu.Unlock()
+		return
 	}
-	return ""
+	if job == nil {
+		job = &serverSyncJob{pool: pool, serverID: serverID}
+		serverSyncJobs[serverID] = job
+	}
+	job.dirty = true
+	start := !job.running
+	job.running = true
+	serverSyncMu.Unlock()
+
+	if start {
+		go runServerSync(job)
+	}
+}
+
+// requestPeerServerSync resolves a peer's server and queues that server's
+// apply, for handlers that know a peer ID but not its server.
+func requestPeerServerSync(pool *pgxpool.Pool, peerID uuid.UUID) {
+	var serverID uuid.UUID
+	if err := pool.QueryRow(context.Background(),
+		`SELECT server_id FROM peers WHERE id = $1`, peerID).Scan(&serverID); err != nil {
+		return // peer already gone: nothing to sync
+	}
+	requestServerSync(pool, serverID)
+}
+
+// requestServerRemoval tears down a deleted server's interface after any
+// queued or in-flight apply has finished. Routing the teardown through the
+// same per-server queue is what orders it after the apply; calling
+// wgclient.Remove directly could tear down the old interface while a stale
+// apply was still creating it again.
+func requestServerRemoval(serverID uuid.UUID, iface string) {
+	serverSyncMu.Lock()
+	job := serverSyncJobs[serverID]
+	if job == nil {
+		job = &serverSyncJob{serverID: serverID}
+		serverSyncJobs[serverID] = job
+	}
+	job.remove = true
+	if iface != "" {
+		job.iface = iface
+	}
+	start := !job.running
+	job.running = true
+	serverSyncMu.Unlock()
+
+	if start {
+		go runServerSync(job)
+	}
+}
+
+func runServerSync(job *serverSyncJob) {
+	for {
+		serverSyncMu.Lock()
+		remove := job.remove
+		iface := job.iface
+		job.dirty = false
+		serverSyncMu.Unlock()
+
+		if remove {
+			if iface != "" {
+				if err := wgclient.Remove(iface); err != nil {
+					log.Printf("wg remove %s: %v", iface, err)
+				}
+			}
+			serverSyncMu.Lock()
+			job.running = false
+			delete(serverSyncJobs, job.serverID)
+			serverSyncMu.Unlock()
+			return
+		}
+
+		if err := syncServerToKernel(context.Background(), job.pool, job.serverID); err != nil {
+			// The server may have been deleted after this pass was queued;
+			// there is nothing left to apply then, so it is not a failure.
+			if !errors.Is(err, pgx.ErrNoRows) {
+				log.Printf("wg sync failed for server %s: %v", job.serverID, err)
+			}
+		}
+
+		serverSyncMu.Lock()
+		if job.remove {
+			// A delete landed while the apply was in flight: loop once more
+			// so teardown runs after the apply, never before it.
+			serverSyncMu.Unlock()
+			continue
+		}
+		if !job.dirty {
+			job.running = false
+			delete(serverSyncJobs, job.serverID)
+			serverSyncMu.Unlock()
+			return
+		}
+		serverSyncMu.Unlock()
+	}
 }
 
 // SyncAllLocalServersToKernel re-applies the full desired state of every
@@ -193,15 +321,6 @@ func SyncAllLocalServersToKernel(pool *pgxpool.Pool) (int, error) {
 		applied++
 	}
 	return applied, firstErr
-}
-
-// removeServerFromKernel tears down the host interface of a deleted server.
-func removeServerFromKernel(ctx context.Context, pool *pgxpool.Pool, serverID uuid.UUID) error {
-	var ifaceName string
-	if err := pool.QueryRow(ctx, `SELECT interface_name FROM servers WHERE id = $1`, serverID).Scan(&ifaceName); err != nil {
-		return err
-	}
-	return wgclient.Remove(ifaceName)
 }
 
 // EnsureLocalDNSEnforcement re-applies the DNS enforcement rules for every

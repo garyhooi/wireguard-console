@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -12,6 +13,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/wireguard-console/backend/internal/auth"
 	"github.com/wireguard-console/backend/internal/db"
@@ -62,6 +65,44 @@ func nextAvailableIP(ctx context.Context, pool *pgxpool.Pool, serverID string) (
 		ip[3]++
 	}
 	return "", fmt.Errorf("no free addresses left in %s", cidr)
+}
+
+// normalizePeerCreateRequestID trims an optional idempotency key and rejects
+// over-long values: the column is unbounded TEXT, but an unbounded key would
+// bloat the unique index and every replay lookup.
+func normalizePeerCreateRequestID(raw string) (string, bool) {
+	id := strings.TrimSpace(raw)
+	if len(id) > 128 {
+		return "", false
+	}
+	return id, true
+}
+
+// peerCreateReplay finds the peer created with an idempotency key. Request-id
+// replays and lost insert races both resolve to this row instead of creating
+// (or failing) a duplicate.
+func peerCreateReplay(ctx context.Context, pool *pgxpool.Pool, requestID string) (publicKey, allowedIP string, found bool, err error) {
+	err = pool.QueryRow(ctx, `
+		SELECT public_key, host(allowed_ip) FROM peers WHERE create_request_id = $1
+	`, requestID).Scan(&publicKey, &allowedIP)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, err
+	}
+	return publicKey, allowedIP, true, nil
+}
+
+// writePeerCreateReplay is the idempotent success response for a retried
+// create: same fields the frontend needs, status "exists" (200 instead of the
+// original 201) so a retry after a network timeout is a no-op.
+func writePeerCreateReplay(w http.ResponseWriter, publicKey, allowedIP string) {
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status":     "exists",
+		"public_key": publicKey,
+		"allowed_ip": allowedIP,
+	})
 }
 
 func ListPeers(store *Store) http.HandlerFunc {
@@ -148,6 +189,11 @@ func CreatePeer(store *Store) http.HandlerFunc {
 			AllowedIP     string    `json:"allowed_ip"`
 			PrivateKeyEnc string    `json:"private_key_enc"`
 			SendEmail     bool      `json:"send_email"`
+			// Optional idempotency key: a create retried after a network
+			// timeout (the browser saw "Load failed" although the peer was
+			// committed) replays the original result instead of inserting a
+			// duplicate peer.
+			RequestID string `json:"request_id"`
 		}
 		var generatedPrivKey string
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -158,9 +204,27 @@ func CreatePeer(store *Store) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "name is required")
 			return
 		}
+		requestID, ok := normalizePeerCreateRequestID(req.RequestID)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "request_id must be at most 128 characters")
+			return
+		}
 
 		ctx := context.Background()
 		adminID := getAdminID(r)
+
+		// A replay of an already-committed create (see create_request_id in
+		// migration 027) must not insert or email again — just report the
+		// original peer so the client can treat the retry as a success.
+		if requestID != "" {
+			if publicKey, allowedIP, found, err := peerCreateReplay(ctx, store.pool, requestID); err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to check request_id")
+				return
+			} else if found {
+				writePeerCreateReplay(w, publicKey, allowedIP)
+				return
+			}
+		}
 
 		// The browser shouldn't have to generate keys or pick an IP —
 		// generate the peer keypair and allocate the next free address
@@ -198,21 +262,44 @@ func CreatePeer(store *Store) http.HandlerFunc {
 			req.AllowedIP = ip
 		}
 
+		// NULL (not "") when no idempotency key was sent: the partial unique
+		// index only covers non-NULL ids, so legacy creates never collide.
+		var createRequestID any
+		if requestID != "" {
+			createRequestID = requestID
+		}
+
 		var newID uuid.UUID
 		err := store.pool.QueryRow(ctx, `
-			INSERT INTO peers (user_id, server_id, name, public_key, allowed_ip, preshared_key_encrypted, private_key_encrypted, status)
-			VALUES ($1, $2, $3, $4, $5, '', $6, 'active')
+			INSERT INTO peers (user_id, server_id, name, public_key, allowed_ip, preshared_key_encrypted, private_key_encrypted, create_request_id, status)
+			VALUES ($1, $2, $3, $4, $5, '', $6, $7, 'active')
 			RETURNING id
-		`, req.UserID, req.ServerID, req.Name, req.PublicKey, req.AllowedIP, req.PrivateKeyEnc).Scan(&newID)
+		`, req.UserID, req.ServerID, req.Name, req.PublicKey, req.AllowedIP, req.PrivateKeyEnc, createRequestID).Scan(&newID)
 
 		if err != nil {
+			// Two overlapping creates with the same request_id race on the
+			// partial unique index; the winner's row is the one the caller
+			// must see. Re-select instead of failing a request that actually
+			// succeeded — a retried POST must be idempotent even when both
+			// attempts overlap. Any other unique violation (or no key) is a
+			// real create failure.
+			var pgErr *pgconn.PgError
+			if requestID != "" && errors.As(err, &pgErr) && pgErr.Code == "23505" {
+				if publicKey, allowedIP, found, lookupErr := peerCreateReplay(ctx, store.pool, requestID); lookupErr == nil && found {
+					writePeerCreateReplay(w, publicKey, allowedIP)
+					return
+				}
+			}
 			writeError(w, http.StatusInternalServerError, "Failed to create peer")
 			return
 		}
 
 		logAudit(ctx, store, adminID, "peer.create", "peer", newID.String(), nil)
 
-		warning := syncServerLogged(ctx, store.pool, req.ServerID)
+		// Kernel apply is queued, not awaited: the row is committed, so the
+		// client must get its 201 even when wg-helper is slow (a browser or
+		// proxy timeout here made a successful create look like a failure).
+		requestServerSync(store.pool, req.ServerID)
 
 		// Optionally email the user a secure link to their config (needs the
 		// generated private key + configured SMTP). The email contains a
@@ -245,7 +332,7 @@ func CreatePeer(store *Store) http.HandlerFunc {
 			"status":        "created",
 			"public_key":    req.PublicKey,
 			"allowed_ip":    req.AllowedIP,
-			"apply_warning": warning,
+			"apply_warning": "",
 			"config_link":   configLink,
 		})
 	}
@@ -281,20 +368,10 @@ func UpdatePeer(store *Store) http.HandlerFunc {
 
 		logAudit(ctx, store, adminID, "peer.update", "peer", peerID.String(), nil)
 
-		warning := resyncPeerKernel(ctx, store, peerID)
+		requestPeerServerSync(store.pool, peerID)
 
-		writeJSON(w, http.StatusOK, map[string]string{"status": "updated", "apply_warning": warning})
+		writeJSON(w, http.StatusOK, map[string]string{"status": "updated", "apply_warning": ""})
 	}
-}
-
-// resyncPeerKernel pushes the peer's server state to wg-helper after a
-// peer-level mutation (rename/remove/suspend/resume).
-func resyncPeerKernel(ctx context.Context, store *Store, peerID uuid.UUID) string {
-	var serverID uuid.UUID
-	if err := store.pool.QueryRow(ctx, `SELECT server_id FROM peers WHERE id = $1`, peerID).Scan(&serverID); err != nil {
-		return ""
-	}
-	return syncServerLogged(ctx, store.pool, serverID)
 }
 func SuspendPeer(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -319,7 +396,7 @@ func SuspendPeer(store *Store) http.HandlerFunc {
 
 		logAudit(ctx, store, adminID, "peer.suspend", "peer", peerID.String(), nil)
 
-		resyncPeerKernel(ctx, store, peerID)
+		requestPeerServerSync(store.pool, peerID)
 		RequestDomainRuleSync(store) // drop this peer's $client= rules
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "suspended"})
@@ -348,7 +425,7 @@ func ResumePeer(store *Store) http.HandlerFunc {
 
 		logAudit(ctx, store, adminID, "peer.resume", "peer", peerID.String(), nil)
 
-		resyncPeerKernel(ctx, store, peerID)
+		requestPeerServerSync(store.pool, peerID)
 		RequestDomainRuleSync(store) // re-add this peer's $client= rules
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "resumed"})
@@ -378,7 +455,7 @@ func DeletePeer(store *Store) http.HandlerFunc {
 
 		logAudit(ctx, store, adminID, "peer.remove", "peer", peerID.String(), nil)
 
-		resyncPeerKernel(ctx, store, peerID)
+		requestPeerServerSync(store.pool, peerID)
 		RequestDomainRuleSync(store) // drop this peer's $client= rules
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})

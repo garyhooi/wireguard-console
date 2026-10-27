@@ -19,7 +19,6 @@ import (
 	"github.com/wireguard-console/backend/internal/auth"
 	"github.com/wireguard-console/backend/internal/db"
 	"github.com/wireguard-console/backend/internal/email"
-	"github.com/wireguard-console/backend/internal/wgclient"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
@@ -202,11 +201,13 @@ func CreateServer(store *Store) http.HandlerFunc {
 
 		logAudit(ctx, store, adminID, "server.create", "server", "", nil)
 
-		// Automatically provision the interface on the host (wg-helper) —
-		// unless this server lives on a remote node (manual mode).
+		// Provisioning the interface happens asynchronously: a slow kernel
+		// apply must not delay the response (nor make a committed create look
+		// failed after a browser/proxy timeout). Remote servers are applied by
+		// their node agent on its next poll; manual ones by the host operator.
 		warning := ""
 		if req.ManagedMode == "local" {
-			warning = syncServerLogged(ctx, store.pool, newID)
+			requestServerSync(store.pool, newID)
 		} else if req.ManagedMode == "remote" {
 			warning = "assigned to node — the node agent will apply it on its next poll"
 		}
@@ -323,10 +324,11 @@ func DeleteServer(store *Store) http.HandlerFunc {
 			return
 		}
 
-		// Tear the interface down on the host (best effort).
-		if err := wgclient.Remove(ifaceName); err != nil {
-			log.Printf("wg remove %s: %v", ifaceName, err)
-		}
+		// Tear the interface down through the per-server sync queue: it runs
+		// after any in-flight apply, so a delete racing a slow apply cannot
+		// leave the interface up. Queued (not inline) because the response must
+		// not wait on the kernel for a row that is already deleted.
+		requestServerRemoval(serverID, ifaceName)
 
 		logAudit(ctx, store, adminID, "server.delete", "server", serverID.String(), nil)
 		RequestDomainRuleSync(store) // active peers/block-page IP changed

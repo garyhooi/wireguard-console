@@ -131,7 +131,10 @@ func ClaimUser(store *Store) http.HandlerFunc {
 			return
 		}
 
-		syncServerLogged(ctx, store.pool, server.ID)
+		// Queue the kernel apply instead of waiting on wg-helper: the invite is
+		// already consumed and the peer committed, so the user must get the
+		// client config even when the apply is slow.
+		requestServerSync(store.pool, server.ID)
 
 		// Real client config (private key included for immediate import).
 		peer := &db.Peer{Name: req.FullName + "'s Device", PublicKey: peerKey.PublicKey().String(), AllowedIP: allowedIP}
