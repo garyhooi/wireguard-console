@@ -8,7 +8,7 @@ A self-hosted web console for issuing, monitoring, and revoking company WireGuar
   <tr>
     <td align="center" width="50%">
       <img src="docs/demo/login.png" alt="Login" width="100%" />
-      <br /><em>Login — self-hosted sign-in with mandatory 2FA for admins</em>
+      <br /><em>Login — self-hosted sign-in with mandatory MFA (passkey or authenticator app) for admins</em>
     </td>
     <td align="center" width="50%">
       <img src="docs/demo/dashboard.png" alt="Dashboard" width="100%" />
@@ -35,17 +35,37 @@ A self-hosted web console for issuing, monitoring, and revoking company WireGuar
       <br /><em>Claim — VPN users claim their peer config from the emailed link</em>
     </td>
   </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/demo/mfa-setup.png" alt="MFA enrollment" width="100%" />
+      <br /><em>Mandatory MFA — a passkey and/or authenticator app, set up before the first session</em>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/demo/mfa-verify.png" alt="MFA sign-in challenge" width="100%" />
+      <br /><em>MFA sign-in — passkey, authenticator code, or a one-time recovery code</em>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/demo/profile-mfa.png" alt="Profile MFA management" width="100%" />
+      <br /><em>Profile — add/remove factors, see recovery codes left, regenerate them</em>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/demo/mfa-recovery-codes.png" alt="Recovery codes" width="100%" />
+      <br /><em>Recovery codes — shown once, single-use, accepted at sign-in</em>
+    </td>
+  </tr>
 </table>
 
 ## What you get
 
-- **Admins** (invited, mandatory 2FA) manage everything from the web UI
+- **Admins** (invited, mandatory MFA — passkey or authenticator app) manage everything from the web UI
 - **VPN users** claim their own peer config via an emailed invite link, tagged with an optional department
 - **Distributed nodes** — add VPN exit machines in any region in ~2 minutes
 - **DNS filtering** — global and per-user domain blocking (AdGuard) with reusable domain groups and a branded block page (HTTPS block pages need the console certificate installed once per device)
 - **IP blocking** — drop IPv4/IPv6 addresses and CIDR ranges for VPN peers, globally or per-user, with reusable IP groups (enforced server-side before NAT); blocked-IP attempts appear in Statistics and Web Activity
 - **Web activity** — per-user browsing history, traffic charts and usage reports (CSV export)
-- **Backup & restore** — one-click, 2FA-gated
+- **Backup & restore** — one-click, MFA-gated
 
 ## Quick start
 
@@ -55,7 +75,7 @@ Requires: Ubuntu 22.04+, Docker (installed automatically), and either a **domain
 curl -fsSL https://raw.githubusercontent.com/garyhooi/wireguard-console/main/install.sh | sudo bash
 ```
 
-This installs Docker, WireGuard tools and the stack, provisions AdGuard Home, opens the firewall on whichever manager is active (ufw, firewalld, or a bare iptables ruleset), and **asks you for your first `super_admin` email, then prints the auto-generated password at the end** — save them, log in, change the password and enroll 2FA. (A fresh database is detected from the Postgres data volume, so re-running after a reset that wiped Docker data prompts for the email again and prints new credentials instead of silently reusing stale ones.)
+This installs Docker, WireGuard tools and the stack, provisions AdGuard Home, opens the firewall on whichever manager is active (ufw, firewalld, or a bare iptables ruleset), and **asks you for your first `super_admin` email, then prints the auto-generated password at the end** — save them, log in, change the password and set up MFA (a passkey or an authenticator app). (A fresh database is detected from the Postgres data volume, so re-running after a reset that wiped Docker data prompts for the email again and prints new credentials instead of silently reusing stale ones.)
 
 **No domain?** Enter the server's public IP when prompted. HTTPS then uses Caddy's internal CA — your browser shows a one-time self-signed warning (the connection is still encrypted). For a trusted certificate without buying a domain, use `CONSOLE_DOMAIN=<your-ip>.sslip.io bash install.sh`.
 
@@ -136,9 +156,18 @@ Repeat steps 2–6 for each location. Deleting a node is safe — its servers fa
 
 > **Note:** remote-node servers currently don't report traffic stats or DNS/web activity — those features track the console host's own AdGuard. Nodes also self-heal after a reboot: the agent re-applies interfaces on its next poll.
 
+## MFA & passkeys
+
+Every admin must complete a second factor after the password: a **passkey** (Touch ID / Windows Hello / security key) or an **authenticator app** code, with one-time recovery codes as the fallback. On the first sign-in after an invite (or after an MFA reset) no factor exists yet, so the console **forces enrollment before issuing a session** — at least one factor is required, and both can be added.
+
+- **Passkeys need a domain.** WebAuthn binds credentials to the console hostname, so IP-only installs (`CONSOLE_DOMAIN` = an IP address) have no passkey option; authenticator-app MFA is used instead. The installer summary shows which mode applies.
+- **Changing `CONSOLE_DOMAIN` orphans passkeys** — they were registered for the old address. The installer warns when this happens; affected admins re-enroll (TOTP and recovery codes keep working).
+- **Recovery**: a super admin can reset another admin's MFA from **Directory → Admins → Reset MFA** (their sessions are signed out and they re-enroll at next sign-in). Save the recovery codes shown at enrollment.
+- **Policy**: Configuration → Security can require authenticator app, passkey, or both for every admin (default: at least one).
+
 ## Backup & restore
 
-**System → Backups**: create, download (off-server copy), and restore with one click. Destructive actions ask for your 2FA code. Backups live on the console's Docker volume — download them regularly.
+**System → Backups**: create, download (off-server copy), and restore with one click. Destructive actions ask for your MFA confirmation (passkey or authenticator code). Backups live on the console's Docker volume — download them regularly.
 
 ## Upgrading
 

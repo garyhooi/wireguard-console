@@ -34,6 +34,15 @@ func (c *Conn) Close() {
 }
 
 func RunMigrations(conn *Conn) error {
+	return RunMigrationsFor(conn.pool)
+}
+
+// RunMigrationsFor applies every migration file to the given pool. Every
+// migration is written to be idempotent (the runner has no tracking table and
+// re-executes all files on every boot), so this is safe to call again on a live
+// database — which is what backup restore does: a restored dump may predate the
+// running binary's schema, and re-running migrations upgrades it in place.
+func RunMigrationsFor(pool *pgxpool.Pool) error {
 	migrationsDir := os.Getenv("MIGRATIONS_DIR")
 	if migrationsDir == "" {
 		migrationsDir = "./migrations"
@@ -54,7 +63,7 @@ func RunMigrations(conn *Conn) error {
 			return fmt.Errorf("failed to read migration %s: %w", file.Name(), err)
 		}
 
-		if _, err := conn.pool.Exec(context.Background(), string(sql)); err != nil {
+		if _, err := pool.Exec(context.Background(), string(sql)); err != nil {
 			return fmt.Errorf("failed to execute migration %s: %w", file.Name(), err)
 		}
 

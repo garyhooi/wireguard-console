@@ -16,7 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/wireguard-console/backend/internal/auth"
+	authwebauthn "github.com/wireguard-console/backend/internal/auth/webauthn"
 	"github.com/wireguard-console/backend/internal/db"
 	"golang.org/x/crypto/argon2"
 )
@@ -122,7 +122,7 @@ func BootstrapAdmin(pool *pgxpool.Pool, logf func(format string, a ...interface{
 			logf(" First admin auto-created (fresh install).")
 			logf("   Email:    %s", email)
 			logf("   Password: %s", password)
-			logf("   Change it in Profile after login, and enroll 2FA.")
+			logf("   Change it in Profile after login, and enroll an MFA factor.")
 			logf("   (Set ADMIN_EMAIL / ADMIN_PASSWORD to pre-choose credentials.)")
 			logf("==================================================================")
 		} else {
@@ -150,38 +150,32 @@ type loginRequest struct {
 	Password string `json:"password"`
 }
 
-type verify2FARequest struct {
-	Code string `json:"code"`
-}
-
-type setup2FARequest struct {
-	Code string `json:"code"`
-}
-
-type enable2FARequest struct {
-	Code string `json:"code"`
-}
-
-type adminResponse struct {
+// loginAdminResponse is the compact admin block returned by the password
+// step. It deliberately carries no session material: a correct password never
+// mints a session on its own.
+type loginAdminResponse struct {
 	ID          uuid.UUID `json:"id"`
 	Email       string    `json:"email"`
 	Role        string    `json:"role"`
+	MFAEnabled  bool      `json:"mfa_enabled"`
 	TOTPEnabled bool      `json:"totp_enabled"`
-	Status      string    `json:"status"`
 	CreatedAt   time.Time `json:"created_at"`
 }
 
-// Session tokens travel only as HttpOnly cookies; the JSON carries just the
-// per-session CSRF token that the SPA echoes on state-changing requests.
-type sessionResponse struct {
-	CSRFToken string `json:"csrf_token,omitempty"`
-}
-
+// loginResponse is the password step's only output: a pending-MFA state.
+// pending_mfa means the admin must prove an enrolled factor; pending_mfa_setup
+// means the factor policy is unsatisfied and enrollment must complete first.
+// A session (and its CSRF token) is only minted by finishMFALogin.
 type loginResponse struct {
-	CSRFToken       string         `json:"csrf_token,omitempty"`
-	Pending2FA      bool           `json:"pending_2fa,omitempty"`
-	Pending2FASetup bool           `json:"pending_2fa_setup,omitempty"`
-	Admin           *adminResponse `json:"admin,omitempty"`
+	PendingMFA             bool                `json:"pending_mfa,omitempty"`
+	PendingMFASetup        bool                `json:"pending_mfa_setup,omitempty"`
+	MFAMethods             []string            `json:"mfa_methods,omitempty"`
+	SetupMethods           []string            `json:"setup_methods,omitempty"`
+	PasskeyAvailable       bool                `json:"passkey_available"`
+	PasskeyCount           int                 `json:"passkey_count"`
+	RecoveryCodesRemaining int                 `json:"recovery_codes_remaining"`
+	RequireMethods         string              `json:"require_methods"`
+	Admin                  *loginAdminResponse `json:"admin,omitempty"`
 }
 
 func Login(store *Store) http.HandlerFunc {
@@ -302,169 +296,55 @@ func Login(store *Store) http.HandlerFunc {
 			WHERE id = $2
 		`, now, admin.ID)
 
+		// Password accepted — but this is NOT a login. The password step only
+		// records a short-lived pending state; a proven factor (or completed
+		// mandatory enrollment) is the single path to a session, through
+		// finishMFALogin (see mfa_shared.go). This is what keeps "password
+		// alone is never enough" true by construction.
+		factors, err := loadMFAFactors(ctx, store, admin.ID)
+		if err != nil {
+			log.Printf("Failed to load MFA factors: admin_id=%s, err=%v", admin.ID, err)
+			writeError(w, http.StatusInternalServerError, "Failed to load MFA state")
+			return
+		}
+		requireMethods := loadMFAPolicy(ctx, store)
+		svc := authwebauthn.Current()
+
+		kind := pendingKindVerify
+		if !policySatisfied(requireMethods, factors, svc.Available()) {
+			kind = pendingKindEnroll
+		}
+
+		rawToken, _, err := createPendingMFASession(ctx, store, admin.ID, r, kind)
+		if err != nil {
+			log.Printf("Failed to create pending MFA session: admin_id=%s, err=%v", admin.ID, err)
+			writeError(w, http.StatusInternalServerError, "Failed to start MFA verification")
+			return
+		}
+		setPendingMFACookie(w, r, rawToken)
+
 		resp := loginResponse{
-			Admin: &adminResponse{
+			PasskeyAvailable:       svc.Available(),
+			PasskeyCount:           factors.PasskeyCount,
+			RecoveryCodesRemaining: factors.RecoveryCodeCount,
+			RequireMethods:         requireMethods,
+			Admin: &loginAdminResponse{
 				ID:          admin.ID,
 				Email:       admin.Email,
 				Role:        admin.Role,
-				TOTPEnabled: admin.TOTPEnabled,
-				Status:      admin.Status,
+				MFAEnabled:  factors.Enrolled(),
+				TOTPEnabled: factors.TOTPEnabled,
 				CreatedAt:   admin.CreatedAt,
 			},
 		}
-
-		if admin.TOTPEnabled {
-			token, err := generateToken()
-			if err != nil {
-				log.Printf("Failed to generate 2FA token: %v", err)
-				writeError(w, http.StatusInternalServerError, "Failed to generate token")
-				return
-			}
-
-			// The pending token is persisted as a short-lived session row so
-			// Verify2FA can resolve it back to this admin. It is NOT yet a
-			// usable session: Verify2FA checks TOTP and only then swaps it
-			// for a full 24h session. Keep it short (10 min) so an
-			// abandoned login attempt expires on its own. Transported as an
-			// HttpOnly cookie (wgc_pending2fa) — never visible to JS.
-			if _, err := createSession(ctx, store, admin.ID, token, r, pending2FALife, false); err != nil {
-				log.Printf("Failed to create pending 2FA session: admin_id=%s, err=%v", admin.ID, err)
-				writeError(w, http.StatusInternalServerError, "Failed to start 2FA verification")
-				return
-			}
-			setSessionCookie(w, r, pending2FACookieName, token, int(pending2FALife.Seconds()))
-
-			resp.Pending2FA = true
-			writeJSON(w, http.StatusOK, resp)
-			return
+		if kind == pendingKindEnroll {
+			resp.PendingMFASetup = true
+			resp.SetupMethods = missingMethodsForPolicy(requireMethods, factors, svc.Available())
+		} else {
+			resp.PendingMFA = true
+			resp.MFAMethods = factors.methods(svc.Available())
 		}
-
-		// No second factor enrolled yet: force enrollment before granting a
-		// session. The pending cookie only authorizes the setup endpoints
-		// (see forced_2fa_setup.go); protected APIs stay closed until the
-		// authenticator code is confirmed.
-		if !admin.TOTPEnabled {
-			token, err := generateToken()
-			if err != nil {
-				log.Printf("Failed to generate 2FA setup token: %v", err)
-				writeError(w, http.StatusInternalServerError, "Failed to start 2FA setup")
-				return
-			}
-			if _, err := createSession(ctx, store, admin.ID, token, r, pending2FALife, false); err != nil {
-				log.Printf("Failed to create pending 2FA setup session: admin_id=%s, err=%v", admin.ID, err)
-				writeError(w, http.StatusInternalServerError, "Failed to start 2FA setup")
-				return
-			}
-			setSessionCookie(w, r, pending2FACookieName, token, int(pending2FALife.Seconds()))
-
-			resp.Pending2FASetup = true
-			writeJSON(w, http.StatusOK, resp)
-			return
-		}
-
-		// Full 24h session. The raw token travels as an HttpOnly cookie; the
-		// per-session CSRF token returns in JSON so the SPA can echo it on
-		// state-changing requests (the cookie itself is invisible to JS).
-		token, err := generateToken()
-		if err != nil {
-			log.Printf("Failed to generate session token: %v", err)
-			writeError(w, http.StatusInternalServerError, "Failed to generate token")
-			return
-		}
-
-		csrfToken, err := createSession(ctx, store, admin.ID, token, r, sessionLifetime, true)
-		if err != nil {
-			log.Printf("Failed to create session: admin_id=%s, err=%v", admin.ID, err)
-			writeError(w, http.StatusInternalServerError, "Failed to create session")
-			return
-		}
-		setSessionCookie(w, r, sessionCookieName, token, int(sessionLifetime.Seconds()))
-
-		resp.CSRFToken = csrfToken
 		writeJSON(w, http.StatusOK, resp)
-	}
-}
-
-func Verify2FA(store *Store) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req verify2FARequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "Invalid request body")
-			return
-		}
-
-		token := readCookieToken(r, pending2FACookieName)
-		if token == "" {
-			writeError(w, http.StatusUnauthorized, "Missing authorization token")
-			return
-		}
-		pendingHash := hashToken(token)
-
-		ctx := context.Background()
-
-		// Resolve the pending token to its admin. It lives in admin_sessions
-		// with a short expiry (see Login). Consume it on ANY terminal outcome
-		// (success, wrong code, account disabled) so a pending token can
-		// never be replayed or verified twice.
-		var admin db.Admin
-		err := store.pool.QueryRow(ctx, `
-			SELECT id, email, password_hash, role, totp_enabled, status, totp_secret_encrypted
-			FROM admins
-			WHERE id = (SELECT admin_id FROM admin_sessions WHERE token_hash = $1 AND expires_at > now())
-		`, pendingHash).Scan(
-			&admin.ID, &admin.Email, &admin.PasswordHash, &admin.Role,
-			&admin.TOTPEnabled, &admin.Status, &admin.TOTPSecretEncrypted,
-		)
-
-		if err != nil {
-			writeError(w, http.StatusUnauthorized, "Invalid or expired token")
-			return
-		}
-
-		if !admin.TOTPEnabled {
-			writeError(w, http.StatusBadRequest, "2FA is not enabled for this account")
-			return
-		}
-		if admin.Status != "active" {
-			writeError(w, http.StatusForbidden, "Account is disabled")
-			return
-		}
-
-		decryptedSecret, err := auth.DecryptTOTPSecret(ctx, admin.TOTPSecretEncrypted)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to decrypt TOTP secret")
-			return
-		}
-
-		if !auth.VerifyTOTP(decryptedSecret, req.Code) {
-			// Wrong code: keep the pending row so the user can retry with
-			// the same login (the login rate limiter guards brute force).
-			// The 10-minute expiry still bounds the window.
-			writeError(w, http.StatusBadRequest, "Invalid verification code")
-			return
-		}
-
-		// Code accepted — this pending login attempt is spent; swap it for
-		// a real session. Deleting first means a concurrent double-submit
-		// can't mint two sessions from one pending token.
-		store.pool.Exec(ctx, `DELETE FROM admin_sessions WHERE token_hash = $1`, pendingHash)
-
-		sessionToken, err := generateToken()
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to generate token")
-			return
-		}
-
-		csrfToken, err := createSession(ctx, store, admin.ID, sessionToken, r, sessionLifetime, true)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to create session")
-			return
-		}
-
-		setSessionCookie(w, r, sessionCookieName, sessionToken, int(sessionLifetime.Seconds()))
-		clearSessionCookie(w, r, pending2FACookieName)
-
-		writeJSON(w, http.StatusOK, sessionResponse{CSRFToken: csrfToken})
 	}
 }
 
@@ -473,16 +353,24 @@ func Verify2FA(store *Store) http.HandlerFunc {
 // clearing — the UI always lands on a logged-out state.
 func Logout(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token := readCookieToken(r, sessionCookieName)
+		ctx := context.Background()
 
-		if token != "" {
-			store.pool.Exec(context.Background(), `
+		if token := readCookieToken(r, sessionCookieName); token != "" {
+			store.pool.Exec(ctx, `
 				DELETE FROM admin_sessions WHERE token_hash = $1
 			`, hashToken(token))
 		}
 
+		// Signing out also abandons any half-finished MFA login bound to this
+		// browser, so a shared machine cannot leave a resolvable pending row.
+		if token := readPendingMFAToken(r); token != "" {
+			store.pool.Exec(ctx, `
+				DELETE FROM admin_sessions WHERE token_hash = $1 AND pending_kind IS NOT NULL
+			`, hashToken(token))
+		}
+
 		clearSessionCookie(w, r, sessionCookieName)
-		clearSessionCookie(w, r, pending2FACookieName)
+		clearPendingMFACookies(w, r)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	}
 }
@@ -492,6 +380,11 @@ func Logout(store *Store) http.HandlerFunc {
 // the idle timeout, and writes last_seen_at throttled (at most once a minute
 // per session) so the Active Sessions panel shows real activity without
 // hammering the DB per request.
+//
+// The query is also the pending-login hard gate: a row without a CSRF token or
+// with a pending_kind belongs to a half-finished MFA login and is NOT a
+// session. Requiring both conditions to be NULL means a pending cookie can
+// never reach a protected handler, whatever else changes.
 func AuthMiddleware(store *Store) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -513,6 +406,7 @@ func AuthMiddleware(store *Store) func(http.Handler) http.Handler {
 				SELECT s.admin_id, s.csrf_token, s.id, s.last_seen_at
 				FROM admin_sessions s
 				WHERE s.token_hash = $1 AND s.expires_at > now()
+				  AND s.csrf_token IS NOT NULL AND s.pending_kind IS NULL
 			`, hashToken(token)).Scan(&adminID, &csrfToken, &sessionID, &lastSeen)
 
 			if err != nil {
@@ -572,12 +466,12 @@ func RequireCSRF(store *Store) func(http.Handler) http.Handler {
 
 			csrfToken, _ := r.Context().Value(csrfTokenKey{}).(string)
 			if csrfToken == "" {
-				writeError(w, http.StatusForbidden, "CSRF validation failed")
+				writeMFAError(w, http.StatusForbidden, "csrf_failed", "CSRF validation failed")
 				return
 			}
 			provided := r.Header.Get("X-CSRF-Token")
 			if provided == "" || provided != csrfToken {
-				writeError(w, http.StatusForbidden, "CSRF validation failed")
+				writeMFAError(w, http.StatusForbidden, "csrf_failed", "CSRF validation failed")
 				return
 			}
 
@@ -693,105 +587,6 @@ func (rl *rateLimiter) isLimited(key string) bool {
 
 	rl.attempts[key] = append(rl.attempts[key], now)
 	return false
-}
-
-func Setup2FA(store *Store) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		adminID := getAdminID(r)
-
-		ctx := context.Background()
-
-		var totpEnabled bool
-		store.pool.QueryRow(ctx, `SELECT totp_enabled FROM admins WHERE id = $1`, adminID).Scan(&totpEnabled)
-
-		if totpEnabled {
-			writeError(w, http.StatusBadRequest, "2FA is already enabled")
-			return
-		}
-
-		totp, err := auth.GenerateTOTP()
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to generate TOTP")
-			return
-		}
-
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"secret":      totp.Secret(),
-			"otpauth_url": totp.URL(),
-		})
-	}
-}
-
-func Enable2FA(store *Store) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Secret string `json:"secret"`
-			Code   string `json:"code"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "Invalid request body")
-			return
-		}
-
-		adminID := getAdminID(r)
-		ctx := context.Background()
-
-		var totpEnabled bool
-		store.pool.QueryRow(ctx, `SELECT totp_enabled FROM admins WHERE id = $1`, adminID).Scan(&totpEnabled)
-
-		if totpEnabled {
-			writeError(w, http.StatusBadRequest, "2FA is already enabled")
-			return
-		}
-
-		if !auth.VerifyTOTP(req.Secret, req.Code) {
-			writeError(w, http.StatusBadRequest, "Invalid verification code")
-			return
-		}
-
-		encryptedSecret, err := auth.EncryptTOTPSecret(ctx, req.Secret)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to encrypt secret")
-			return
-		}
-
-		backupCodes, err := auth.GenerateBackupCodes(10)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to generate backup codes")
-			return
-		}
-
-		codesHash := make([]string, len(backupCodes))
-		for i, code := range backupCodes {
-			h := sha256.Sum256([]byte(code))
-			codesHash[i] = hex.EncodeToString(h[:])
-		}
-
-		_, err = store.pool.Exec(ctx, `
-			UPDATE admins 
-			SET totp_secret_encrypted = $1, totp_enabled = true, backup_codes_hash = $2, updated_at = now()
-			WHERE id = $3
-		`, encryptedSecret, codesHash, adminID)
-
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to enable 2FA")
-			return
-		}
-
-		// 2FA enrollment upgrades the account's security posture: retire
-		// sessions minted under the weaker policy, keeping only the acting
-		// one (which just proved possession of the new secret).
-		if err := revokeAdminSessionsExcept(ctx, store, adminID, currentSessionTokenHash(r)); err != nil {
-			log.Printf("Failed to revoke other sessions after 2FA enable: admin_id=%s, err=%v", adminID, err)
-		}
-
-		logAudit(ctx, store, adminID, "2fa.enable", "admin", adminID.String(), nil)
-
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"backup_codes": backupCodes,
-			"message":      "2FA enabled. Save these backup codes - they can only be shown once.",
-		})
-	}
 }
 
 func RequireRole(store *Store, roles ...string) func(http.Handler) http.Handler {

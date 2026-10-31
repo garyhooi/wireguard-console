@@ -1,12 +1,12 @@
 /**
  * Central API client.
  *
- * Session transport: HttpOnly cookies (wgc_session / wgc_pending2fa) — the
+ * Session transport: HttpOnly cookies (wgc_session / wgc_mfa_pending) — the
  * token is NEVER in localStorage or any other JS-visible storage. The browser
  * attaches the cookie automatically on same-origin requests; we only keep an
- * in-memory CSRF token (per session, returned by the server on login and
- * /admins/me) to stamp state-changing requests. In-memory only: it vanishes
- * on refresh and is re-fetched from /admins/me on boot.
+ * in-memory CSRF token (per session, returned by the server after the MFA
+ * challenge and by /admins/me) to stamp state-changing requests. In-memory
+ * only: it vanishes on refresh and is re-fetched from /admins/me on boot.
  *
  * Every state-changing request (non-GET/HEAD/OPTIONS) is bracketed by
  * beginLoading()/endLoading() so the root-route GlobalLoadingOverlay can show
@@ -22,7 +22,7 @@ let sessionChecked = false
 // Cached /admins/me result for the current page load (see fetchSession).
 let sessionResult: { id: string; email: string; role: string } | null = null
 
-/** Call after login / 2FA verify / a successful /admins/me probe. */
+/** Call after login / MFA verify / a successful /admins/me probe. */
 export function setCsrfToken(token: string | undefined | null) {
   csrfToken = token || ''
 }
@@ -54,6 +54,14 @@ function redirectToLogin() {
 export interface ApiError extends Error {
   status: number
   body: unknown
+  /**
+   * Machine-readable error code from the API error envelope
+   * ({"error": string, "code": string}). New MFA endpoints always set it;
+   * legacy handlers may omit it.
+   */
+  code?: string
+  /** Present on 429 responses: seconds until the caller may retry. */
+  retryAfterSeconds?: number
 }
 
 function toApiError(res: Response, bodyText: string): ApiError {
@@ -63,24 +71,51 @@ function toApiError(res: Response, bodyText: string): ApiError {
   } catch {
     body = bodyText
   }
+  const envelope = body && typeof body === 'object' ? (body as Record<string, unknown>) : undefined
   const msg =
-    (body && typeof body === 'object' && 'error' in body && typeof (body as { error: unknown }).error === 'string'
-      ? (body as { error: string }).error
-      : undefined) || `Request failed (${res.status})`
+    (envelope && typeof envelope.error === 'string' ? envelope.error : undefined) ||
+    `Request failed (${res.status})`
   const err = new Error(msg) as ApiError
   err.status = res.status
   err.body = body
+  if (envelope && typeof envelope.code === 'string' && envelope.code) {
+    err.code = envelope.code
+  }
+  const retryAfter = envelope?.retry_after_seconds
+  if (typeof retryAfter === 'number' && Number.isFinite(retryAfter) && retryAfter > 0) {
+    err.retryAfterSeconds = Math.ceil(retryAfter)
+  }
   return err
+}
+
+/**
+ * isMFAEnrollmentRequired reports whether a rejected action failed because the
+ * acting admin has no MFA factor at all (server code mfa_not_enrolled /
+ * mfa_required). Such actions cannot succeed until a factor is enrolled from
+ * Profile, so pages surface enrollment guidance instead of a step-up prompt.
+ */
+export function isMFAEnrollmentRequired(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false
+  const code = (err as { code?: unknown }).code
+  // mfa_not_enrolled (contract) / mfa_no_factor (backend) mean the actor has no
+  // factor at all — a step-up prompt cannot fix that, only Profile enrollment.
+  if (code === 'mfa_not_enrolled' || code === 'mfa_no_factor') return true
+  const message = err instanceof Error ? err.message : ''
+  return (
+    message.includes('must have MFA enabled') ||
+    message.includes('must have multi-factor') ||
+    message.includes('MFA enrollment is required')
+  )
 }
 
 export interface ApiFetchOptions extends Omit<RequestInit, 'body'> {
   /** JSON body, or a FormData (multipart) — FormData is sent as-is. */
   body?: unknown
-  /** Do not auto-attach X-CSRF-Token (login/2FA endpoints are pre-session). */
+  /** Do not auto-attach X-CSRF-Token (login/MFA endpoints are pre-session). */
   skipCsrf?: boolean
   /**
    * Do not treat a 401 as an expired session. Pre-session endpoints (login,
-   * 2FA verify) answer 401 for bad credentials; redirecting there would
+   * MFA verify) answer 401 for bad credentials; redirecting there would
    * reload the page and swallow the error/verification animation.
    */
   noAuthRedirect?: boolean
@@ -102,7 +137,7 @@ export async function apiFetch(path: string, options: ApiFetchOptions = {}): Pro
   const method = (rest.method || 'GET').toUpperCase()
   const isStateChanging = !['GET', 'HEAD', 'OPTIONS'].includes(method)
   // State-changing requests need the CSRF token — except the endpoints that
-  // run *before* a session exists (login, 2FA verify). Those are CSRF-
+  // run *before* a session exists (login, MFA verify). Those are CSRF-
   // protected by SameSite=Strict alone; there is no cookie-mounted authed
   // action to protect yet.
   if (isStateChanging && !skipCsrf && csrfToken) {

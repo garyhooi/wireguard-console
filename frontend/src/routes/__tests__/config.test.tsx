@@ -157,6 +157,18 @@ describe('Configuration → Security login lockout', () => {
       if (url.includes('/api/config/security') && method === 'PATCH') {
         return { ok: true, status: 200, json: async () => ({ status: 'updated' }) } as Response
       }
+      if (url.includes('/api/config/mfa') && method === 'GET') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            require_methods: 'any',
+            passkey_available: false,
+            passkey_reason: 'no domain configured',
+            rp_id: '',
+          }),
+        } as Response
+      }
       throw new Error('unexpected fetch: ' + method + ' ' + url)
     })
     vi.stubGlobal('fetch', fetchMock)
@@ -176,8 +188,8 @@ describe('Configuration → Security login lockout', () => {
     fireEvent.change(screen.getByLabelText('Account lockout (seconds)'), { target: { value: '45' } })
     fireEvent.click(screen.getByRole('button', { name: 'Save lockout policy' }))
 
-    // Security changes require a fresh 2FA code.
-    const codeInput = await screen.findByLabelText('Your 6-digit authenticator code')
+    // Security changes require a fresh MFA step-up.
+    const codeInput = await screen.findByLabelText('Authenticator or recovery code')
     fireEvent.change(codeInput, { target: { value: '123456' } })
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
 
@@ -198,11 +210,11 @@ describe('Configuration → Security login lockout', () => {
     })
     await screen.findByText(/Saved — new lockouts use these values/)
 
-    // Invite/claim expiry card: same 2FA gate, values sent with the rest.
+    // Invite/claim expiry card: same MFA gate, values sent with the rest.
     await screen.findByText('Invite & claim link expiry')
     fireEvent.change(screen.getByLabelText('VPN invite link (hours)'), { target: { value: '24' } })
     fireEvent.click(screen.getByRole('button', { name: 'Save link expiry' }))
-    const codeInput2 = await screen.findByLabelText('Your 6-digit authenticator code')
+    const codeInput2 = await screen.findByLabelText('Authenticator or recovery code')
     fireEvent.change(codeInput2, { target: { value: '654321' } })
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
     await waitFor(() => {
@@ -219,3 +231,151 @@ describe('Configuration → Security login lockout', () => {
     await screen.findByText(/Saved — newly issued links use these lifetimes/)
   })
 })
+
+describe('Configuration → Security MFA requirements', () => {
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
+
+  it('shows the current policy and saves a super-admin change with a step-up', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init })
+      const method = (init?.method ?? 'GET').toUpperCase()
+      if (url.includes('/api/config/smtp') && method === 'GET') {
+        return { ok: true, status: 200, json: async () => ({ host: '', configured: false }) } as Response
+      }
+      if (url.includes('/api/admins/me') && method === 'GET') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ role: 'super_admin', passkey_available: true, passkey_count: 1 }),
+        } as Response
+      }
+      if (url.includes('/api/config/step-up') && method === 'GET') {
+        return { ok: true, status: 200, json: async () => ({ step_up_minutes: 0 }) } as Response
+      }
+      if (url.includes('/api/config/security') && method === 'GET') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            login_max_attempts: 3,
+            login_ip_lockout_seconds: 60,
+            login_account_lockout_seconds: 60,
+            vpn_invite_expiry_hours: 72,
+            peer_claim_expiry_hours: 72,
+            admin_invite_expiry_hours: 72,
+          }),
+        } as Response
+      }
+      if (url.includes('/api/config/mfa') && method === 'GET') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            require_methods: 'any',
+            passkey_available: true,
+            passkey_reason: '',
+            rp_id: 'console.example.com',
+          }),
+        } as Response
+      }
+      if (url.includes('/api/config/mfa') && method === 'PATCH') {
+        return { ok: true, status: 200, json: async () => ({ status: 'updated' }) } as Response
+      }
+      throw new Error('unexpected fetch: ' + method + ' ' + url)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderPage()
+    await screen.findByRole('button', { name: 'Email (SMTP)' })
+    fireEvent.click(screen.getByRole('button', { name: 'Security' }))
+    await screen.findByText('MFA requirements')
+    await waitFor(() => expect(screen.queryByText('Loading…')).toBeNull())
+
+    const select = screen.getByLabelText('Required factor(s)') as HTMLSelectElement
+    await waitFor(() => expect(select.value).toBe('any'))
+
+    fireEvent.change(select, { target: { value: 'both' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save MFA policy' }))
+
+    // Strict step-up: the acting super admin must confirm with a code (or a
+    // passkey, when they have one enrolled).
+    const codeInput = await screen.findByLabelText('Authenticator or recovery code')
+    expect(screen.getByRole('button', { name: 'Use passkey' })).toBeTruthy()
+    fireEvent.change(codeInput, { target: { value: '246810' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+
+    await waitFor(() => {
+      const patches = calls.filter(
+        (c) => c.url.includes('/api/config/mfa') && (c.init?.method ?? 'GET').toUpperCase() === 'PATCH',
+      )
+      expect(patches.length).toBe(1)
+      expect(JSON.parse(String(patches[0].init?.body))).toEqual({
+        require_methods: 'both',
+        code: '246810',
+      })
+    })
+    await screen.findByText(/Saved — admins must now sign in with a passkey and an authenticator app/)
+  })
+
+  it('disables passkey-requiring options when the deployment cannot use passkeys', async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      const method = (init?.method ?? 'GET').toUpperCase()
+      if (url.includes('/api/config/smtp') && method === 'GET') {
+        return { ok: true, status: 200, json: async () => ({ host: '', configured: false }) } as Response
+      }
+      if (url.includes('/api/admins/me') && method === 'GET') {
+        return { ok: true, status: 200, json: async () => ({ role: 'super_admin' }) } as Response
+      }
+      if (url.includes('/api/config/step-up') && method === 'GET') {
+        return { ok: true, status: 200, json: async () => ({ step_up_minutes: 0 }) } as Response
+      }
+      if (url.includes('/api/config/security') && method === 'GET') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            login_max_attempts: 3,
+            login_ip_lockout_seconds: 60,
+            login_account_lockout_seconds: 60,
+            vpn_invite_expiry_hours: 72,
+            peer_claim_expiry_hours: 72,
+            admin_invite_expiry_hours: 72,
+          }),
+        } as Response
+      }
+      if (url.includes('/api/config/mfa') && method === 'GET') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            require_methods: 'any',
+            passkey_available: false,
+            passkey_reason: 'This console is served from an IP address',
+            rp_id: '',
+          }),
+        } as Response
+      }
+      throw new Error('unexpected fetch: ' + method + ' ' + url)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderPage()
+    await screen.findByRole('button', { name: 'Email (SMTP)' })
+    fireEvent.click(screen.getByRole('button', { name: 'Security' }))
+    await screen.findByText('MFA requirements')
+    await waitFor(() => expect(screen.queryByText('Loading…')).toBeNull())
+
+    const select = screen.getByLabelText('Required factor(s)') as HTMLSelectElement
+    const passkeyOnly = Array.from(select.options).find((o) => o.value === 'passkey')!
+    const both = Array.from(select.options).find((o) => o.value === 'both')!
+    expect(passkeyOnly.disabled).toBe(true)
+    expect(both.disabled).toBe(true)
+    expect(select.value).toBe('any')
+    await screen.findByText(/Passkey-requiring options are disabled/)
+  })
+})
+

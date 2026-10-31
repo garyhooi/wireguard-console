@@ -181,13 +181,13 @@ func RotateNodeToken(store *Store) http.HandlerFunc {
 		adminID := getAdminID(r)
 
 		// Re-issuing a node token hands out a working agent credential —
-		// require the acting super_admin's own 2FA code first.
+		// require the acting super_admin's own MFA code first.
 		var req stepUpRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
-		if !verifyActor2FA(w, r, ctx, store, adminID, req.Code) {
+		if !verifyActorMFA(w, r, ctx, store, adminID, req.Code) {
 			return
 		}
 
@@ -238,13 +238,13 @@ func DeleteNode(store *Store) http.HandlerFunc {
 		adminID := getAdminID(r)
 
 		// Deleting a node drops its agent access — require the acting
-		// admin's own 2FA code first.
+		// admin's own MFA code first.
 		var req stepUpRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
-		if !verifyActor2FA(w, r, ctx, store, adminID, req.Code) {
+		if !verifyActorMFA(w, r, ctx, store, adminID, req.Code) {
 			return
 		}
 

@@ -36,14 +36,29 @@ func GetMe(store *Store) http.HandlerFunc {
 
 		csrfToken, _ := r.Context().Value(csrfTokenKey{}).(string)
 
+		// The SPA drives /admin/me from this payload (including the MFA panel's
+		// zero-factor banner), so the factor summary travels with the profile.
+		summary, err := loadMFASummary(ctx, store, adminID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to load MFA state")
+			return
+		}
+		requireMethods := loadMFAPolicy(ctx, store)
+
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"id":           adminID.String(),
-			"email":        email,
-			"role":         role,
-			"totp_enabled": totpEnabled,
-			"status":       status,
-			"created_at":   createdAt.UTC().Format(time.RFC3339),
-			"csrf_token":   csrfToken,
+			"id":                       adminID.String(),
+			"email":                    email,
+			"role":                     role,
+			"totp_enabled":             totpEnabled,
+			"status":                   status,
+			"created_at":               createdAt.UTC().Format(time.RFC3339),
+			"csrf_token":               csrfToken,
+			"mfa_enabled":              summary.Enabled,
+			"mfa_methods":              summary.Methods,
+			"passkey_count":            summary.PasskeyCount,
+			"recovery_codes_remaining": summary.RecoveryCodesRemaining,
+			"passkey_available":        summary.PasskeyAvailable,
+			"require_methods":          requireMethods,
 		})
 	}
 }
@@ -97,58 +112,8 @@ func ChangePassword(store *Store) http.HandlerFunc {
 	}
 }
 
-// Disable2FA removes the admin's TOTP enrollment after verifying a code.
-func Disable2FA(store *Store) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Code string `json:"code"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Code == "" {
-			writeError(w, http.StatusBadRequest, "Code is required")
-			return
-		}
-
-		adminID := getAdminID(r)
-		ctx := context.Background()
-
-		var secretEnc string
-		if err := store.pool.QueryRow(ctx,
-			`SELECT totp_secret_encrypted FROM admins WHERE id = $1`, adminID).Scan(&secretEnc); err != nil || secretEnc == "" {
-			writeError(w, http.StatusBadRequest, "2FA is not enabled")
-			return
-		}
-		secret, err := auth.DecryptTOTPSecret(ctx, secretEnc)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to read 2FA secret")
-			return
-		}
-		if !auth.VerifyTOTP(secret, req.Code) {
-			writeError(w, http.StatusUnauthorized, "Invalid 2FA code")
-			return
-		}
-
-		if _, err := store.pool.Exec(ctx, `
-			UPDATE admins SET totp_enabled = false, totp_secret_encrypted = NULL, updated_at = now()
-			WHERE id = $1
-		`, adminID); err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to disable 2FA")
-			return
-		}
-
-		// 2FA removal is a credential downgrade: kill every other session so
-		// sessions minted under the stronger policy don't outlive it. The
-		// acting session survives.
-		if err := revokeAdminSessionsExcept(ctx, store, adminID, currentSessionTokenHash(r)); err != nil {
-			log.Printf("Failed to revoke other sessions after 2FA disable: admin_id=%s, err=%v", adminID, err)
-		}
-
-		logAudit(ctx, store, adminID, "admin.2fa_disable", "admin", adminID.String(), nil)
-		writeJSON(w, http.StatusOK, map[string]string{"status": "disabled"})
-	}
-}
-
 // ListMySessions returns the signed-in admin's live sessions (Profile →
-// Active Sessions), each flagged is_current / is_pending_2fa.
+// Active Sessions), each flagged is_current / is_pending_mfa.
 func ListMySessions(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		adminID := getAdminID(r)
@@ -167,7 +132,7 @@ func ListMySessions(store *Store) http.HandlerFunc {
 // RevokeMySession terminates one of the signed-in admin's own sessions.
 // The acting session may not revoke itself through this endpoint (that is
 // what logout is for); trying to revoke the current session returns 400.
-// Revoking a pending-2FA login attempt is allowed — it aborts that sign-in.
+// Revoking a pending-MFA login attempt is allowed — it aborts that sign-in.
 func RevokeMySession(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sessionID, err := parseUUID(r.PathValue("id"))

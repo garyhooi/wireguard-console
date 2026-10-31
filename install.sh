@@ -306,6 +306,9 @@ CALLER_APP_VERSION="${APP_VERSION:-}"
 # snapshotted before any `source .env`, so they win over the stored values.
 CALLER_CONSOLE_DOMAIN="${CONSOLE_DOMAIN:-}"
 CALLER_WGCONSOLE_TLS="${WGCONSOLE_TLS:-}"
+# Set when section 8 actually changes the console address (passkeys are bound
+# to the WebAuthn RP ID, i.e. the console hostname, and stop working on a change).
+DOMAIN_CHANGED=false
 
 # ---------------------------------------------------------------------------
 # 7b. Fresh-database detection.
@@ -362,6 +365,7 @@ if [[ "${UPGRADE}" == true ]] \
   if [[ -n "${NEW_CONSOLE_DOMAIN}" && "${NEW_CONSOLE_DOMAIN}" != "${OLD_CONSOLE_DOMAIN}" ]]; then
     info "Console domain override: ${OLD_CONSOLE_DOMAIN} -> ${NEW_CONSOLE_DOMAIN}"
     CONSOLE_DOMAIN="${NEW_CONSOLE_DOMAIN}"
+    DOMAIN_CHANGED=true
     sed -i "s|^CONSOLE_DOMAIN=.*|CONSOLE_DOMAIN=${CONSOLE_DOMAIN}|" .env
     # Keep the WireGuard endpoint following the console hostname when it used
     # to be derived from it; a custom endpoint is left untouched.
@@ -581,7 +585,7 @@ EOF
     Password: ${FIRST_ADMIN_PASSWORD}
 
     Log in at https://${CONSOLE_DOMAIN} after the stack starts, then
-    change this password in Profile and enroll 2FA immediately.
+    change this password in Profile and set up MFA (passkey or authenticator app).
     (Recovery: the same values are in ${INSTALL_DIR}/.env as
     ADMIN_EMAIL / ADMIN_PASSWORD.)
 ==================================================================
@@ -720,7 +724,7 @@ if [[ "${FRESH_DB}" == true ]]; then
     Password: ${FIRST_ADMIN_PASSWORD}
 
    Log in at the console URL above, then change this password in Profile
-   and enroll 2FA immediately. This is the only time these credentials
+   and set up MFA (passkey or authenticator app). This is the only time these credentials
    are shown."
 else
   FIRST_ADMIN_BLOCK=" Existing install updated — admins and data are kept."
@@ -765,6 +769,22 @@ fi
 APP_VERSION_SHOWN="$(grep '^APP_VERSION=' .env | cut -d= -f2- || true)"
 APP_VERSION_SHOWN="${APP_VERSION_SHOWN:-${APP_VERSION:-dev}}"
 
+# Passkey capability is derived from the console address: WebAuthn needs a
+# domain, because an IP literal can never be a relying-party ID. Surface it in
+# the summary so the operator knows whether "Set up MFA" will offer a passkey.
+if [[ "${DOMAIN_SHOWN}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+  PASSKEY_NOTE=" Passkeys:     unavailable in IP-only mode (authenticator-app MFA is used)"
+else
+  PASSKEY_NOTE=" Passkeys:     enabled (WebAuthn RP ID: ${DOMAIN_SHOWN})"
+fi
+PASSKEY_WARN=""
+if [[ "${DOMAIN_CHANGED:-false}" == true ]]; then
+  PASSKEY_WARN=" ⚠  The console address changed. Passkeys are bound to the domain they were
+   registered under; passkeys created for the previous address stop working and
+   affected admins must re-enroll. Authenticator-app MFA and recovery codes
+   keep working."
+fi
+
 
 # ---------------------------------------------------------------------------
 # 10c. TLS / proxy sanity check (warn only - never changes the configuration).
@@ -806,6 +826,7 @@ cat <<SUMMARY
    Console:      https://${DOMAIN_SHOWN}
    Version:      ${APP_VERSION_SHOWN}
    TLS mode:     ${TLS_MODE_SHOWN} (domain = Caddy HTTPS on :443; internal = self-signed; external-proxy = Cloudflare Flexible, plain HTTP)
+${PASSKEY_NOTE}
    Install dir:  ${INSTALL_DIR}
    Logs:         docker compose -f ${INSTALL_DIR}/docker-compose.yml logs -f
    Re-run this script any time to update.
@@ -814,7 +835,8 @@ cat <<SUMMARY
      sudo WGCONSOLE_TLS=domain|external-proxy bash install.sh
 
 ${REACH_NOTE}
-
+${PASSKEY_WARN:+$PASSKEY_WARN
+}
 ${FIRST_ADMIN_BLOCK}
  Re-running the installer later updates the stack without touching your
  admins or data (only a wiped database volume re-creates the super_admin).

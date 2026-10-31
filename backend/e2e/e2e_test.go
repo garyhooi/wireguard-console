@@ -452,7 +452,9 @@ func api(t *testing.T, method, path string, a authn, body interface{}) (*http.Re
 }
 
 // login signs in as an admin and returns an *actor holding the session cookie
-// + CSRF token. Logging in again on the same actor replaces its session.
+// + CSRF token. A correct password never mints a session: the helper completes
+// the pending MFA step (mandatory TOTP enrollment for a fresh account, or the
+// actor's known TOTP secret for an already-enrolled one).
 func login(t *testing.T, email, password string) *actor {
 	t.Helper()
 	return loginAs(t, newActor(), email, password)
@@ -466,109 +468,120 @@ func loginAs(t *testing.T, act *actor, email, password string) *actor {
 		"email": email, "password": password,
 	})
 	expectStatus(t, resp, 200, "/api/auth/login")
-	// Admins without TOTP must enroll before a session is issued.
-	if setupPending, _ := out["pending_2fa_setup"].(bool); setupPending {
-		act.completeForcedSetup(t)
-		return act
-	}
-	csrf, _ := out["csrf_token"].(string)
-	if csrf == "" {
-		t.Fatal("login returned no csrf_token")
-	}
-	act.csrf = csrf
-	sc, ok := act.jar["wgc_session"]
-	if !ok || sc.HttpOnly != true || sc.SameSite != http.SameSiteStrictMode {
-		t.Fatalf("wgc_session cookie not HttpOnly/SameSite=Strict: %+v", sc)
-	}
+	act.finishPasswordStep(t, out)
 	return act
 }
 
-// completeForcedSetup finishes mandatory 2FA enrollment for a login that
-// returned pending_2fa_setup: generate a secret, prove the first code, and
-// keep the real session cookie the enable step mints.
-func (c *actor) completeForcedSetup(t *testing.T) {
+// finishPasswordStep drives the pending MFA state returned by POST /login to a
+// real session. It is the one helper that knows both pending kinds.
+func (c *actor) finishPasswordStep(t *testing.T, out map[string]interface{}) {
 	t.Helper()
-	resp, setupOut := c.do(t, "POST", "/api/auth/2fa/setup-pending", "", nil)
-	expectStatus(t, resp, 200, "POST /api/auth/2fa/setup-pending")
-	secret, _ := setupOut["secret"].(string)
-	if secret == "" {
-		t.Fatal("forced 2fa setup returned no secret")
+	if setupPending, _ := out["pending_mfa_setup"].(bool); setupPending {
+		c.completeForcedEnrollment(t)
+		return
 	}
-	code, err := totp.GenerateCode(secret, time.Now())
-	if err != nil {
-		t.Fatalf("generate totp: %v", err)
+	if pending, _ := out["pending_mfa"].(bool); pending {
+		if c.totpSecret == "" {
+			t.Fatal("login requires an MFA factor but this actor has no TOTP secret")
+		}
+		resp, verifyOut := c.do(t, "POST", "/api/auth/mfa/totp", "", map[string]string{
+			"code": currentTOTPCode(t, c.totpSecret),
+		})
+		expectStatus(t, resp, 200, "POST /api/auth/mfa/totp")
+		c.adoptSession(t, verifyOut)
+		return
 	}
-	resp, enableOut := c.do(t, "POST", "/api/auth/2fa/enable-pending", "", map[string]string{
-		"secret": secret, "code": code,
-	})
-	expectStatus(t, resp, 200, "POST /api/auth/2fa/enable-pending")
-	csrf, _ := enableOut["csrf_token"].(string)
+	t.Fatalf("login returned neither pending_mfa nor pending_mfa_setup: %v", out)
+}
+
+// adoptSession keeps the CSRF token a factor step returned and asserts the
+// real session cookie is present (HttpOnly + SameSite=Strict).
+func (c *actor) adoptSession(t *testing.T, out map[string]interface{}) {
+	t.Helper()
+	csrf, _ := out["csrf_token"].(string)
 	if csrf == "" {
-		t.Fatal("forced 2fa enable returned no csrf_token")
-	}
-	if _, has := c.jar["wgc_session"]; !has {
-		t.Fatal("wgc_session cookie missing after forced 2fa enrollment")
+		t.Fatal("MFA factor step returned no csrf_token")
 	}
 	c.csrf = csrf
+	sc, ok := c.jar["wgc_session"]
+	if !ok || sc.HttpOnly != true || sc.SameSite != http.SameSiteStrictMode {
+		t.Fatalf("wgc_session cookie not HttpOnly/SameSite=Strict: %+v", sc)
+	}
+}
+
+// completeForcedEnrollment finishes mandatory enrollment for a login that
+// returned pending_mfa_setup: generate a TOTP secret server-side, prove the
+// first code, then complete enrollment (which mints the real session).
+func (c *actor) completeForcedEnrollment(t *testing.T) {
+	t.Helper()
+	resp, beginOut := c.do(t, "POST", "/api/auth/mfa/enroll/totp/begin", "", nil)
+	expectStatus(t, resp, 200, "POST /api/auth/mfa/enroll/totp/begin")
+	secret, _ := beginOut["secret"].(string)
+	if secret == "" {
+		t.Fatal("forced MFA enrollment returned no secret")
+	}
+	resp, _ = c.do(t, "POST", "/api/auth/mfa/enroll/totp/finish", "", map[string]string{
+		"code": currentTOTPCode(t, secret),
+	})
+	expectStatus(t, resp, 200, "POST /api/auth/mfa/enroll/totp/finish")
+	if _, has := c.jar["wgc_session"]; has {
+		t.Fatal("enroll/totp/finish must not mint a session")
+	}
+	resp, completeOut := c.do(t, "POST", "/api/auth/mfa/enroll/complete", "", nil)
+	expectStatus(t, resp, 200, "POST /api/auth/mfa/enroll/complete")
+	if codes, _ := completeOut["recovery_codes"].([]interface{}); len(codes) != 10 {
+		t.Fatalf("expected 10 recovery codes, got %d", len(codes))
+	}
+	c.adoptSession(t, completeOut)
 	c.totpSecret = secret
 }
 
-// loginAs2FA logs an account in when 2FA is enabled: the password step
-// returns a pending session, which the caller completes with their TOTP code.
-func loginAs2FA(t *testing.T, act *actor, email, password, secret string) *actor {
+// loginAsMFA logs an account in when a factor is already enrolled: the password
+// step returns a pending session, completed with the supplied TOTP secret.
+func loginAsMFA(t *testing.T, act *actor, email, password, secret string) *actor {
 	t.Helper()
 	resp, out := api(t, "POST", "/api/auth/login", act, map[string]string{
 		"email": email, "password": password,
 	})
-	expectStatus(t, resp, 200, "/api/auth/login (2FA pending)")
-	if pending, _ := out["pending_2fa"].(bool); !pending {
-		t.Fatal("expected pending_2fa=true for a 2FA-enabled admin")
+	expectStatus(t, resp, 200, "/api/auth/login (MFA pending)")
+	if pending, _ := out["pending_mfa"].(bool); !pending {
+		t.Fatal("expected pending_mfa=true for an MFA-enabled admin")
 	}
-	resp, verifyOut := act.do(t, "POST", "/api/auth/2fa/verify", "", map[string]string{
-		"code": current2FACode(t, secret),
+	resp, verifyOut := act.do(t, "POST", "/api/auth/mfa/totp", "", map[string]string{
+		"code": currentTOTPCode(t, secret),
 	})
-	expectStatus(t, resp, 200, "/api/auth/2fa/verify")
-	csrf, _ := verifyOut["csrf_token"].(string)
-	if csrf == "" {
-		t.Fatal("2fa verify returned no csrf_token")
-	}
-	act.csrf = csrf
-	if _, has := act.jar["wgc_session"]; !has {
-		t.Fatal("wgc_session cookie missing after 2fa verify")
-	}
+	expectStatus(t, resp, 200, "POST /api/auth/mfa/totp")
+	act.adoptSession(t, verifyOut)
+	act.totpSecret = secret
 	return act
 }
 
-// enable2FAFor enrolls 2FA on the actor's session and returns the TOTP
-// secret so the test can mint codes for step-up checks.
-func enable2FAFor(t *testing.T, a authn) string {
+// enableTOTPFor ensures the actor has TOTP enrolled and returns the secret: a
+// login that went through mandatory enrollment already knows it; otherwise the
+// authed Profile "add authenticator" flow is used.
+func enableTOTPFor(t *testing.T, a authn) string {
 	t.Helper()
-	// A login that went through mandatory enrollment already knows its secret.
 	if act, ok := actorFrom(a); ok && act.totpSecret != "" {
 		return act.totpSecret
 	}
-	resp, setupOut := api(t, "POST", "/api/auth/2fa/setup", a, nil)
-	expectStatus(t, resp, 200, "POST /api/auth/2fa/setup")
-	secret, _ := setupOut["secret"].(string)
+	resp, beginOut := api(t, "POST", "/api/admins/me/mfa/totp/begin", a, map[string]string{"code": ""})
+	expectStatus(t, resp, 200, "POST /api/admins/me/mfa/totp/begin")
+	secret, _ := beginOut["secret"].(string)
 	if secret == "" {
-		t.Fatal("2fa setup returned no secret")
+		t.Fatal("add-TOTP begin returned no secret")
 	}
-	code, err := totp.GenerateCode(secret, time.Now())
-	if err != nil {
-		t.Fatalf("generate totp: %v", err)
-	}
-	resp, enableOut := api(t, "POST", "/api/auth/2fa/enable", a, map[string]string{
-		"secret": secret, "code": code,
+	resp, _ = api(t, "POST", "/api/admins/me/mfa/totp/finish", a, map[string]string{
+		"code": currentTOTPCode(t, secret),
 	})
-	expectStatus(t, resp, 200, "POST /api/auth/2fa/enable")
-	if codes, _ := enableOut["backup_codes"].([]interface{}); len(codes) != 10 {
-		t.Fatalf("expected 10 backup codes, got %d", len(codes))
+	expectStatus(t, resp, 200, "POST /api/admins/me/mfa/totp/finish")
+	if act, ok := actorFrom(a); ok {
+		act.totpSecret = secret
 	}
 	return secret
 }
 
-// current2FACode returns a valid TOTP code for the secret at this instant.
-func current2FACode(t *testing.T, secret string) string {
+// currentTOTPCode returns a valid TOTP code for the secret at this instant.
+func currentTOTPCode(t *testing.T, secret string) string {
 	t.Helper()
 	code, err := totp.GenerateCode(secret, time.Now())
 	if err != nil {
@@ -591,12 +604,12 @@ func TestEndToEnd(t *testing.T) {
 	// Login
 	token := login(t, "e2e@console.test", "e2e-Passw0rd!")
 
-	// 2FA enrollment (step-up model): enroll once up-front so every
+	// MFA enrollment (step-up model): enroll once up-front so every
 	// privileged action below (server edit/delete/host-config, node
 	// delete/rotate) can carry a valid actor code. Mirrors production
-	// policy: super_admins must have 2FA enabled for sensitive actions.
-	actorSecret := enable2FAFor(t, token)
-	actorCode := func() string { return current2FACode(t, actorSecret) }
+	// policy: super_admins must have MFA enabled for sensitive actions.
+	actorSecret := enableTOTPFor(t, token)
+	actorCode := func() string { return currentTOTPCode(t, actorSecret) }
 
 	// Server create -> auto keygen -> list scan (cidr regression)
 	resp, _ := api(t, "POST", "/api/servers", token, map[string]interface{}{
@@ -670,18 +683,18 @@ func TestEndToEnd(t *testing.T) {
 	})
 	expectStatus(t, resp, 200, "PATCH /api/servers/{id}")
 
-	// Server edit without the actor's 2FA code is refused.
+	// Server edit without the actor's MFA code is refused.
 	resp, _ = api(t, "PATCH", "/api/servers/"+serverID, token, map[string]interface{}{
-		"name": "No-2FA", "public_endpoint": "203.0.113.9:51821", "listen_port": 51821,
+		"name": "No-MFA", "public_endpoint": "203.0.113.9:51821", "listen_port": 51821,
 		"network_cidr": "10.9.0.0/24", "dns_servers": []string{"1.1.1.1"},
 		"default_allowed_ips": "0.0.0.0/0", "mtu": 1420, "persistent_keepalive": 25,
 	})
-	expectStatus(t, resp, 400, "PATCH /api/servers/{id} without 2FA code")
+	expectStatus(t, resp, 400, "PATCH /api/servers/{id} without MFA code")
 
 	// Host setup (reveals the server's private key) now requires POST + the
-	// actor's 2FA code. Refused without a code, served with one.
+	// actor's MFA code. Refused without a code, served with one.
 	resp, _ = api(t, "POST", "/api/servers/"+serverID+"/host-config", token, nil)
-	expectStatus(t, resp, 400, "POST /api/servers/{id}/host-config without 2FA code")
+	expectStatus(t, resp, 400, "POST /api/servers/{id}/host-config without MFA code")
 	hostCfgResp := rawPost(t, baseURL+"/api/servers/"+serverID+"/host-config", token, map[string]string{
 		"code": actorCode(),
 	})
@@ -991,6 +1004,67 @@ func TestEndToEnd(t *testing.T) {
 	if email, _ := meOut["email"].(string); email != "e2e@console.test" {
 		t.Fatalf("me.email = %q", email)
 	}
+
+	// ---- MFA self-service (Profile -> MFA) ----
+	// The profile payload and the dedicated MFA status endpoint agree.
+	if enabled, _ := meOut["mfa_enabled"].(bool); !enabled {
+		t.Fatal("GET /api/admins/me: mfa_enabled should be true")
+	}
+	resp, mfaStatus := api(t, "GET", "/api/admins/me/mfa", token, nil)
+	expectStatus(t, resp, 200, "GET /api/admins/me/mfa")
+	if totp, _ := mfaStatus["totp_enabled"].(bool); !totp {
+		t.Fatal("GET /api/admins/me/mfa: totp_enabled should be true")
+	}
+	if methods, _ := mfaStatus["methods"].([]interface{}); len(methods) == 0 {
+		t.Fatal("GET /api/admins/me/mfa: methods must not be empty")
+	}
+	if factors, _ := mfaStatus["factors"].([]interface{}); len(factors) == 0 {
+		t.Fatal("GET /api/admins/me/mfa: factors must list the authenticator app")
+	}
+
+	// Adding a second authenticator app is refused (one TOTP per account).
+	addDupResp, _ := api(t, "POST", "/api/admins/me/mfa/totp/begin", token, map[string]string{"code": actorCode()})
+	expectStatus(t, addDupResp, 400, "POST /api/admins/me/mfa/totp/begin (already enabled)")
+
+	// The last remaining factor cannot be removed.
+	lastFactorResp, lastFactorOut := api(t, "POST", "/api/admins/me/mfa/totp/remove", token, map[string]string{"code": actorCode()})
+	expectStatus(t, lastFactorResp, 409, "POST /api/admins/me/mfa/totp/remove (last factor)")
+	if code, _ := lastFactorOut["code"].(string); code != "mfa_last_factor" {
+		t.Fatalf("last-factor code = %q, want mfa_last_factor", code)
+	}
+
+	// Recovery codes can be regenerated only with a fresh step-up proof.
+	noCodeRegen, _ := api(t, "POST", "/api/admins/me/mfa/recovery-codes/regenerate", token, map[string]string{})
+	expectStatus(t, noCodeRegen, 400, "POST recovery-codes/regenerate (no code)")
+	regenResp, regenOut := api(t, "POST", "/api/admins/me/mfa/recovery-codes/regenerate", token, map[string]string{"code": actorCode()})
+	expectStatus(t, regenResp, 200, "POST /api/admins/me/mfa/recovery-codes/regenerate")
+	regenerated, _ := regenOut["recovery_codes"].([]interface{})
+	if len(regenerated) != 10 {
+		t.Fatalf("regenerated %d recovery codes, want 10", len(regenerated))
+	}
+	for _, raw := range regenerated {
+		code, _ := raw.(string)
+		if len(code) != 12 {
+			t.Fatalf("recovery code %q has length %d, want 12", code, len(code))
+		}
+	}
+
+	// ---- Organization MFA policy (Configuration -> Security) ----
+	resp, policyOut := api(t, "GET", "/api/config/mfa", token, nil)
+	expectStatus(t, resp, 200, "GET /api/config/mfa")
+	if policy, _ := policyOut["require_methods"].(string); policy != "any" {
+		t.Fatalf("default require_methods = %q, want any", policy)
+	}
+	badPolicyResp, _ := api(t, "PATCH", "/api/config/mfa", token, map[string]interface{}{"require_methods": "nonsense", "code": actorCode()})
+	expectStatus(t, badPolicyResp, 400, "PATCH /api/config/mfa (invalid value)")
+	setPolicyResp, _ := api(t, "PATCH", "/api/config/mfa", token, map[string]interface{}{"require_methods": "totp", "code": actorCode()})
+	expectStatus(t, setPolicyResp, 200, "PATCH /api/config/mfa (require totp)")
+	_, policyOut = api(t, "GET", "/api/config/mfa", token, nil)
+	if policy, _ := policyOut["require_methods"].(string); policy != "totp" {
+		t.Fatalf("require_methods after PATCH = %q, want totp", policy)
+	}
+	resetPolicyResp, _ := api(t, "PATCH", "/api/config/mfa", token, map[string]interface{}{"require_methods": "any", "code": actorCode()})
+	expectStatus(t, resetPolicyResp, 200, "PATCH /api/config/mfa (restore any)")
 	resp, _ = api(t, "POST", "/api/admins/me/password", token, map[string]string{
 		"current_password": "wrong", "new_password": "e2e-NewPassw0rd!",
 	})
@@ -1003,9 +1077,9 @@ func TestEndToEnd(t *testing.T) {
 		"email": "e2e@console.test", "password": "e2e-Passw0rd!",
 	})
 	expectStatus(t, resp, 401, "old password rejected after change")
-	// The actor has 2FA enrolled, so the re-login completes the pending
+	// The actor has MFA enrolled, so the re-login completes the pending
 	// session with a fresh TOTP code.
-	token = loginAs2FA(t, newActor(), "e2e@console.test", "e2e-NewPassw0rd!", actorSecret)
+	token = loginAsMFA(t, newActor(), "e2e@console.test", "e2e-NewPassw0rd!", actorSecret)
 
 	// ---- Claim: invite link end-to-end ----
 	// (fresh invite so the token is one-time and unused)
@@ -1120,7 +1194,7 @@ func TestEndToEnd(t *testing.T) {
 	if pw, _ := resetOut["password"].(string); len(pw) < 8 {
 		t.Fatal("reset password not returned")
 	}
-	// Without a valid 2FA code the reset must be refused.
+	// Without a valid MFA code the reset must be refused.
 	denyReset, _ := api(t, "POST", "/api/admins/"+op2ID+"/reset-password", token, map[string]string{
 		"code": "000000",
 	})
@@ -1189,17 +1263,17 @@ func TestEndToEnd(t *testing.T) {
 	})
 	expectStatus(t, restoreResp, 200, "PATCH /api/admins/{id} (self email restore)")
 
-	// ---- Admins: super_admin resets another admin's 2FA ----
-	// Enable 2FA on op2 first, then verify the actor can clear it with their
+	// ---- Admins: super_admin resets another admin's MFA ----
+	// Enable MFA on op2 first, then verify the actor can clear it with their
 	// own code (and that a bad code is refused).
 	op2pw, _ := resetOut["password"].(string)
 	op2Tok := login(t, "op2-renamed@console.test", op2pw)
-	op2Secret := enable2FAFor(t, op2Tok)
+	op2Secret := enableTOTPFor(t, op2Tok)
 	_ = op2Secret // enrollment itself proves the flow; reset uses the actor
 
-	// ---- Login with 2FA enabled (regression, cookie transport) ----
-	// op2 now has 2FA on. A FRESH login must set the pending_2fa cookie
-	// (wgc_pending2fa) that Verify2FA can resolve — Login persists it in
+	// ---- Login with MFA enabled (regression, cookie transport) ----
+	// op2 now has MFA on. A FRESH login must set the pending_mfa cookie
+	// (wgc_mfa_pending) that VerifyMFA can resolve — Login persists it in
 	// admin_sessions with a short expiry. Before the original fix the
 	// pending token was never stored, so verification always answered
 	// "Invalid or expired token".
@@ -1207,37 +1281,37 @@ func TestEndToEnd(t *testing.T) {
 	loginResp, loginOut := op2Login.do(t, "POST", "/api/auth/login", "", map[string]string{
 		"email": "op2-renamed@console.test", "password": op2pw,
 	})
-	expectStatus(t, loginResp, 200, "POST /api/auth/login (2FA pending)")
-	if pending, _ := loginOut["pending_2fa"].(bool); !pending {
-		t.Fatal("expected pending_2fa=true on login for a 2FA-enabled admin")
+	expectStatus(t, loginResp, 200, "POST /api/auth/login (MFA pending)")
+	if pending, _ := loginOut["pending_mfa"].(bool); !pending {
+		t.Fatal("expected pending_mfa=true on login for a MFA-enabled admin")
 	}
-	if _, has := op2Login.jar["wgc_pending2fa"]; !has {
-		t.Fatal("login with 2FA did not set the pending cookie")
+	if _, has := op2Login.jar["wgc_mfa_pending"]; !has {
+		t.Fatal("login with MFA did not set the pending cookie")
 	}
 
 	// Wrong code: 400, and the pending cookie survives for a retry.
-	badCodeResp, _ := op2Login.do(t, "POST", "/api/auth/2fa/verify", "", map[string]string{
+	badCodeResp, _ := op2Login.do(t, "POST", "/api/auth/mfa/totp", "", map[string]string{
 		"code": "000000",
 	})
-	expectStatus(t, badCodeResp, 400, "POST /api/auth/2fa/verify (wrong code)")
+	expectStatus(t, badCodeResp, 400, "POST /api/auth/mfa/totp (wrong code)")
 
 	// Correct code: swaps the pending cookie for the real session cookie.
-	goodResp, verifyOut := op2Login.do(t, "POST", "/api/auth/2fa/verify", "", map[string]string{
-		"code": current2FACode(t, op2Secret),
+	goodResp, verifyOut := op2Login.do(t, "POST", "/api/auth/mfa/totp", "", map[string]string{
+		"code": currentTOTPCode(t, op2Secret),
 	})
-	expectStatus(t, goodResp, 200, "POST /api/auth/2fa/verify (valid code)")
+	expectStatus(t, goodResp, 200, "POST /api/auth/mfa/totp (valid code)")
 	csrf2, _ := verifyOut["csrf_token"].(string)
 	if csrf2 == "" {
-		t.Fatal("2fa verify returned no csrf_token")
+		t.Fatal("mfa verify returned no csrf_token")
 	}
 	if _, has := op2Login.jar["wgc_session"]; !has {
-		t.Fatal("session cookie missing after 2fa verify")
+		t.Fatal("session cookie missing after mfa verify")
 	}
 	meResp, _ := op2Login.do(t, "GET", "/api/admins/me", "", nil)
-	expectStatus(t, meResp, 200, "GET /api/admins/me (post-2FA session)")
+	expectStatus(t, meResp, 200, "GET /api/admins/me (post-MFA session)")
 
 	// Rotate-token is super_admin-only: a plain admin must be refused. The
-	// 2FA verify above returned the session's csrf2, so the call reaches the
+	// MFA verify above returned the session's csrf2, so the call reaches the
 	// role gate (not a CSRF rejection).
 	rot403, _ := op2Login.do(t, "POST", "/api/nodes/"+nodeID+"/rotate-token", csrf2, nil)
 	if rot403.StatusCode != 403 {
@@ -1246,22 +1320,22 @@ func TestEndToEnd(t *testing.T) {
 
 	// The pending token is single-use: a second verify must fail. The
 	// pending cookie was cleared, so verify answers 401.
-	tfaReuseResp, _ := op2Login.do(t, "POST", "/api/auth/2fa/verify", "", map[string]string{
-		"code": current2FACode(t, op2Secret),
+	mfaReuseResp, _ := op2Login.do(t, "POST", "/api/auth/mfa/totp", "", map[string]string{
+		"code": currentTOTPCode(t, op2Secret),
 	})
-	expectStatus(t, tfaReuseResp, 401, "POST /api/auth/2fa/verify (pending token reused)")
+	expectStatus(t, mfaReuseResp, 401, "POST /api/auth/mfa/totp (pending token reused)")
 
-	// op2 now has 2FA; the e2e super_admin (actor) resets it.
-	resp, _ = api(t, "POST", "/api/admins/"+op2ID+"/reset-2fa", token, map[string]string{
+	// op2 now has MFA; the e2e super_admin (actor) resets it.
+	resp, _ = api(t, "POST", "/api/admins/"+op2ID+"/reset-mfa", token, map[string]string{
 		"code": actorCode(),
 	})
-	expectStatus(t, resp, 200, "POST /api/admins/{id}/reset-2fa (actor code)")
+	expectStatus(t, resp, 200, "POST /api/admins/{id}/reset-mfa (actor code)")
 	// A bad actor code must be refused.
-	badReset2FA, _ := api(t, "POST", "/api/admins/"+op2ID+"/reset-2fa", token, map[string]string{
+	badResetMFA, _ := api(t, "POST", "/api/admins/"+op2ID+"/reset-mfa", token, map[string]string{
 		"code": "111111",
 	})
-	expectStatus(t, badReset2FA, 401, "POST /api/admins/{id}/reset-2fa (bad actor code)")
-	// op2's 2FA is now cleared.
+	expectStatus(t, badResetMFA, 401, "POST /api/admins/{id}/reset-mfa (bad actor code)")
+	// op2's MFA is now cleared.
 	var op2Enabled bool
 	{
 		poolX, _ := pgxpool.New(context.Background(), dbURL)
@@ -1270,10 +1344,18 @@ func TestEndToEnd(t *testing.T) {
 			`SELECT totp_enabled FROM admins WHERE id = $1`, op2ID).Scan(&op2Enabled)
 	}
 	if op2Enabled {
-		t.Fatal("op2 2FA still enabled after reset")
+		t.Fatal("op2 MFA still enabled after reset")
 	}
 
-	// ---- 2FA step-up grace window ----
+	// Resetting MFA revokes the target's sessions: the old cookie is dead and
+	// the target must sign in again (and re-enroll).
+	afterReset, _ := op2Login.do(t, "GET", "/api/admins/me", "", nil)
+	expectStatus(t, afterReset, 401, "GET /api/admins/me after reset-mfa (session revoked)")
+	// Re-login op2 for the rest of the suite: the reset cleared every factor,
+	// so this login completes forced enrollment again.
+	op2Tok = loginAs(t, newActor(), "op2-renamed@console.test", op2pw)
+
+	// ---- MFA step-up grace window ----
 	// Configuration → Security: after one successful step-up check the same
 	// session is trusted for N minutes (no re-code). Default 0 = ask always.
 	resp, stepOut := api(t, "GET", "/api/config/step-up", token, nil)
@@ -1976,13 +2058,13 @@ func TestEndToEnd(t *testing.T) {
 	})
 	expectStatus(t, denySec, 403, "PATCH /api/config/security (admin denied)")
 
-	// Security-policy changes require a fresh 2FA code (strict: a step-up
+	// Security-policy changes require a fresh MFA code (strict: a step-up
 	// grace window never waives it).
 	noCodeSec, _ := api(t, "PATCH", "/api/config/security", token, map[string]interface{}{
 		"login_max_attempts": 3, "login_ip_lockout_seconds": 60, "login_account_lockout_seconds": 60,
 		"vpn_invite_expiry_hours": 72, "peer_claim_expiry_hours": 72, "admin_invite_expiry_hours": 72,
 	})
-	expectStatus(t, noCodeSec, 400, "PATCH /api/config/security (no 2FA code)")
+	expectStatus(t, noCodeSec, 400, "PATCH /api/config/security (no MFA code)")
 
 	saveSec, _ := api(t, "PATCH", "/api/config/security", token, map[string]interface{}{
 		"login_max_attempts": 4, "login_ip_lockout_seconds": 30, "login_account_lockout_seconds": 45,
@@ -2166,11 +2248,11 @@ func TestEndToEnd(t *testing.T) {
 		"code": actorCode(),
 	})
 	expectStatus(t, resp, 200, "DELETE /api/servers/{id}")
-	// Deleting a server without the actor's 2FA code is refused.
+	// Deleting a server without the actor's MFA code is refused.
 	resp, _ = api(t, "DELETE", "/api/servers/"+serverID, token, nil)
-	expectStatus(t, resp, 400, "DELETE /api/servers/{id} without 2FA code")
+	expectStatus(t, resp, 400, "DELETE /api/servers/{id} without MFA code")
 
-	// ---- Backups: create / download / restore require the actor's 2FA ----
+	// ---- Backups: create / download / restore require the actor's MFA ----
 	// Create a backup (no gate — making one is safe), then list it.
 	createResp, _ := api(t, "POST", "/api/backup/create", token, nil)
 	expectStatus(t, createResp, 200, "POST /api/backup/create")
@@ -2249,8 +2331,8 @@ type actor struct {
 	client *http.Client
 	jar    map[string]*http.Cookie
 	csrf   string
-	// totpSecret is set when the login path completed mandatory 2FA
-	// enrollment (pending_2fa_setup), so later step-up checks can mint codes.
+	// totpSecret is set when the login path completed mandatory MFA
+	// enrollment (pending_mfa_setup), so later step-up checks can mint codes.
 	totpSecret string
 }
 
@@ -2324,28 +2406,31 @@ func (c *actor) login(t *testing.T, email, password string) string {
 }
 
 // loginFrom logs in with an explicit client IP so the per-IP rate limiter
-// bucket is separate from other suites' buckets. The session CSRF token is
-// stored on the actor.
+// bucket is separate from other suites' buckets. The pending MFA state returned
+// by the password step is completed here (forced enrollment or TOTP verify).
 func (c *actor) loginFrom(t *testing.T, fromIP, email, password string) string {
 	t.Helper()
 	resp, out := c.doFrom(t, fromIP, "POST", "/api/auth/login", "", map[string]string{
 		"email": email, "password": password,
 	})
 	expectStatus(t, resp, 200, "cookie login")
-	if setupPending, _ := out["pending_2fa_setup"].(bool); setupPending {
-		c.completeForcedSetup(t)
+	if setupPending, _ := out["pending_mfa_setup"].(bool); setupPending {
+		c.completeForcedEnrollment(t)
 		return c.csrf
 	}
-	csrf, _ := out["csrf_token"].(string)
-	if csrf == "" {
-		t.Fatal("cookie login returned no csrf_token")
+	if pending, _ := out["pending_mfa"].(bool); pending {
+		if c.totpSecret == "" {
+			t.Fatal("login requires an MFA factor but this actor has no TOTP secret")
+		}
+		vresp, vout := c.doFrom(t, fromIP, "POST", "/api/auth/mfa/totp", "", map[string]string{
+			"code": currentTOTPCode(t, c.totpSecret),
+		})
+		expectStatus(t, vresp, 200, "cookie login MFA verify")
+		c.adoptSession(t, vout)
+		return c.csrf
 	}
-	sc, ok := c.jar["wgc_session"]
-	if !ok || sc.HttpOnly != true || sc.SameSite != http.SameSiteStrictMode {
-		t.Fatalf("wgc_session cookie not HttpOnly/SameSite=Strict: %+v", sc)
-	}
-	c.csrf = csrf
-	return csrf
+	t.Fatalf("cookie login returned neither pending_mfa nor pending_mfa_setup: %v", out)
+	return ""
 }
 
 // TestCookieSessionAuth is the primary-transport contract: the session is an
@@ -2395,9 +2480,9 @@ func TestCookieSessionAuth(t *testing.T) {
 	// die when the password changes from the first session, while the acting
 	// session survives.
 	c2 := newActor()
-	// The first login enrolled mandatory 2FA, so a second session completes
-	// the ordinary 2FA login with the same secret.
-	_ = loginAs2FA(t, c2, "cookie@console.test", "Cookie-Passw0rd!", c.totpSecret)
+	// The first login enrolled mandatory MFA, so a second session completes
+	// the ordinary MFA login with the same secret.
+	_ = loginAsMFA(t, c2, "cookie@console.test", "Cookie-Passw0rd!", c.totpSecret)
 	resp, _ = c2.do(t, "GET", "/api/admins/me", "", nil)
 	expectStatus(t, resp, 200, "second session alive before password change")
 
@@ -2453,67 +2538,77 @@ func TestCookieSessionAuth(t *testing.T) {
 	}
 }
 
-// TestCookie2FALogin covers the 2FA login path over the cookie transport: a
-// fresh login with 2FA enabled mints a short-lived pending cookie, verify
+// TestCookieMFALogin covers the MFA login path over the cookie transport: a
+// fresh login with MFA enabled mints a short-lived pending cookie, verify
 // swaps it for the real session cookie, and the pending cookie is consumed.
-func TestCookie2FALogin(t *testing.T) {
+func TestCookieMFALogin(t *testing.T) {
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
 		t.Skip("TEST_DATABASE_URL not set")
 	}
-	seedAdmin(dbURL, "cookie2fa@console.test", "Cookie2FA-Passw0rd!", "super_admin")
+	seedAdmin(dbURL, "cookiemfa@console.test", "CookieMFA-Passw0rd!", "super_admin")
 	fromIP := "203.0.113.200"
 
 	// Login. This admin has no TOTP yet, so the console forces enrollment:
 	// loginFrom() completes it and leaves the actor with a real session.
 	c := newActor()
-	csrf := c.loginFrom(t, fromIP, "cookie2fa@console.test", "Cookie2FA-Passw0rd!")
+	csrf := c.loginFrom(t, fromIP, "cookiemfa@console.test", "CookieMFA-Passw0rd!")
 	secret := c.totpSecret
 	if secret == "" {
 		t.Fatal("forced enrollment did not expose a TOTP secret")
 	}
 
-	// Logout so the next login starts the 2FA flow.
+	// Logout so the next login starts the MFA flow.
 	resp, _ := c.doFrom(t, fromIP, "POST", "/api/auth/logout", csrf, nil)
-	expectStatus(t, resp, 200, "logout before 2FA login")
+	expectStatus(t, resp, 200, "logout before MFA login")
 
-	// Fresh login → pending_2fa=true and the pending cookie (not the session
+	// Fresh login → pending_mfa=true and the pending cookie (not the session
 	// cookie) is set.
 	resp, out := c.doFrom(t, fromIP, "POST", "/api/auth/login", "", map[string]string{
-		"email": "cookie2fa@console.test", "password": "Cookie2FA-Passw0rd!",
+		"email": "cookiemfa@console.test", "password": "CookieMFA-Passw0rd!",
 	})
-	expectStatus(t, resp, 200, "2FA login pending")
-	if pending, _ := out["pending_2fa"].(bool); !pending {
-		t.Fatal("expected pending_2fa=true")
+	expectStatus(t, resp, 200, "MFA login pending")
+	if pending, _ := out["pending_mfa"].(bool); !pending {
+		t.Fatal("expected pending_mfa=true")
 	}
 	if _, has := c.jar["wgc_session"]; has {
-		t.Fatal("session cookie must not be set before 2FA verify")
+		t.Fatal("session cookie must not be set before MFA verify")
 	}
-	pendingCookie, has := c.jar["wgc_pending2fa"]
+	pendingCookie, has := c.jar["wgc_mfa_pending"]
 	if !has || pendingCookie.HttpOnly != true {
-		t.Fatalf("wgc_pending2fa cookie not HttpOnly: %+v", pendingCookie)
+		t.Fatalf("wgc_mfa_pending cookie not HttpOnly: %+v", pendingCookie)
+	}
+
+	// The pending-state endpoint drives the SPA's login challenge page.
+	resp, state := c.doFrom(t, fromIP, "GET", "/api/auth/mfa/state", "", nil)
+	expectStatus(t, resp, 200, "GET /api/auth/mfa/state")
+	if kind, _ := state["pending_kind"].(string); kind != "verify" {
+		t.Fatalf("pending_kind = %v, want verify", state["pending_kind"])
+	}
+	if methods, _ := state["mfa_methods"].([]interface{}); len(methods) == 0 {
+		t.Fatal("mfa_methods must be non-empty for an enrolled admin")
 	}
 
 	// Verify with the correct code → the session cookie replaces the pending
 	// one and a csrf_token is returned.
-	resp, out = c.doFrom(t, fromIP, "POST", "/api/auth/2fa/verify", "", map[string]string{
-		"code": current2FACode(t, secret),
+	resp, out = c.doFrom(t, fromIP, "POST", "/api/auth/mfa/totp", "", map[string]string{
+		"code": currentTOTPCode(t, secret),
 	})
-	expectStatus(t, resp, 200, "2fa verify")
+	expectStatus(t, resp, 200, "mfa verify")
 	csrf2, _ := out["csrf_token"].(string)
 	if csrf2 == "" {
-		t.Fatal("2fa verify returned no csrf_token")
+		t.Fatal("mfa verify returned no csrf_token")
 	}
 	if _, has := c.jar["wgc_session"]; !has {
-		t.Fatal("session cookie missing after 2fa verify")
+		t.Fatal("session cookie missing after mfa verify")
 	}
-	if _, has := c.jar["wgc_pending2fa"]; has {
-		t.Fatal("pending cookie must be cleared after 2fa verify")
+	if _, has := c.jar["wgc_mfa_pending"]; has {
+		t.Fatal("pending cookie must be cleared after mfa verify")
 	}
 
 	// The new session works.
 	resp, _ = c.doFrom(t, fromIP, "GET", "/api/admins/me", "", nil)
-	expectStatus(t, resp, 200, "GET /api/admins/me (post-2FA cookie session)")
+	expectStatus(t, resp, 200, "GET /api/admins/me (post-MFA cookie session)")
 }
 
 func firstID(t *testing.T, path string, a authn) string {
@@ -2587,7 +2682,7 @@ func rawPost(t *testing.T, url string, a authn, body map[string]string) rawResp 
 	return rawResp{status: resp.StatusCode, ctype: resp.Header.Get("Content-Type"), body: b}
 }
 
-// rawUpload multipart-posts a .sql.gz file plus a 2FA code (actor transport).
+// rawUpload multipart-posts a .sql.gz file plus a MFA code (actor transport).
 func rawUpload(t *testing.T, path string, a authn, filename string, content []byte, code string) rawResp {
 	t.Helper()
 	act, _ := actorFrom(a)
@@ -2726,8 +2821,8 @@ func TestSessionLifecycle(t *testing.T) {
 
 	// A second session (different client IP) appears in the list.
 	c2 := newActor()
-	// 2FA is now mandatory, so a second session completes the 2FA login.
-	_ = loginAs2FA(t, c2, "lifecycle@console.test", "Lifecycle-Passw0rd!", c.totpSecret)
+	// MFA is now mandatory, so a second session completes the MFA login.
+	_ = loginAsMFA(t, c2, "lifecycle@console.test", "Lifecycle-Passw0rd!", c.totpSecret)
 	resp, out = c.doFrom(t, fromIP, "GET", "/api/admins/me/sessions", "", nil)
 	expectStatus(t, resp, 200, "GET sessions with two")
 	if n := sessionCount(out); n != 2 {
@@ -2757,7 +2852,7 @@ func TestSessionLifecycle(t *testing.T) {
 
 	// Sign out elsewhere: open a fresh second session then revoke-others.
 	c3 := newActor()
-	_ = loginAs2FA(t, c3, "lifecycle@console.test", "Lifecycle-Passw0rd!", c.totpSecret)
+	_ = loginAsMFA(t, c3, "lifecycle@console.test", "Lifecycle-Passw0rd!", c.totpSecret)
 	resp, out = c.doFrom(t, fromIP, "POST", "/api/admins/me/sessions/revoke-others", csrf, nil)
 	expectStatus(t, resp, 200, "revoke-others")
 	if n, _ := out["revoked"].(float64); n != 1 {
@@ -2776,76 +2871,155 @@ func TestSessionLifecycle(t *testing.T) {
 	}
 }
 
-// TestForced2FASetup covers mandatory enrollment: a password login for an admin
-// without TOTP returns pending_2fa_setup (no session, no CSRF token), only the
-// *-pending endpoints accept the pending cookie, completing enrollment mints the
-// real session, and a later login requires the authenticator code.
-func TestForced2FASetup(t *testing.T) {
+// TestForcedMFASetup covers mandatory enrollment: a password login for an admin
+// without any MFA factor returns pending_mfa_setup (no session, no CSRF token),
+// only the pending-cookie enroll endpoints work, completing enrollment mints the
+// real session with recovery codes, and a later login requires a proven factor.
+func TestForcedMFASetup(t *testing.T) {
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
 		t.Skip("TEST_DATABASE_URL not set")
 	}
-	seedAdmin(dbURL, "forced2fa@console.test", "Forced2FA-Passw0rd!", "super_admin")
+	seedAdmin(dbURL, "forced-mfa@console.test", "ForcedMFA-Passw0rd!", "super_admin")
 
 	act := newActor()
 	resp, out := act.do(t, "POST", "/api/auth/login", "", map[string]string{
-		"email": "forced2fa@console.test", "password": "Forced2FA-Passw0rd!",
+		"email": "forced-mfa@console.test", "password": "ForcedMFA-Passw0rd!",
 	})
 	expectStatus(t, resp, 200, "POST /api/auth/login (forced setup)")
-	if setupPending, _ := out["pending_2fa_setup"].(bool); !setupPending {
-		t.Fatal("expected pending_2fa_setup=true for an admin without 2FA")
+	if setupPending, _ := out["pending_mfa_setup"].(bool); !setupPending {
+		t.Fatal("expected pending_mfa_setup=true for an admin without MFA")
 	}
 	if _, has := out["csrf_token"]; has {
-		t.Fatal("login without 2FA must not return a session CSRF token")
+		t.Fatal("login without MFA must not return a session CSRF token")
 	}
 	if _, has := act.jar["wgc_session"]; has {
 		t.Fatal("session cookie must not be set before forced enrollment")
 	}
-	if _, has := act.jar["wgc_pending2fa"]; !has {
-		t.Fatal("pending 2FA cookie missing after forced-setup login")
+	pendingCookie, has := act.jar["wgc_mfa_pending"]
+	if !has || pendingCookie.HttpOnly != true {
+		t.Fatalf("pending MFA cookie missing/not HttpOnly: %+v", pendingCookie)
+	}
+
+	// The pending-state endpoint describes the forced enrollment.
+	resp, state := act.do(t, "GET", "/api/auth/mfa/state", "", nil)
+	expectStatus(t, resp, 200, "GET /api/auth/mfa/state (enroll)")
+	if kind, _ := state["pending_kind"].(string); kind != "enroll" {
+		t.Fatalf("pending_kind = %v, want enroll", state["pending_kind"])
+	}
+	if methods, _ := state["setup_methods"].([]interface{}); len(methods) == 0 {
+		t.Fatal("setup_methods must list the missing factors")
 	}
 
 	// No protected API works with only the pending cookie.
 	resp, _ = act.do(t, "GET", "/api/stats/overview", "", nil)
 	expectStatus(t, resp, 401, "protected API before forced enrollment")
 
-	// Enroll: generate a secret, then prove the first code.
-	resp, setupOut := act.do(t, "POST", "/api/auth/2fa/setup-pending", "", nil)
-	expectStatus(t, resp, 200, "POST /api/auth/2fa/setup-pending")
+	// Enroll: server-generated secret, then prove the first code.
+	resp, setupOut := act.do(t, "POST", "/api/auth/mfa/enroll/totp/begin", "", nil)
+	expectStatus(t, resp, 200, "POST /api/auth/mfa/enroll/totp/begin")
 	secret, _ := setupOut["secret"].(string)
 	if secret == "" {
 		t.Fatal("forced setup returned no secret")
 	}
-	resp, enableOut := act.do(t, "POST", "/api/auth/2fa/enable-pending", "", map[string]string{
-		"secret": secret, "code": current2FACode(t, secret),
+	// A wrong first code must not enable the factor.
+	badFinish, _ := act.do(t, "POST", "/api/auth/mfa/enroll/totp/finish", "", map[string]string{"code": "000000"})
+	expectStatus(t, badFinish, 400, "POST /api/auth/mfa/enroll/totp/finish (wrong code)")
+	resp, _ = act.do(t, "POST", "/api/auth/mfa/enroll/totp/finish", "", map[string]string{
+		"code": currentTOTPCode(t, secret),
 	})
-	expectStatus(t, resp, 200, "POST /api/auth/2fa/enable-pending")
+	expectStatus(t, resp, 200, "POST /api/auth/mfa/enroll/totp/finish")
+	if _, has := act.jar["wgc_session"]; has {
+		t.Fatal("enroll/totp/finish must not mint a session")
+	}
+	if _, has := act.jar["wgc_mfa_pending"]; !has {
+		t.Fatal("pending cookie must survive until enroll/complete")
+	}
+	resp, enableOut := act.do(t, "POST", "/api/auth/mfa/enroll/complete", "", nil)
+	expectStatus(t, resp, 200, "POST /api/auth/mfa/enroll/complete")
 	if csrf, _ := enableOut["csrf_token"].(string); csrf == "" {
 		t.Fatal("forced enrollment returned no session csrf_token")
 	}
-	if codes, _ := enableOut["backup_codes"].([]interface{}); len(codes) != 10 {
-		t.Fatalf("expected 10 backup codes, got %d", len(codes))
+	rawCodes, _ := enableOut["recovery_codes"].([]interface{})
+	if len(rawCodes) != 10 {
+		t.Fatalf("expected 10 recovery codes, got %d", len(rawCodes))
 	}
+	firstRecoveryCode, _ := rawCodes[0].(string)
 	if _, has := act.jar["wgc_session"]; !has {
 		t.Fatal("session cookie missing after forced enrollment")
 	}
-	if _, has := act.jar["wgc_pending2fa"]; has {
+	if _, has := act.jar["wgc_mfa_pending"]; has {
 		t.Fatal("pending cookie must be consumed by forced enrollment")
 	}
 
-	// The minted session works.
-	resp, _ = act.do(t, "GET", "/api/admins/me", "", nil)
+	// The minted session works and the MFA summary is exposed.
+	resp, me := act.do(t, "GET", "/api/admins/me", "", nil)
 	expectStatus(t, resp, 200, "GET /api/admins/me after forced enrollment")
+	if enabled, _ := me["mfa_enabled"].(bool); !enabled {
+		t.Fatal("mfa_enabled should be true after enrollment")
+	}
+	if methods, _ := me["mfa_methods"].([]interface{}); len(methods) == 0 {
+		t.Fatal("mfa_methods should list totp after enrollment")
+	}
+	resp, mfaStatus := act.do(t, "GET", "/api/admins/me/mfa", "", nil)
+	expectStatus(t, resp, 200, "GET /api/admins/me/mfa")
+	if totp, _ := mfaStatus["totp_enabled"].(bool); !totp {
+		t.Fatal("totp_enabled should be true after enrollment")
+	}
+	if remaining, _ := mfaStatus["recovery_codes_remaining"].(float64); remaining != 10 {
+		t.Fatalf("recovery_codes_remaining = %v, want 10", mfaStatus["recovery_codes_remaining"])
+	}
 
-	// A later login now asks for the authenticator code.
+	// A later login asks for a proven factor: the pending state reports verify
+	// and enumerates the enrolled methods.
 	fresh := newActor()
 	resp, out = fresh.do(t, "POST", "/api/auth/login", "", map[string]string{
-		"email": "forced2fa@console.test", "password": "Forced2FA-Passw0rd!",
+		"email": "forced-mfa@console.test", "password": "ForcedMFA-Passw0rd!",
 	})
 	expectStatus(t, resp, 200, "POST /api/auth/login (after enrollment)")
-	if pending, _ := out["pending_2fa"].(bool); !pending {
-		t.Fatal("expected pending_2fa=true after forced enrollment")
+	if pending, _ := out["pending_mfa"].(bool); !pending {
+		t.Fatal("expected pending_mfa=true after forced enrollment")
 	}
+	if _, has := fresh.jar["wgc_session"]; has {
+		t.Fatal("the password step must never set a session cookie")
+	}
+	resp, state = fresh.do(t, "GET", "/api/auth/mfa/state", "", nil)
+	expectStatus(t, resp, 200, "GET /api/auth/mfa/state (verify)")
+	if kind, _ := state["pending_kind"].(string); kind != "verify" {
+		t.Fatalf("pending_kind = %v, want verify", state["pending_kind"])
+	}
+	if methods, _ := state["mfa_methods"].([]interface{}); len(methods) == 0 {
+		t.Fatal("mfa_methods must be non-empty for an enrolled admin")
+	}
+
+	// A wrong authenticator code is rejected and the pending state survives.
+	badVerify, _ := fresh.do(t, "POST", "/api/auth/mfa/totp", "", map[string]string{"code": "000000"})
+	expectStatus(t, badVerify, 400, "POST /api/auth/mfa/totp (wrong code)")
+
+	// Recovery-code login completes the login and consumes the code.
+	resp, recoveryOut := fresh.do(t, "POST", "/api/auth/mfa/recovery-code", "", map[string]string{
+		"code": firstRecoveryCode,
+	})
+	expectStatus(t, resp, 200, "POST /api/auth/mfa/recovery-code")
+	if csrf, _ := recoveryOut["csrf_token"].(string); csrf == "" {
+		t.Fatal("recovery-code login returned no csrf_token")
+	}
+	if _, has := fresh.jar["wgc_session"]; !has {
+		t.Fatal("session cookie missing after recovery-code login")
+	}
+	// The code is single use. Use a fresh client IP for this attempt so the
+	// shared per-IP lockout counter (already at 2 from the wrong-code checks
+	// above) cannot turn the expected 400 into a 429.
+	const reuseIP = "198.51.100.201"
+	reuse := newActor()
+	resp, _ = reuse.doFrom(t, reuseIP, "POST", "/api/auth/login", "", map[string]string{
+		"email": "forced-mfa@console.test", "password": "ForcedMFA-Passw0rd!",
+	})
+	expectStatus(t, resp, 200, "POST /api/auth/login (recovery reuse)")
+	resp, _ = reuse.doFrom(t, reuseIP, "POST", "/api/auth/mfa/recovery-code", "", map[string]string{
+		"code": firstRecoveryCode,
+	})
+	expectStatus(t, resp, 400, "POST /api/auth/mfa/recovery-code (reused)")
 }
 
 // ---- Async peer create + idempotency (the "Load failed" bug) ----------------
@@ -2927,7 +3101,7 @@ func TestPeerCreateAsyncAndIdempotent(t *testing.T) {
 	seedAdmin(dbURL, "async@console.test", "Async-Passw0rd!", "super_admin")
 	act := login(t, "async@console.test", "Async-Passw0rd!")
 	if act.totpSecret == "" {
-		t.Fatal("expected the seeded admin to complete mandatory 2FA enrollment")
+		t.Fatal("expected the seeded admin to complete mandatory MFA enrollment")
 	}
 
 	// Unique interface name so other tests' async applies/interfaces cannot
@@ -3124,7 +3298,7 @@ func TestPeerCreateAsyncAndIdempotent(t *testing.T) {
 	// so the removal lands after any apply still in flight. The row is gone
 	// before the response, and the teardown is eventually observable.
 	resp, _ = api(t, "DELETE", "/api/servers/"+serverID, act, map[string]string{
-		"code": current2FACode(t, act.totpSecret),
+		"code": currentTOTPCode(t, act.totpSecret),
 	})
 	expectStatus(t, resp, 200, "DELETE /api/servers/{id} (async removal)")
 	waitFor(t, 20*time.Second, "wg-helper /remove for "+iface, func() bool {

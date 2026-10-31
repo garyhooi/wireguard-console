@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,7 +13,22 @@ import (
 	"time"
 
 	"github.com/wireguard-console/backend/internal/backup"
+	"github.com/wireguard-console/backend/internal/db"
 )
+
+// restoreAndUpgrade restores a backup file and then re-runs the (idempotent)
+// migrations. A backup can predate the running binary — most importantly the
+// pre-MFA dumps have no pending_kind / webauthn_* schema — so the live process
+// must upgrade the restored database before serving another request.
+func restoreAndUpgrade(svc *backup.BackupService, store *Store, backupPath string) error {
+	if err := svc.RestoreBackup(backupPath); err != nil {
+		return err
+	}
+	if err := db.RunMigrationsFor(store.pool); err != nil {
+		return fmt.Errorf("restored database but failed to apply migrations: %w", err)
+	}
+	return nil
+}
 
 // backupDataDir returns the directory backups live in (env override, else
 // the container default).
@@ -55,7 +71,7 @@ func backupDownloadName(filename string) string {
 }
 
 // DownloadBackup streams a stored backup to the admin's browser. The acting
-// admin must confirm with their own 2FA code (passed as a query/body field),
+// admin must confirm with their own MFA code (passed as a query/body field),
 // because backups contain the full database (secrets, encrypted keys).
 func DownloadBackup(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -74,7 +90,7 @@ func DownloadBackup(store *Store) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "filename is required")
 			return
 		}
-		if !verifyActor2FA(w, r, ctx, store, adminID, req.Code) {
+		if !verifyActorMFA(w, r, ctx, store, adminID, req.Code) {
 			return
 		}
 
@@ -99,8 +115,9 @@ func DownloadBackup(store *Store) http.HandlerFunc {
 	}
 }
 
-// RestoreBackup replaces the current database with a stored backup file.
-// The acting admin must confirm with their own 2FA code.
+// RestoreBackup replaces the current database with a stored backup file and
+// upgrades the restored schema to the running binary's migrations. The acting
+// admin must confirm with their own MFA code.
 func RestoreBackup(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		adminID := getAdminID(r)
@@ -114,7 +131,7 @@ func RestoreBackup(store *Store) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "filename is required")
 			return
 		}
-		if !verifyActor2FA(w, r, ctx, store, adminID, req.Code) {
+		if !verifyActorMFA(w, r, ctx, store, adminID, req.Code) {
 			return
 		}
 
@@ -131,7 +148,8 @@ func RestoreBackup(store *Store) http.HandlerFunc {
 		}
 
 		svc := backup.NewBackupService(backupDataDir())
-		if err := svc.RestoreBackup(backupPath); err != nil {
+		if err := restoreAndUpgrade(svc, store, backupPath); err != nil {
+			log.Printf("Failed to restore backup: %v", err)
 			writeError(w, http.StatusInternalServerError, "Failed to restore backup")
 			return
 		}
@@ -147,7 +165,7 @@ func RestoreBackup(store *Store) http.HandlerFunc {
 
 // RestoreBackupUpload accepts a .sql.gz file uploaded by the admin, saves it
 // into the backup dir, and restores it. The acting admin must confirm with
-// their own 2FA code (multipart form field "code").
+// their own MFA code (multipart form field "code").
 func RestoreBackupUpload(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		adminID := getAdminID(r)
@@ -158,7 +176,7 @@ func RestoreBackupUpload(store *Store) http.HandlerFunc {
 			return
 		}
 		code := r.FormValue("code")
-		if !verifyActor2FA(w, r, ctx, store, adminID, code) {
+		if !verifyActorMFA(w, r, ctx, store, adminID, code) {
 			return
 		}
 
@@ -196,7 +214,8 @@ func RestoreBackupUpload(store *Store) http.HandlerFunc {
 		dst.Close()
 
 		svc := backup.NewBackupService(backupDataDir())
-		if err := svc.RestoreBackup(dstPath); err != nil {
+		if err := restoreAndUpgrade(svc, store, dstPath); err != nil {
+			log.Printf("Failed to restore uploaded backup: %v", err)
 			os.Remove(dstPath)
 			writeError(w, http.StatusInternalServerError, "Failed to restore uploaded backup")
 			return
@@ -224,7 +243,7 @@ func DeleteBackup(store *Store) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "filename is required")
 			return
 		}
-		if !verifyActor2FA(w, r, ctx, store, adminID, req.Code) {
+		if !verifyActorMFA(w, r, ctx, store, adminID, req.Code) {
 			return
 		}
 

@@ -11,7 +11,7 @@ import {
 } from '@tabler/icons-react'
 import { PageHeader, PrimaryButton, GhostButton, inputCls, labelCls } from '../../lib/ui'
 import { apiJson } from '../../lib/api'
-import { Confirm2FA } from '../../lib/Confirm2FA'
+import { ConfirmMFA } from '../../lib/ConfirmMFA'
 import { EmailTemplatesSection } from '../../components/EmailTemplatesSection'
 import { getTimezone, setTimezone } from '../../lib/timezone'
 
@@ -519,24 +519,28 @@ function TimezoneSettings() {
   )
 }
 
-// SecuritySettings — 2FA step-up grace window (super_admin editable).
+// SecuritySettings — MFA requirements + step-up grace window (super_admin
+// editable). Every MFA policy change is gated by a strict step-up.
 //
-// After an admin passes one step-up 2FA code, their same session is trusted
-// for the other sensitive actions for this many minutes. 0 = ask every time.
+// After an admin passes one step-up verification, their same session is
+// trusted for the other sensitive actions for this many minutes. 0 = ask
+// every time.
 function SecuritySettings() {
   const queryClient = useQueryClient()
   const [draft, setDraft] = useState('0')
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
-  const [pending2FA, setPending2FA] = useState<null | ((code: string) => Promise<void>)>(null)
+  const [pendingMFA, setPendingMFA] = useState<null | ((code: string) => Promise<void>)>(null)
 
-  const { data: me } = useQuery<{ role: string }>({
+  const { data: me } = useQuery<{ role: string; passkey_available?: boolean; passkey_count?: number }>({
     queryKey: ['me'],
     queryFn: async () => {
-      return apiJson<{ role: string }>('/api/admins/me')
+      return apiJson<{ role: string; passkey_available?: boolean; passkey_count?: number }>('/api/admins/me')
     },
   })
   const isSuperAdmin = me?.role === 'super_admin'
+  // A passkey can only authorize a step-up when this admin has one enrolled.
+  const passkeyStepUpAvailable = Boolean(me?.passkey_available && (me?.passkey_count ?? 0) > 0)
 
   const { data: cfg, isLoading } = useQuery<{ step_up_minutes: number }>({
     queryKey: ['stepup-config'],
@@ -562,8 +566,8 @@ function SecuritySettings() {
       queryClient.invalidateQueries({ queryKey: ['stepup-config'] })
       setMessage(
         minutes > 0
-          ? `Saved — after a 2FA check, your session is trusted for ${minutes} minute${minutes === 1 ? '' : 's'}.`
-          : 'Saved — every sensitive action now asks for a 2FA code.',
+          ? `Saved — after an MFA check, your session is trusted for ${minutes} minute${minutes === 1 ? '' : 's'}.`
+          : 'Saved — every sensitive action now asks for an MFA check.',
       )
       setError('')
     },
@@ -581,12 +585,13 @@ function SecuritySettings() {
       <div className="border border-zinc-800 rounded-lg bg-zinc-900/50 p-6">
         <div className="flex items-center gap-2 mb-1">
           <IconShieldLock size={18} stroke={1.6} className="text-zinc-400" aria-hidden="true" />
-          <h2 className="text-base font-semibold text-zinc-100">2FA step-up window</h2>
+          <h2 className="text-base font-semibold text-zinc-100">MFA step-up window</h2>
         </div>
         <p className="text-sm text-zinc-400 mb-4">
           Sensitive actions — editing or deleting servers, viewing host setup, deleting nodes,
-          re-issuing join commands, backup download/restore — ask for your authenticator code. Set
-          a window here to skip re-entering it on the same session for that long after one check.
+          re-issuing join commands, backup download/restore — ask for an MFA check (passkey or
+          authenticator code). Set a window here to skip re-entering it on the same session for
+          that long after one check.
           <span className="block mt-1 text-zinc-500">
             0 = ask every time (strictest). The grace never carries across a new login or another
             admin's session.
@@ -610,7 +615,7 @@ function SecuritySettings() {
             {isSuperAdmin ? (
               <div>
                 <label htmlFor="stepUpMinutes" className={labelCls}>
-                  Minutes to trust after a 2FA check
+                  Minutes to trust after an MFA check
                 </label>
                 <div className="flex items-center gap-3">
                   <input
@@ -625,7 +630,7 @@ function SecuritySettings() {
                   <PrimaryButton
                     onClick={() =>
                       valid &&
-                      setPending2FA(
+                      setPendingMFA(
                         () => async (code: string) => {
                           await saveMutation.mutateAsync({ minutes: parsed, code })
                         },
@@ -642,22 +647,229 @@ function SecuritySettings() {
               </div>
             ) : (
               <p className="text-xs text-amber-400/90">
-                Only a super admin can change the 2FA step-up window.
+                Only a super admin can change the MFA step-up window.
               </p>
             )}
           </div>
         )}
       </div>
 
-      <LoginLockoutSettings isSuperAdmin={isSuperAdmin} />
-      <InviteExpirySettings isSuperAdmin={isSuperAdmin} />
+      <MFAPolicySettings
+        isSuperAdmin={isSuperAdmin}
+        passkeyStepUpAvailable={passkeyStepUpAvailable}
+      />
+      <LoginLockoutSettings
+        isSuperAdmin={isSuperAdmin}
+        passkeyStepUpAvailable={passkeyStepUpAvailable}
+      />
+      <InviteExpirySettings
+        isSuperAdmin={isSuperAdmin}
+        passkeyStepUpAvailable={passkeyStepUpAvailable}
+      />
 
-      <Confirm2FA
-        open={pending2FA !== null}
-        onClose={() => setPending2FA(null)}
+      <ConfirmMFA
+        open={pendingMFA !== null}
+        onClose={() => setPendingMFA(null)}
         title="Confirm security change"
-        description="Enter your own authenticator code to change the 2FA step-up window. Security settings always require a fresh code, even when a step-up window is configured."
-        onSubmit={pending2FA}
+        description="Confirm this security change with your passkey or an authenticator code. Security settings always require a fresh check, even when a step-up window is configured."
+        onSubmit={pendingMFA}
+        passkeyAvailable={passkeyStepUpAvailable}
+      />
+    </div>
+  )
+}
+
+// Configuration → Security: MFA requirements (require_methods policy).
+// Readable by every admin; only a super_admin can save it (with a strict MFA
+// step-up, like every other security policy change).
+type MFAPolicy = 'any' | 'totp' | 'passkey' | 'both'
+
+interface MFAPolicyConfig {
+  require_methods: MFAPolicy
+  passkey_available: boolean
+  passkey_reason?: string
+  rp_id?: string
+}
+
+const MFA_POLICY_OPTIONS: {
+  value: MFAPolicy
+  label: string
+  hint: string
+  /** The option requires passkey enrollment, impossible on IP-only deployments. */
+  needsPasskey: boolean
+}[] = [
+  {
+    value: 'any',
+    label: 'Any one factor',
+    hint: 'Admins can satisfy the policy with a passkey or an authenticator app.',
+    needsPasskey: false,
+  },
+  {
+    value: 'totp',
+    label: 'Authenticator app required',
+    hint: 'Every admin must have an authenticator app enrolled (passkeys can still be used to sign in).',
+    needsPasskey: false,
+  },
+  {
+    value: 'passkey',
+    label: 'Passkey required',
+    hint: 'Every admin must have a passkey enrolled.',
+    needsPasskey: true,
+  },
+  {
+    value: 'both',
+    label: 'Passkey and authenticator app required',
+    hint: 'Every admin must enroll both a passkey and an authenticator app.',
+    needsPasskey: true,
+  },
+]
+
+const MFA_POLICY_SUMMARY: Record<MFAPolicy, string> = {
+  any: 'any one factor',
+  totp: 'an authenticator app',
+  passkey: 'a passkey',
+  both: 'a passkey and an authenticator app',
+}
+
+function MFAPolicySettings({
+  isSuperAdmin,
+  passkeyStepUpAvailable,
+}: {
+  isSuperAdmin: boolean
+  passkeyStepUpAvailable: boolean
+}) {
+  const queryClient = useQueryClient()
+  const [draft, setDraft] = useState<MFAPolicy>('any')
+  const [message, setMessage] = useState('')
+  const [error, setError] = useState('')
+  const [pendingMFA, setPendingMFA] = useState<null | ((code: string) => Promise<void>)>(null)
+
+  const { data: cfg, isLoading } = useQuery<MFAPolicyConfig>({
+    queryKey: ['mfa-policy-config'],
+    queryFn: async () => apiJson<MFAPolicyConfig>('/api/config/mfa'),
+  })
+  const current: MFAPolicy = cfg?.require_methods ?? 'any'
+  // Capability is deployment-wide (IP-only deployments cannot use passkeys).
+  const passkeysAvailable = cfg?.passkey_available ?? false
+
+  useEffect(() => {
+    setDraft(current)
+  }, [current])
+
+  const saveMutation = useMutation({
+    mutationFn: async (vars: { methods: MFAPolicy; code: string }) => {
+      return apiJson('/api/config/mfa', {
+        method: 'PATCH',
+        body: { require_methods: vars.methods, code: vars.code },
+      })
+    },
+    onSuccess: (_d, vars) => {
+      queryClient.invalidateQueries({ queryKey: ['mfa-policy-config'] })
+      queryClient.invalidateQueries({ queryKey: ['mfa-status'] })
+      setMessage(`Saved — admins must now sign in with ${MFA_POLICY_SUMMARY[vars.methods]}.`)
+      setError('')
+    },
+    onError: (e: Error) => {
+      setError(e.message)
+      setMessage('')
+    },
+  })
+
+  const selected = MFA_POLICY_OPTIONS.find((o) => o.value === draft)
+
+  return (
+    <div className="border border-zinc-800 rounded-lg bg-zinc-900/50 p-6">
+      <div className="flex items-center gap-2 mb-1">
+        <IconShieldLock size={18} stroke={1.6} className="text-zinc-400" aria-hidden="true" />
+        <h2 className="text-base font-semibold text-zinc-100">MFA requirements</h2>
+      </div>
+      <p className="text-sm text-zinc-400 mb-4">
+        The sign-in factors every admin must enroll. New admins are forced to set them up on their
+        first sign-in, and existing admins are asked to add any missing factor at their next login.
+        Sign-in and step-up challenges always accept either factor.
+      </p>
+
+      {error && <p className="text-red-400 text-sm mb-3">{error}</p>}
+      {message && <p className="text-teal-400 text-sm mb-3">{message}</p>}
+
+      {isLoading ? (
+        <p className="text-zinc-400 text-sm">Loading…</p>
+      ) : (
+        <div className="space-y-5">
+          <div className="flex items-baseline justify-between gap-3 text-sm">
+            <span className="text-zinc-500">Currently</span>
+            <span className="text-zinc-100 font-mono tabular-nums">
+              {MFA_POLICY_SUMMARY[current]}
+            </span>
+          </div>
+
+          {isSuperAdmin ? (
+            <div className="space-y-4">
+              <div>
+                <label htmlFor="mfaRequireMethods" className={labelCls}>
+                  Required factor(s)
+                </label>
+                <select
+                  id="mfaRequireMethods"
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value as MFAPolicy)}
+                  className={inputCls}
+                >
+                  {MFA_POLICY_OPTIONS.map((o) => (
+                    <option
+                      key={o.value}
+                      value={o.value}
+                      disabled={o.needsPasskey && !passkeysAvailable}
+                    >
+                      {o.label}
+                      {o.needsPasskey && !passkeysAvailable ? ' — unavailable on this deployment' : ''}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1.5 text-xs text-zinc-600">{selected?.hint}</p>
+                {!passkeysAvailable && (
+                  <p className="mt-1.5 text-xs text-amber-400/90">
+                    Passkey-requiring options are disabled: passkeys are unavailable on this
+                    deployment
+                    {cfg?.passkey_reason ? ` (${cfg.passkey_reason})` : ' (no domain configured — IP-only deployments use the authenticator app)'}.
+                  </p>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <PrimaryButton
+                  onClick={() => {
+                    if (!cfg) return
+                    setPendingMFA(
+                      () => async (code: string) => {
+                        await saveMutation.mutateAsync({ methods: draft, code })
+                      },
+                    )
+                  }}
+                  disabled={!cfg || draft === current}
+                >
+                  {saveMutation.isPending ? 'Saving…' : 'Save MFA policy'}
+                </PrimaryButton>
+                <p className="text-xs text-zinc-600">
+                  Applies to every admin; super_admin only. Security changes require a fresh MFA
+                  check.
+                </p>
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-amber-400/90">
+              Only a super admin can change the MFA requirement policy.
+            </p>
+          )}
+        </div>
+      )}
+
+      <ConfirmMFA
+        open={pendingMFA !== null}
+        onClose={() => setPendingMFA(null)}
+        title="Confirm security change"
+        description="Confirm this MFA requirement change with your passkey or an authenticator code. Security settings always require a fresh check, even when a step-up window is configured."
+        onSubmit={pendingMFA}
+        passkeyAvailable={passkeyStepUpAvailable}
       />
     </div>
   )
@@ -674,14 +886,20 @@ interface LoginLockoutConfig {
 
 // Configuration → Security: attempts / lock windows for the login lockout.
 // Readable by every admin; only a super_admin can save it.
-function LoginLockoutSettings({ isSuperAdmin }: { isSuperAdmin: boolean }) {
+function LoginLockoutSettings({
+  isSuperAdmin,
+  passkeyStepUpAvailable,
+}: {
+  isSuperAdmin: boolean
+  passkeyStepUpAvailable: boolean
+}) {
   const queryClient = useQueryClient()
   const [attempts, setAttempts] = useState('3')
   const [ipSeconds, setIpSeconds] = useState('60')
   const [accountSeconds, setAccountSeconds] = useState('60')
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
-  const [pending2FA, setPending2FA] = useState<null | ((code: string) => Promise<void>)>(null)
+  const [pendingMFA, setPendingMFA] = useState<null | ((code: string) => Promise<void>)>(null)
 
   const { data: cfg, isLoading } = useQuery<LoginLockoutConfig>({
     queryKey: ['security-config'],
@@ -811,7 +1029,7 @@ function LoginLockoutSettings({ isSuperAdmin }: { isSuperAdmin: boolean }) {
                       peer_claim_expiry_hours: cfg.peer_claim_expiry_hours,
                       admin_invite_expiry_hours: cfg.admin_invite_expiry_hours,
                     }
-                    setPending2FA(
+                    setPendingMFA(
                       () => async (code: string) => {
                         await saveMutation.mutateAsync({ body, code })
                       },
@@ -834,28 +1052,35 @@ function LoginLockoutSettings({ isSuperAdmin }: { isSuperAdmin: boolean }) {
         </div>
       )}
 
-      <Confirm2FA
-        open={pending2FA !== null}
-        onClose={() => setPending2FA(null)}
+      <ConfirmMFA
+        open={pendingMFA !== null}
+        onClose={() => setPendingMFA(null)}
         title="Confirm security change"
-        description="Enter your own authenticator code to change the login lockout policy. Security settings always require a fresh code, even when a step-up window is configured."
-        onSubmit={pending2FA}
+        description="Confirm this login lockout change with your passkey or an authenticator code. Security settings always require a fresh check, even when a step-up window is configured."
+        onSubmit={pendingMFA}
+        passkeyAvailable={passkeyStepUpAvailable}
       />
     </div>
   )
 }
 
 // Configuration → Security: how long invite / claim links stay valid.
-// Readable by every admin; only a super_admin can save it (with a fresh 2FA
-// code).
-function InviteExpirySettings({ isSuperAdmin }: { isSuperAdmin: boolean }) {
+// Readable by every admin; only a super_admin can save it (with a fresh MFA
+// step-up).
+function InviteExpirySettings({
+  isSuperAdmin,
+  passkeyStepUpAvailable,
+}: {
+  isSuperAdmin: boolean
+  passkeyStepUpAvailable: boolean
+}) {
   const queryClient = useQueryClient()
   const [vpnHours, setVpnHours] = useState('72')
   const [peerHours, setPeerHours] = useState('72')
   const [adminHours, setAdminHours] = useState('72')
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
-  const [pending2FA, setPending2FA] = useState<null | ((code: string) => Promise<void>)>(null)
+  const [pendingMFA, setPendingMFA] = useState<null | ((code: string) => Promise<void>)>(null)
 
   const { data: cfg, isLoading } = useQuery<LoginLockoutConfig>({
     queryKey: ['security-config'],
@@ -984,7 +1209,7 @@ function InviteExpirySettings({ isSuperAdmin }: { isSuperAdmin: boolean }) {
                       peer_claim_expiry_hours: parsedPeer,
                       admin_invite_expiry_hours: parsedAdmin,
                     }
-                    setPending2FA(
+                    setPendingMFA(
                       () => async (code: string) => {
                         await saveMutation.mutateAsync({ body, code })
                       },
@@ -1007,12 +1232,13 @@ function InviteExpirySettings({ isSuperAdmin }: { isSuperAdmin: boolean }) {
         </div>
       )}
 
-      <Confirm2FA
-        open={pending2FA !== null}
-        onClose={() => setPending2FA(null)}
+      <ConfirmMFA
+        open={pendingMFA !== null}
+        onClose={() => setPendingMFA(null)}
         title="Confirm security change"
-        description="Enter your own authenticator code to change invite and claim link lifetimes."
-        onSubmit={pending2FA}
+        description="Confirm this link-lifetime change with your passkey or an authenticator code."
+        onSubmit={pendingMFA}
+        passkeyAvailable={passkeyStepUpAvailable}
       />
     </div>
   )

@@ -136,7 +136,7 @@ func GetSecurityConfig(store *Store) http.HandlerFunc {
 }
 
 // UpdateSecurityConfig persists the security policy. super_admin only
-// (route-gated) and strict 2FA: the acting admin must enter a fresh
+// (route-gated) and strict MFA: the acting admin must enter a fresh
 // authenticator code even when a step-up grace window is configured.
 func UpdateSecurityConfig(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -148,7 +148,7 @@ func UpdateSecurityConfig(store *Store) http.HandlerFunc {
 
 		ctx := context.Background()
 		adminID := getAdminID(r)
-		if !verifyActor2FACode(w, r, ctx, store, adminID, req.Code) {
+		if !verifyActorMFACode(w, r, ctx, store, adminID, req.Code) {
 			return
 		}
 

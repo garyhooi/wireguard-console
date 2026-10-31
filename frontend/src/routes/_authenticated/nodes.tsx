@@ -1,7 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { Confirm2FA } from '../../lib/Confirm2FA'
+import { ConfirmMFA } from '../../lib/ConfirmMFA'
 import { apiFetch, apiJson } from '../../lib/api'
-import { is2FAError, useStepUpMinutes } from '../../lib/stepup'
+import { isMFAError, useStepUpMinutes } from '../../lib/stepup'
 import { fmtDateTime } from '../../lib/timezone'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
@@ -53,27 +53,28 @@ function NodesPage() {
   } | null>(null)
   const [error, setError] = useState('')
   const [copied, setCopied] = useState(false)
-  // Step-up 2FA gate: deleting a node and re-issuing its join command
-  // (token rotation) are privileged — both require the admin's own code.
-  const [pending2FA, setPending2FA] = useState<{
+  // Step-up MFA gate: deleting a node and re-issuing its join command
+  // (token rotation) are privileged — both require the admin's own proof.
+  const [pendingMFA, setPendingMFA] = useState<{
     label: string
     run: (code: string) => Promise<void>
   } | null>(null)
 
-  // 2FA step-up grace: try the action without a code first — the server
-  // accepts it when this session already verified within the window. Only
-  // when the server answers with a 2FA error do we open the code modal.
+  // MFA step-up grace: try the action without a code first — the server
+  // accepts it when this session already verified within the window (or a
+  // fresh passkey step-up stamped it). Only when the server answers with an
+  // MFA step-up error do we open the confirmation modal.
   const stepUpMinutes = useStepUpMinutes()
-  const gate2FA = (label: string, run: (code: string) => Promise<void>) => {
+  const gateMFA = (label: string, run: (code: string) => Promise<void>) => {
     if (stepUpMinutes <= 0) {
-      setPending2FA({ label, run }) // grace off — ask immediately
+      setPendingMFA({ label, run }) // grace off — ask immediately
       return
     }
-    run('').catch((e: Error) => {
-      if (is2FAError(e.message)) {
-        setPending2FA({ label, run })
+    run('').catch((e) => {
+      if (isMFAError(e)) {
+        setPendingMFA({ label, run })
       } else {
-        setError(e.message)
+        setError(e instanceof Error ? e.message : String(e))
       }
     })
   }
@@ -126,7 +127,7 @@ function NodesPage() {
 
   const confirmDeleteNode = (node: Node) => {
     if (!confirm(`Delete node "${node.name}"? Its servers fall back to manual mode.`)) return
-    gate2FA(`delete node "${node.name}"`, async (code) =>
+    gateMFA(`delete node "${node.name}"`, async (code) =>
       removeMutation.mutateAsync({ node, code }),
     )
   }
@@ -136,8 +137,9 @@ function NodesPage() {
   // token stops working immediately — re-run the command on the node.
   //
   // This resets the token, so confirm FIRST: the warning must live in this
-  // pre-2FA popup, because inside the 2FA step-up grace window the rotation
-  // goes through with no code at all — a mis-click would strand the node.
+  // pre-step-up popup, because inside the MFA step-up grace window the
+  // rotation goes through with no code at all — a mis-click would strand the
+  // node.
   const rotateMutation = useMutation({
     mutationFn: async (args: { node: Node; code: string }) => {
       const res = await apiFetch(`/api/nodes/${args.node.id}/rotate-token`, {
@@ -168,7 +170,7 @@ function NodesPage() {
     ) {
       return
     }
-    gate2FA(`reset the join token for node "${node.name}"`, async (code) => {
+    gateMFA(`reset the join token for node "${node.name}"`, async (code) => {
       await rotateMutation.mutateAsync({ node, code })
     })
   }
@@ -377,17 +379,17 @@ function NodesPage() {
         )}
       </div>
 
-      {/* Step-up 2FA: delete node or re-issue its join command */}
-      <Confirm2FA
-        open={pending2FA !== null}
-        onClose={() => setPending2FA(null)}
-        title="Confirm with 2FA"
+      {/* Step-up MFA: delete node or re-issue its join command */}
+      <ConfirmMFA
+        open={pendingMFA !== null}
+        onClose={() => setPendingMFA(null)}
+        title="Confirm with MFA"
         description={
-          pending2FA
-            ? `Enter your own authenticator code to ${pending2FA.label}.`
+          pendingMFA
+            ? `Confirm this action with your passkey or an authenticator code to ${pendingMFA.label}.`
             : undefined
         }
-        onSubmit={pending2FA ? pending2FA.run : null}
+        onSubmit={pendingMFA ? pendingMFA.run : null}
         submitLabel="Authorize"
       />
     </div>

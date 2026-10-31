@@ -10,10 +10,10 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as R2faSetupRouteImport } from './routes/2fa-setup'
-import { Route as R2faVerifyRouteImport } from './routes/2fa-verify'
 import { Route as AuthenticatedRouteImport } from './routes/_authenticated'
 import { Route as LoginRouteImport } from './routes/login'
+import { Route as MfaSetupRouteImport } from './routes/mfa-setup'
+import { Route as MfaVerifyRouteImport } from './routes/mfa-verify'
 import { Route as AuthenticatedAdminsRouteImport } from './routes/_authenticated/admins'
 import { Route as AuthenticatedAuditLogRouteImport } from './routes/_authenticated/audit-log'
 import { Route as AuthenticatedBackupsRouteImport } from './routes/_authenticated/backups'
@@ -38,16 +38,6 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const R2faSetupRoute = R2faSetupRouteImport.update({
-  id: '/2fa-setup',
-  path: '/2fa-setup',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const R2faVerifyRoute = R2faVerifyRouteImport.update({
-  id: '/2fa-verify',
-  path: '/2fa-verify',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const AuthenticatedRoute = AuthenticatedRouteImport.update({
   id: '/_authenticated',
   getParentRoute: () => rootRouteImport,
@@ -55,6 +45,16 @@ const AuthenticatedRoute = AuthenticatedRouteImport.update({
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
   path: '/login',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const MfaSetupRoute = MfaSetupRouteImport.update({
+  id: '/mfa-setup',
+  path: '/mfa-setup',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const MfaVerifyRoute = MfaVerifyRouteImport.update({
+  id: '/mfa-verify',
+  path: '/mfa-verify',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AuthenticatedAdminsRoute = AuthenticatedAdminsRouteImport.update({
@@ -153,9 +153,9 @@ const PeerTokenRoute = PeerTokenRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
-  '/2fa-setup': typeof R2faSetupRoute
-  '/2fa-verify': typeof R2faVerifyRoute
   '/login': typeof LoginRoute
+  '/mfa-setup': typeof MfaSetupRoute
+  '/mfa-verify': typeof MfaVerifyRoute
   '/admins': typeof AuthenticatedAdminsRoute
   '/audit-log': typeof AuthenticatedAuditLogRoute
   '/backups': typeof AuthenticatedBackupsRoute
@@ -177,9 +177,9 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/2fa-setup': typeof R2faSetupRoute
-  '/2fa-verify': typeof R2faVerifyRoute
   '/login': typeof LoginRoute
+  '/mfa-setup': typeof MfaSetupRoute
+  '/mfa-verify': typeof MfaVerifyRoute
   '/admins': typeof AuthenticatedAdminsRoute
   '/audit-log': typeof AuthenticatedAuditLogRoute
   '/backups': typeof AuthenticatedBackupsRoute
@@ -202,10 +202,10 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
-  '/2fa-setup': typeof R2faSetupRoute
-  '/2fa-verify': typeof R2faVerifyRoute
   '/_authenticated': typeof AuthenticatedRouteWithChildren
   '/login': typeof LoginRoute
+  '/mfa-setup': typeof MfaSetupRoute
+  '/mfa-verify': typeof MfaVerifyRoute
   '/_authenticated/admins': typeof AuthenticatedAdminsRoute
   '/_authenticated/audit-log': typeof AuthenticatedAuditLogRoute
   '/_authenticated/backups': typeof AuthenticatedBackupsRoute
@@ -229,9 +229,9 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
-    | '/2fa-setup'
-    | '/2fa-verify'
     | '/login'
+    | '/mfa-setup'
+    | '/mfa-verify'
     | '/admins'
     | '/audit-log'
     | '/backups'
@@ -253,9 +253,9 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
-    | '/2fa-setup'
-    | '/2fa-verify'
     | '/login'
+    | '/mfa-setup'
+    | '/mfa-verify'
     | '/admins'
     | '/audit-log'
     | '/backups'
@@ -277,10 +277,10 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
-    | '/2fa-setup'
-    | '/2fa-verify'
     | '/_authenticated'
     | '/login'
+    | '/mfa-setup'
+    | '/mfa-verify'
     | '/_authenticated/admins'
     | '/_authenticated/audit-log'
     | '/_authenticated/backups'
@@ -303,10 +303,10 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
-  R2faSetupRoute: typeof R2faSetupRoute
-  R2faVerifyRoute: typeof R2faVerifyRoute
   AuthenticatedRoute: typeof AuthenticatedRouteWithChildren
   LoginRoute: typeof LoginRoute
+  MfaSetupRoute: typeof MfaSetupRoute
+  MfaVerifyRoute: typeof MfaVerifyRoute
   ClaimTokenRoute: typeof ClaimTokenRoute
   PeerTokenRoute: typeof PeerTokenRoute
 }
@@ -318,20 +318,6 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/2fa-setup': {
-      id: '/2fa-setup'
-      path: '/2fa-setup'
-      fullPath: '/2fa-setup'
-      preLoaderRoute: typeof R2faSetupRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/2fa-verify': {
-      id: '/2fa-verify'
-      path: '/2fa-verify'
-      fullPath: '/2fa-verify'
-      preLoaderRoute: typeof R2faVerifyRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_authenticated': {
@@ -346,6 +332,20 @@ declare module '@tanstack/react-router' {
       path: '/login'
       fullPath: '/login'
       preLoaderRoute: typeof LoginRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/mfa-setup': {
+      id: '/mfa-setup'
+      path: '/mfa-setup'
+      fullPath: '/mfa-setup'
+      preLoaderRoute: typeof MfaSetupRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/mfa-verify': {
+      id: '/mfa-verify'
+      path: '/mfa-verify'
+      fullPath: '/mfa-verify'
+      preLoaderRoute: typeof MfaVerifyRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_authenticated/admins': {
@@ -521,10 +521,10 @@ const AuthenticatedRouteWithChildren = AuthenticatedRoute._addFileChildren(
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  R2faSetupRoute: R2faSetupRoute,
-  R2faVerifyRoute: R2faVerifyRoute,
   AuthenticatedRoute: AuthenticatedRouteWithChildren,
   LoginRoute: LoginRoute,
+  MfaSetupRoute: MfaSetupRoute,
+  MfaVerifyRoute: MfaVerifyRoute,
   ClaimTokenRoute: ClaimTokenRoute,
   PeerTokenRoute: PeerTokenRoute,
 }

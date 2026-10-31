@@ -1,24 +1,39 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { IconShieldLock } from '@tabler/icons-react'
 import { PrimaryButton, inputCls, labelCls } from '../lib/ui'
-import { apiFetch, setCsrfToken } from '../lib/api'
+import { apiFetch } from '../lib/api'
+import { navigateTo } from '../lib/mfaClient'
 import { HoloPageBackground } from '../components/HoloPageBackground'
 import { AuthStatusOverlay } from '../components/AuthStatusOverlay'
 import { LoginLockoutOverlay } from '../components/LoginLockoutOverlay'
 
+/**
+ * Login NEVER returns a session: a correct password yields either a pending
+ * challenge (`pending_mfa`, prove an existing factor) or a forced-enrollment
+ * hand-off (`pending_mfa_setup`, enroll the first factor). Only one of the
+ * MFA endpoints mints the session; there is deliberately no direct-session
+ * branch here.
+ */
 interface LoginResponse {
   csrf_token?: string
-  pending_2fa?: boolean
-  pending_2fa_setup?: boolean
+  pending_mfa?: boolean
+  pending_mfa_setup?: boolean
+  mfa_methods?: string[]
+  setup_methods?: string[]
+  passkey_available?: boolean
+  passkey_count?: number
+  recovery_codes_remaining?: number
+  require_methods?: string
   admin?: {
     id: string
     email: string
     role: string
-    totp_enabled: boolean
-    status: string
-    created_at: string
+    mfa_enabled?: boolean
+    totp_enabled?: boolean
+    status?: string
+    created_at?: string
   }
 }
 
@@ -63,9 +78,10 @@ export const Route = createFileRoute('/login')({
 export function LoginPage() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
-  // Full-page verification animation: green on success, red on failure.
-  const [authOutcome, setAuthOutcome] = useState<'success' | 'failure' | null>(null)
-  const redirectRef = useRef<string | null>(null)
+  // Full-page verification animation on a rejected password. Successful
+  // passwords never land here as a session: they continue to /mfa-verify or
+  // /mfa-setup, so only the failure animation is ever shown on this page.
+  const [authOutcome, setAuthOutcome] = useState<'failure' | null>(null)
   // Remaining seconds of a server-enforced IP lockout (null = not locked).
   const [lockoutSeconds, setLockoutSeconds] = useState<number | null>(null)
 
@@ -118,26 +134,27 @@ export function LoginPage() {
         }
         throw new Error(err?.error || 'Login failed')
       }
-      return res.json() as Promise<LoginResponse>
+      const data = (await res.json()) as LoginResponse
+      // A session must be earned by proving a factor. If the API ever answers
+      // without one of the pending hand-offs we treat it as a failed sign-in
+      // instead of trusting a bare 200.
+      if (!data.pending_mfa_setup && !data.pending_mfa) {
+        throw new Error('Sign-in could not be completed. Please try again.')
+      }
+      return data
     },
     onSuccess: (data) => {
-      if (data.pending_2fa_setup) {
-        // 2FA enrolment is mandatory before a session is issued. The pending
-        // cookie set by the server authorizes the setup page only.
-        window.location.href = '/2fa-setup?forced=1'
-        return
-      }
-      if (data.pending_2fa) {
-        // The pending-2FA token rides in the wgc_pending2fa HttpOnly cookie
-        // set by the server — nothing to store client-side. Not a completed
-        // sign-in yet, so no "verified" animation: continue to the code step.
-        window.location.href = '/2fa-verify'
-        return
-      }
-      setCsrfToken(data.csrf_token)
       forgetLockoutEmail()
-      redirectRef.current = '/dashboard'
-      setAuthOutcome('success')
+      if (data.pending_mfa_setup) {
+        // MFA enrolment is mandatory before a session is issued. The pending
+        // cookie set by the server authorizes the setup page only.
+        navigateTo('/mfa-setup?forced=1')
+        return
+      }
+      // The pending-MFA token rides in the wgc_mfa_pending HttpOnly cookie set
+      // by the server — nothing to store client-side. Not a completed sign-in
+      // yet, so no "verified" animation: continue to the challenge step.
+      navigateTo('/mfa-verify')
     },
     onError: (error) => {
       if (error instanceof LoginLockedError) {
@@ -261,17 +278,11 @@ export function LoginPage() {
         />
       )}
 
-      {authOutcome && (
+      {authOutcome === 'failure' && (
         <AuthStatusOverlay
-          status={authOutcome}
-          message={authOutcome === 'failure' ? loginMutation.error?.message : undefined}
-          onDone={() => {
-            if (authOutcome === 'success' && redirectRef.current) {
-              window.location.href = redirectRef.current
-              return
-            }
-            setAuthOutcome(null)
-          }}
+          status="failure"
+          message={loginMutation.error?.message}
+          onDone={() => setAuthOutcome(null)}
         />
       )}
     </div>

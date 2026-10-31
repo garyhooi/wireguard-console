@@ -30,7 +30,7 @@ interface Session {
   last_seen_at: string | null
   expires_at: string
   is_current: boolean
-  is_pending_2fa: boolean
+  is_pending_mfa: boolean
 }
 
 interface SessionsResponse {
@@ -138,7 +138,7 @@ export function ActiveSessions() {
   })
 
   const otherCount = sessions.filter((s) => !s.is_current).length
-  const liveSessions = sessions.filter((s) => !s.is_pending_2fa)
+  const liveSessions = sessions.filter((s) => !s.is_pending_mfa)
 
   const doRevokeOther = () => {
     if (

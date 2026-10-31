@@ -54,6 +54,10 @@ func (w *SessionPurgeWorker) purge(ctx context.Context) {
 		{"expired session(s)", `DELETE FROM admin_sessions WHERE expires_at <= now()`},
 		{"expired invite(s)", `DELETE FROM invites WHERE expires_at <= now()`},
 		{"expired peer access token(s)", `DELETE FROM peer_access_tokens WHERE expires_at <= now()`},
+		// In-flight WebAuthn ceremonies (passkey login/enroll/step-up) and
+		// pending TOTP-enrollment secrets live here with a short TTL; an
+		// abandoned ceremony must not accumulate challenge material forever.
+		{"expired webauthn challenge(s)", `DELETE FROM webauthn_challenges WHERE expires_at <= now()`},
 		{"finished email job(s)", `DELETE FROM jobs WHERE (completed_at IS NOT NULL OR failed_at IS NOT NULL) AND created_at < now() - interval '7 days'`},
 		{"old audit log row(s)", `DELETE FROM audit_logs WHERE created_at < now() - interval '90 days'`},
 	}

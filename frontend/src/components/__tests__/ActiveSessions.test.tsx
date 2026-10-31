@@ -22,7 +22,7 @@ const sessions = {
       last_seen_at: '2026-01-01T08:30:00Z',
       expires_at: '2026-01-02T08:00:00Z',
       is_current: true,
-      is_pending_2fa: false,
+      is_pending_mfa: false,
     },
     {
       id: 'sess-other',
@@ -32,7 +32,7 @@ const sessions = {
       last_seen_at: null,
       expires_at: '2026-01-02T07:00:00Z',
       is_current: false,
-      is_pending_2fa: false,
+      is_pending_mfa: false,
     },
   ],
 }

@@ -1,7 +1,7 @@
 import { HoloBackground } from './HoloBackground'
 
 // Full-page holographic backdrop for pre-auth screens (login, claim, peer
-// config, 2FA, ...). Renders the animated canvas plus the vignette and
+// config, MFA, ...). Renders the animated canvas plus the vignette and
 // scanline overlays that keep foreground cards readable. Purely decorative:
 // aria-hidden and click-through.
 export function HoloPageBackground() {

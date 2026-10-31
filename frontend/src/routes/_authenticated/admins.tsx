@@ -22,16 +22,20 @@ import {
   inputCls,
   labelCls,
 } from '../../lib/ui'
-import { Confirm2FA } from '../../lib/Confirm2FA'
+import { ConfirmMFA } from '../../lib/ConfirmMFA'
 import { apiJson } from '../../lib/api'
-import { is2FAError, useStepUpMinutes } from '../../lib/stepup'
+import { isMFAError, useStepUpMinutes } from '../../lib/stepup'
 import { fmtDate } from '../../lib/timezone'
 
 interface Admin {
   id: string
   email: string
   role: string
+  /** Kept for compatibility with older payloads; prefer mfa_enabled. */
   totp_enabled: boolean
+  mfa_enabled: boolean
+  mfa_methods: string[]
+  passkey_count: number
   status: string
   created_at: string
 }
@@ -40,6 +44,8 @@ interface Me {
   id: string
   email: string
   role: string
+  passkey_available?: boolean
+  passkey_count?: number
 }
 
 export const Route = createFileRoute('/_authenticated/admins')({
@@ -53,8 +59,8 @@ const ROLE_LABELS: Record<string, string> = {
   auditor: 'Auditor',
 }
 
-/** A pending privileged action awaiting the admin's own 2FA code. */
-interface Pending2FA {
+/** A pending privileged action awaiting the admin's own MFA step-up. */
+interface PendingMFA {
   label: string
   run: (code: string) => Promise<void>
 }
@@ -70,23 +76,24 @@ function AdminsPage() {
   // Inline email editing state: one editor open at a time.
   const [editingId, setEditingId] = useState('')
   const [draftEmail, setDraftEmail] = useState('')
-  // Step-up 2FA gate for privileged actions.
-  const [pending2FA, setPending2FA] = useState<Pending2FA | null>(null)
+  // Step-up MFA gate for privileged actions.
+  const [pendingMFA, setPendingMFA] = useState<PendingMFA | null>(null)
 
-  // 2FA step-up grace: try the action without a code first — the server
-  // accepts it when this session already verified within the window. Only
-  // when the server answers with a 2FA error do we open the code modal.
+  // MFA step-up grace: try the action without a code first — the server
+  // accepts it when this session already verified within the window (or a
+  // fresh passkey step-up stamped it). Only when the server answers with an
+  // MFA step-up error do we open the confirmation modal.
   const stepUpMinutes = useStepUpMinutes()
-  const gate2FA = (label: string, run: (code: string) => Promise<void>) => {
+  const gateMFA = (label: string, run: (code: string) => Promise<void>) => {
     if (stepUpMinutes <= 0) {
-      setPending2FA({ label, run }) // grace off — ask immediately
+      setPendingMFA({ label, run }) // grace off — ask immediately
       return
     }
-    run('').catch((e: Error) => {
-      if (is2FAError(e.message)) {
-        setPending2FA({ label, run })
+    run('').catch((e) => {
+      if (isMFAError(e)) {
+        setPendingMFA({ label, run })
       } else {
-        setError(e.message)
+        setError(e instanceof Error ? e.message : String(e))
       }
     })
   }
@@ -131,7 +138,7 @@ function AdminsPage() {
     onError: (e: Error) => setError(e.message),
   })
 
-  // ---- Privileged admin mutations (each requires the actor's own 2FA) ----
+  // ---- Privileged admin mutations (each requires the actor's own MFA) ----
 
   const patchAdmin = async (id: string, body: Record<string, string>) => {
     try {
@@ -174,19 +181,21 @@ function AdminsPage() {
     onError: (e: Error) => setError(e.message),
   })
 
-  const reset2FAMutation = useMutation({
+  const resetMFAMutation = useMutation({
     mutationFn: async (a: { admin: Admin; code: string }) => {
       try {
-        await apiJson(`/api/admins/${a.admin.id}/reset-2fa`, {
+        await apiJson(`/api/admins/${a.admin.id}/reset-mfa`, {
           method: 'POST',
           body: { code: a.code },
         })
       } catch (e) {
-        throw new Error((e as Error).message || 'Failed to reset 2FA')
+        throw new Error((e as Error).message || 'Failed to reset MFA')
       }
     },
     onSuccess: (_d, vars) => {
-      setNotice(`2FA for ${vars.admin.email} has been reset — they can re-enroll from Profile.`)
+      setNotice(
+        `MFA for ${vars.admin.email} has been reset — their passkeys, authenticator app and recovery codes are gone, all their sessions were signed out, and they will set up MFA again at their next sign-in.`,
+      )
       setError('')
       queryClient.invalidateQueries({ queryKey: ['admins'] })
     },
@@ -226,34 +235,34 @@ function AdminsPage() {
     onError: (e: Error) => setError(e.message),
   })
 
-  // ---- 2FA step-up wrappers: open the modal, run on confirm ----
+  // ---- MFA step-up wrappers: open the modal, run on confirm ----
 
   // Re-sending an admin's credentials email rotates to a fresh temporary
   // password (the original is never stored — only its hash — so it cannot
   // be re-emailed verbatim). This is the same reset-password flow below;
-  // the acting super_admin confirms with their own 2FA code.
+  // the acting super_admin confirms with their own MFA step-up.
   const confirmResetPassword = (admin: Admin) => {
-    gate2FA(`reset the password for ${admin.email}`, (code) =>
+    gateMFA(`reset the password for ${admin.email}`, (code) =>
       resetPwMutation.mutateAsync({ admin, code }).then(() => undefined),
     )
   }
 
-  const confirmReset2FA = (admin: Admin) => {
-    gate2FA(`reset 2FA for ${admin.email}`, (code) =>
-      reset2FAMutation.mutateAsync({ admin, code }).then(() => undefined),
+  const confirmResetMFA = (admin: Admin) => {
+    gateMFA(`reset MFA for ${admin.email}`, (code) =>
+      resetMFAMutation.mutateAsync({ admin, code }).then(() => undefined),
     )
   }
 
   const confirmRoleChange = (admin: Admin, role: string) => {
     if (admin.role === role) return
-    gate2FA(`change ${admin.email}'s role to ${ROLE_LABELS[role] || role}`, (code) =>
+    gateMFA(`change ${admin.email}'s role to ${ROLE_LABELS[role] || role}`, (code) =>
       roleMutation.mutateAsync({ id: admin.id, role, code }).then(() => undefined),
     )
   }
 
   const confirmStatusToggle = (admin: Admin) => {
     const next = admin.status === 'active' ? 'disable' : 'enable'
-    gate2FA(`${next} admin ${admin.email}`, (code) =>
+    gateMFA(`${next} admin ${admin.email}`, (code) =>
       statusMutation.mutateAsync({ admin, code }).then(() => undefined),
     )
   }
@@ -269,7 +278,7 @@ function AdminsPage() {
       setEditingId('')
       return
     }
-    gate2FA(`change ${admin.email}'s email to ${email}`, (code) =>
+    gateMFA(`change ${admin.email}'s email to ${email}`, (code) =>
       emailMutation.mutateAsync({ id: admin.id, email, code }).then(() => undefined),
     )
     setEditingId('')
@@ -337,7 +346,7 @@ function AdminsPage() {
           </div>
           <p className="text-xs text-zinc-500">
             The invited admin receives temporary credentials by email and must change them in
-            Profile on first login (2FA is enforced policy).
+            Profile on first login (multi-factor authentication is enforced).
           </p>
           <div className="flex justify-end gap-3 pt-2">
             <GhostButton onClick={() => setShowInvite(false)}>Cancel</GhostButton>
@@ -388,7 +397,7 @@ function AdminsPage() {
                 <tr className="text-left text-[11px] uppercase tracking-wider text-zinc-500 bg-zinc-800/40">
                   <th className={thCls}>Email</th>
                   <th className={thCls}>Role</th>
-                  <th className={thCls}>2FA</th>
+                  <th className={thCls}>MFA</th>
                   <th className={thCls}>Status</th>
                   <th className={thCls}>Created</th>
                   <th className={thCls + ' text-right'}>Actions</th>
@@ -468,7 +477,18 @@ function AdminsPage() {
                       </select>
                     </td>
                     <td className="px-5 py-3">
-                      <StatusBadge status={a.totp_enabled ? 'ok' : 'warning'} />
+                      <div className="flex items-center gap-2">
+                        <Badge tone={(a.mfa_enabled ?? a.totp_enabled) ? 'good' : 'warn'}>
+                          {(a.mfa_enabled ?? a.totp_enabled) ? 'enabled' : 'not set up'}
+                        </Badge>
+                        {(a.mfa_methods || []).length > 0 && (
+                          <span className="text-xs text-zinc-600">
+                            {(a.mfa_methods || [])
+                              .map((m) => (m === 'totp' ? 'app' : m === 'recovery_code' ? 'codes' : m))
+                              .join(' + ')}
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-5 py-3">
                       <StatusBadge status={a.status} />
@@ -490,16 +510,16 @@ function AdminsPage() {
                               <IconKey size={13} stroke={1.6} aria-hidden="true" />
                               Resend credentials
                             </button>
-                            {me?.id !== a.id && a.totp_enabled && (
+                            {me?.id !== a.id && (a.mfa_enabled ?? a.totp_enabled) && (
                               <button
                                 onClick={() => {
-                                  if (confirm(`Reset 2FA for "${a.email}"? They will be able to re-enroll from Profile on next login.`))
-                                    confirmReset2FA(a)
+                                  if (confirm(`Reset MFA for "${a.email}"?\n\nTheir passkeys, authenticator app and recovery codes will be removed, and all of their sessions will be signed out. They will set up MFA again at their next sign-in. Use this when they have lost access to their factors.`))
+                                    confirmResetMFA(a)
                                 }}
                                 className="inline-flex items-center gap-1 text-sm rounded-md px-2 py-1 text-amber-400 hover:text-amber-300 hover:bg-amber-500/10 transition-colors"
                               >
                                 <IconShieldOff size={13} stroke={1.6} aria-hidden="true" />
-                                Reset 2FA
+                                Reset MFA
                               </button>
                             )}
                             {me?.id !== a.id && (
@@ -531,17 +551,18 @@ function AdminsPage() {
         )}
       </div>
 
-      {/* Step-up 2FA gate for privileged admin actions */}
-      <Confirm2FA
-        open={pending2FA !== null}
-        onClose={() => setPending2FA(null)}
-        title="Confirm with 2FA"
+      {/* Step-up MFA gate for privileged admin actions */}
+      <ConfirmMFA
+        open={pendingMFA !== null}
+        onClose={() => setPendingMFA(null)}
+        title="Confirm with MFA"
         description={
-          pending2FA
-            ? `Enter your own authenticator code to ${pending2FA.label}. This extra confirmation protects the console from unauthorized account changes.`
+          pendingMFA
+            ? `Confirm this action with your passkey or an authenticator code to ${pendingMFA.label}. This extra confirmation protects the console from unauthorized account changes.`
             : undefined
         }
-        onSubmit={pending2FA ? pending2FA.run : null}
+        onSubmit={pendingMFA ? pendingMFA.run : null}
+        passkeyAvailable={Boolean(me?.passkey_available && (me?.passkey_count ?? 0) > 0)}
       />
     </div>
   )

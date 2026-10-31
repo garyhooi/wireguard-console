@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 	"github.com/wireguard-console/backend/internal/api"
+	authwebauthn "github.com/wireguard-console/backend/internal/auth/webauthn"
 	"github.com/wireguard-console/backend/internal/db"
 	"github.com/wireguard-console/backend/internal/worker"
 )
@@ -46,6 +47,13 @@ func main() {
 	if err := api.BootstrapAdmin(conn.Pool(), log.Printf); err != nil {
 		log.Fatalf("Failed to bootstrap admin: %v", err)
 	}
+
+	// Passkeys are capability-gated at boot: the WebAuthn relying-party ID and
+	// origins derive from CONSOLE_DOMAIN (or WEBAUTHN_* overrides). An IP-only
+	// deployment cannot have passkeys — the service disables itself and logs
+	// why, and authenticator-app MFA keeps working. A bad configuration never
+	// blocks startup.
+	authwebauthn.InitFromEnv()
 
 	r := chi.NewRouter()
 
@@ -141,10 +149,19 @@ func main() {
 		// Per-IP lockout state so the login page can resume its countdown
 		// after a refresh (no session exists yet while locked out).
 		r.Get("/auth/lockout-status", api.LoginLockoutStatus(store))
-		r.Post("/auth/2fa/verify", api.Verify2FA(store))
-		// Forced 2FA enrollment for accounts without TOTP (pending cookie only).
-		r.Post("/auth/2fa/setup-pending", api.Setup2FAPending(store))
-		r.Post("/auth/2fa/enable-pending", api.Enable2FAPending(store))
+		// MFA challenge (pending cookie only — these never mint a session
+		// without a proven factor; see mfa_shared.go finishMFALogin).
+		r.Get("/auth/mfa/state", api.MFAState(store))
+		r.Post("/auth/mfa/totp", api.MFATOTPVerify(store))
+		r.Post("/auth/mfa/recovery-code", api.MFARecoveryCodeVerify(store))
+		r.Post("/auth/mfa/passkey/begin", api.MFAPasskeyLoginBegin(store))
+		r.Post("/auth/mfa/passkey/finish", api.MFAPasskeyLoginFinish(store))
+		// Forced enrollment for accounts with no (or too few) factors.
+		r.Post("/auth/mfa/enroll/totp/begin", api.MFAEnrollTOTPBegin(store))
+		r.Post("/auth/mfa/enroll/totp/finish", api.MFAEnrollTOTPFinish(store))
+		r.Post("/auth/mfa/enroll/passkey/begin", api.MFAEnrollPasskeyBegin(store))
+		r.Post("/auth/mfa/enroll/passkey/finish", api.MFAEnrollPasskeyFinish(store))
+		r.Post("/auth/mfa/enroll/complete", api.MFAEnrollComplete(store))
 		r.Post("/auth/logout", api.Logout(store))
 		r.Post("/claim", api.ClaimUser(store))
 		r.Get("/claim/{token}/status", api.GetClaimLinkStatus(store))
@@ -164,9 +181,6 @@ func main() {
 			// serves the update one-liner. GET-only — no CSRF needed.
 			r.Get("/update/check", api.UpdateCheckHandler(store))
 
-			r.Post("/auth/2fa/setup", api.Setup2FA(store))
-			r.Post("/auth/2fa/enable", api.Enable2FA(store))
-
 			// Admin management - super_admin only
 			r.Group(func(r chi.Router) {
 				r.Use(api.RequireRole(store, "super_admin"))
@@ -176,9 +190,10 @@ func main() {
 				r.Patch("/admins/{id}", api.UpdateAdmin(store))
 				r.Delete("/admins/{id}", api.DeleteAdmin(store))
 				r.Post("/admins/{id}/reset-password", api.ResetAdminPassword(store))
-				// Super-admin helpdesk: clear another admin's 2FA so they
-				// can re-enroll (requires the acting admin's own 2FA code).
-				r.Post("/admins/{id}/reset-2fa", api.ResetAdmin2FA(store))
+				// Super-admin helpdesk: clear another admin's factors so they
+				// can re-enroll (requires the acting admin's own MFA proof;
+				// their sessions are revoked and a store ban buffer is not used).
+				r.Post("/admins/{id}/reset-mfa", api.ResetAdminMFA(store))
 				// Audit-log housekeeping — super_admin only.
 				r.Delete("/audit-logs", api.PurgeAuditLogs(store))
 				// Web-activity housekeeping — super_admin only (raw browsing
@@ -232,7 +247,7 @@ func main() {
 				r.Patch("/servers/{id}", api.UpdateServer(store))
 				r.Delete("/servers/{id}", api.DeleteServer(store))
 				r.Get("/servers/{id}/status", api.GetServerStatus(store))
-				// Host setup reveals the server's private key — POST + 2FA.
+				// Host setup reveals the server's private key — POST + MFA.
 				r.Post("/servers/{id}/host-config", api.GetServerHostConfig(store))
 
 				// Node management (admin session auth)
@@ -241,7 +256,22 @@ func main() {
 				r.Get("/admins/me/sessions", api.ListMySessions(store))
 				r.Delete("/admins/me/sessions/{id}", api.RevokeMySession(store))
 				r.Post("/admins/me/sessions/revoke-others", api.RevokeMyOtherSessions(store))
-				r.Post("/auth/2fa/disable", api.Disable2FA(store))
+				// MFA self-service: factor list, add/remove factors (step-up
+				// gated) and recovery-code regeneration.
+				r.Get("/admins/me/mfa", api.GetMyMFA(store))
+				r.Post("/admins/me/mfa/totp/begin", api.AddTOTPBegin(store))
+				r.Post("/admins/me/mfa/totp/finish", api.AddTOTPFinish(store))
+				r.Post("/admins/me/mfa/totp/remove", api.AddTOTPRemove(store))
+				r.Post("/admins/me/mfa/passkeys/begin", api.AddPasskeyBegin(store))
+				r.Post("/admins/me/mfa/passkeys/finish", api.AddPasskeyFinish(store))
+				r.Patch("/admins/me/mfa/passkeys/{id}", api.UpdatePasskey(store))
+				r.Delete("/admins/me/mfa/passkeys/{id}", api.DeletePasskey(store))
+				r.Post("/admins/me/mfa/recovery-codes/regenerate", api.RegenerateRecoveryCodes(store))
+				// Step-up proof for passkey users: a successful assertion stamps
+				// a 90-second single-use freshness window on the session.
+				r.Post("/auth/mfa/stepup/passkey/begin", api.PasskeyStepUpBegin(store))
+				r.Post("/auth/mfa/stepup/passkey/finish", api.PasskeyStepUpFinish(store))
+				r.Get("/config/mfa", api.GetMFAPolicyConfig(store))
 				r.Get("/config/email-templates", api.ListEmailTemplates(store))
 				r.Patch("/config/email-templates/{key}", api.UpdateEmailTemplate(store))
 				r.Get("/nodes", api.ListNodes(store))
@@ -313,16 +343,18 @@ func main() {
 				r.Get("/config/step-up", api.GetStepUpConfig(store))
 				// Login lockout policy (attempts / IP window / account window).
 				r.Get("/config/security", api.GetSecurityConfig(store))
-				// The 2FA step-up grace window is a security policy —
-				// super_admin only.
+				// The MFA policy and the step-up grace window are security
+				// policies — super_admin only, strict MFA step-up enforced by
+				// the handlers.
 				r.Group(func(r chi.Router) {
 					r.Use(api.RequireRole(store, "super_admin"))
+					r.Patch("/config/mfa", api.UpdateMFAPolicyConfig(store))
 					r.Patch("/config/step-up", api.UpdateStepUpConfig(store))
 					r.Patch("/config/security", api.UpdateSecurityConfig(store))
 				})
 
 				// Backup endpoints (download/restore/delete require the
-				// acting admin's own 2FA code — see each handler).
+				// acting admin's own MFA proof — see each handler).
 				r.Post("/backup/create", api.CreateBackup(store))
 				r.Post("/backup/restore", api.RestoreBackup(store))
 				r.Get("/backup/list", api.ListBackups(store))

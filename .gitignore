@@ -42,6 +42,8 @@ backend/aghenc.exe
 # Local build caches (sandbox constraint)
 .gocache/
 .gomodcache/
+.bun-cache/
+.bun-tmp/
 
 # Local security audit artifacts
 .security-audit/

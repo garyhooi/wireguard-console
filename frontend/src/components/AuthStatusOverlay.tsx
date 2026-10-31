@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
 
 // Full-page "identity verification" animation shown for ~2 seconds while a
-// sign-in / 2FA check completes: a hologram ring + scan sweep with a big
+// sign-in / MFA check completes: a hologram ring + scan sweep with a big
 // green glow (success) or red glow + glitch (failure). The parent decides
 // what happens after the animation (redirect or clear the error) via onDone.
 //

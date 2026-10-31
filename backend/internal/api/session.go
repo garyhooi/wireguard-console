@@ -24,15 +24,14 @@ type adminIDKey struct{}
 type csrfTokenKey struct{}
 type sessionRowIDKey struct{}
 
-// Session cookie names. The token value is the same opaque 32-byte hex the
+// Session cookie name. The token value is the same opaque 32-byte hex the
 // API used to return in JSON — only the transport changes (HttpOnly cookie
-// instead of JS-readable localStorage).
+// instead of JS-readable localStorage). Pending-login cookies and their
+// lifetime live in mfa_shared.go (wgc_mfa_pending).
 const (
-	sessionCookieName    = "wgc_session"
-	pending2FACookieName = "wgc_pending2fa"
+	sessionCookieName = "wgc_session"
 
 	sessionLifetime = 24 * time.Hour
-	pending2FALife  = 10 * time.Minute
 
 	// Idle timeout: a session whose last activity is older than this is
 	// rejected even though its absolute expiry has not been reached.
@@ -89,9 +88,9 @@ func clearSessionCookie(w http.ResponseWriter, r *http.Request, name string) {
 	setSessionCookie(w, r, name, "", -1)
 }
 
-// readSessionToken returns the raw (unhashed) session token from the cookie
-// jar. The pending-2FA cookie is tried when present so the verify step can
-// consume it; the middleware layers decide which is meaningful.
+// readCookieToken returns the raw (unhashed) token stored in the named
+// cookie. Pending-MFA login cookies use the same helper (see mfa_shared.go);
+// the middleware layers decide which cookie is meaningful.
 func readCookieToken(r *http.Request, name string) string {
 	c, err := r.Cookie(name)
 	if err != nil {
@@ -109,8 +108,9 @@ func randomCSRFToken() (string, error) {
 }
 
 // createSession persists a new admin_sessions row for rawToken and returns
-// the per-session CSRF token when withCSRF is true (pending-2FA tokens get
-// none — they are single-purpose and consumed before any CSRF applies).
+// the per-session CSRF token when withCSRF is true (pending-MFA login rows are
+// created by createPendingMFASession with pending_kind set and no CSRF token —
+// they are single-purpose and consumed before any CSRF applies).
 // ip_address is INET: store the bare IP, never the host:port from RemoteAddr.
 func createSession(ctx context.Context, store *Store, adminID uuid.UUID, rawToken string, r *http.Request, ttl time.Duration, withCSRF bool) (string, error) {
 	ip := r.RemoteAddr
@@ -153,8 +153,8 @@ func currentSessionTokenHash(r *http.Request) string {
 }
 
 // revokeAdminSessions deletes every live session row for an admin. Used when
-// credentials change (password, 2FA) or the account is demoted/disabled/
-// deleted — the old sessions must stop working immediately.
+// credentials change (password, MFA factors) or the account is demoted/
+// disabled/deleted — the old sessions must stop working immediately.
 func revokeAdminSessions(ctx context.Context, store *Store, adminID uuid.UUID) error {
 	_, err := store.pool.Exec(ctx,
 		`DELETE FROM admin_sessions WHERE admin_id = $1`, adminID)
@@ -173,24 +173,24 @@ func revokeAdminSessionsExcept(ctx context.Context, store *Store, adminID uuid.U
 // SessionView is the Active Sessions UI row: the session's own row id
 // (revoke target), device/user-agent label, ip, created/last-seen/expiry.
 type SessionView struct {
-	ID          uuid.UUID  `json:"id"`
-	IPAddress   *string    `json:"ip_address"`
-	UserAgent   string     `json:"user_agent"`
-	CreatedAt   time.Time  `json:"created_at"`
-	LastSeenAt  *time.Time `json:"last_seen_at"`
-	ExpiresAt   time.Time  `json:"expires_at"`
-	IsCurrent   bool       `json:"is_current"`
-	IsPending2F bool       `json:"is_pending_2fa"` // 10-min login attempt, not a full session
+	ID           uuid.UUID  `json:"id"`
+	IPAddress    *string    `json:"ip_address"`
+	UserAgent    string     `json:"user_agent"`
+	CreatedAt    time.Time  `json:"created_at"`
+	LastSeenAt   *time.Time `json:"last_seen_at"`
+	ExpiresAt    time.Time  `json:"expires_at"`
+	IsCurrent    bool       `json:"is_current"`
+	IsPendingMFA bool       `json:"is_pending_mfa"` // 10-min login attempt, not a full session
 }
 
 // listAdminSessions returns every live session row for an admin (used by the
 // Profile → Active Sessions panel). Live = not past absolute expiry. A row is
-// a pending-2FA login attempt when it carries no csrf_token (see
-// createSession: only full sessions get one).
+// a pending-MFA login attempt when it has a pending_kind (see
+// createPendingMFASession); only full sessions carry a CSRF token.
 func listAdminSessions(ctx context.Context, store *Store, adminID uuid.UUID, currentHash string) ([]SessionView, error) {
 	rows, err := store.pool.Query(ctx, `
 		SELECT id, ip_address::text, COALESCE(user_agent, ''), created_at, last_seen_at, expires_at,
-		       (token_hash = $2) AS is_current, (csrf_token IS NULL) AS is_pending_2fa
+		       (token_hash = $2) AS is_current, (pending_kind IS NOT NULL) AS is_pending_mfa
 		FROM admin_sessions
 		WHERE admin_id = $1 AND expires_at > now()
 		ORDER BY created_at DESC
@@ -203,7 +203,7 @@ func listAdminSessions(ctx context.Context, store *Store, adminID uuid.UUID, cur
 	out := []SessionView{}
 	for rows.Next() {
 		var s SessionView
-		if err := rows.Scan(&s.ID, &s.IPAddress, &s.UserAgent, &s.CreatedAt, &s.LastSeenAt, &s.ExpiresAt, &s.IsCurrent, &s.IsPending2F); err != nil {
+		if err := rows.Scan(&s.ID, &s.IPAddress, &s.UserAgent, &s.CreatedAt, &s.LastSeenAt, &s.ExpiresAt, &s.IsCurrent, &s.IsPendingMFA); err != nil {
 			return nil, err
 		}
 		out = append(out, s)

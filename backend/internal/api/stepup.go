@@ -8,10 +8,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Step-up 2FA grace window (Configuration → Security, super_admin only).
+// Step-up MFA grace window (Configuration → Security, super_admin only).
 //
 // loadStepUpMinutes returns how many minutes after one successful step-up
-// 2FA verification an admin's same session is trusted for the other
+// MFA verification an admin's same session is trusted for the other
 // sensitive actions without re-entering a code. 0 (default) = disabled:
 // every sensitive action asks for a code.
 
@@ -29,7 +29,7 @@ func loadStepUpMinutes(ctx context.Context, pool *pgxpool.Pool) int {
 	return minutes
 }
 
-// GetStepUpConfig returns the configured 2FA step-up grace window.
+// GetStepUpConfig returns the configured MFA step-up grace window.
 // Readable by every signed-in admin (the SPA shows the current policy).
 func GetStepUpConfig(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -40,7 +40,7 @@ func GetStepUpConfig(store *Store) http.HandlerFunc {
 	}
 }
 
-// UpdateStepUpConfig persists the 2FA step-up grace window (minutes).
+// UpdateStepUpConfig persists the MFA step-up grace window (minutes).
 // super_admin only (route-gated): a security policy setting. 0 disables the
 // grace — every sensitive action asks for the actor's code again.
 func UpdateStepUpConfig(store *Store) http.HandlerFunc {
@@ -54,7 +54,7 @@ func UpdateStepUpConfig(store *Store) http.HandlerFunc {
 			return
 		}
 		ctx := context.Background()
-		if !verifyActor2FACode(w, r, ctx, store, getAdminID(r), req.Code) {
+		if !verifyActorMFACode(w, r, ctx, store, getAdminID(r), req.Code) {
 			return
 		}
 		if req.StepUpMinutes < 0 || req.StepUpMinutes > 1440 {
@@ -69,7 +69,7 @@ func UpdateStepUpConfig(store *Store) http.HandlerFunc {
 			ON CONFLICT (id) DO UPDATE SET
 				step_up_minutes = EXCLUDED.step_up_minutes, updated_at = now()
 		`, req.StepUpMinutes); err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to save 2FA step-up window")
+			writeError(w, http.StatusInternalServerError, "Failed to save MFA step-up window")
 			return
 		}
 

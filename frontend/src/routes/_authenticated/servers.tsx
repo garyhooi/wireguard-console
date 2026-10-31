@@ -1,7 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { Confirm2FA } from '../../lib/Confirm2FA'
+import { ConfirmMFA } from '../../lib/ConfirmMFA'
 import { apiFetch, apiJson } from '../../lib/api'
-import { is2FAError, useStepUpMinutes } from '../../lib/stepup'
+import { isMFAError, useStepUpMinutes } from '../../lib/stepup'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { IconCopy, IconPlus, IconTerminal2 } from '@tabler/icons-react'
@@ -72,28 +72,29 @@ function ServersPage() {
   const [form, setForm] = useState(emptyForm)
   const [hostSetup, setHostSetup] = useState<{ name: string; text: string } | null>(null)
   const [hostCopied, setHostCopied] = useState(false)
-  // Step-up 2FA gate: server edits/deletes and viewing the host setup
+  // Step-up MFA gate: server edits/deletes and viewing the host setup
   // (which reveals the server's private key) all require the admin's own
-  // authenticator code. run() receives the entered code.
-  const [pending2FA, setPending2FA] = useState<{
+  // step-up proof. run() receives the entered code ('' after a passkey).
+  const [pendingMFA, setPendingMFA] = useState<{
     label: string
     run: (code: string) => Promise<void>
   } | null>(null)
 
-  // 2FA step-up grace: try the action without a code first — the server
-  // accepts it when this session already verified within the window. Only
-  // when the server answers with a 2FA error do we open the code modal.
+  // MFA step-up grace: try the action without a code first — the server
+  // accepts it when this session already verified within the window (or a
+  // fresh passkey step-up stamped it). Only when the server answers with an
+  // MFA step-up error do we open the confirmation modal.
   const stepUpMinutes = useStepUpMinutes()
-  const gate2FA = (label: string, run: (code: string) => Promise<void>) => {
+  const gateMFA = (label: string, run: (code: string) => Promise<void>) => {
     if (stepUpMinutes <= 0) {
-      setPending2FA({ label, run }) // grace off — ask immediately
+      setPendingMFA({ label, run }) // grace off — ask immediately
       return
     }
-    run('').catch((e: Error) => {
-      if (is2FAError(e.message)) {
-        setPending2FA({ label, run })
+    run('').catch((e) => {
+      if (isMFAError(e)) {
+        setPendingMFA({ label, run })
       } else {
-        setError(e.message)
+        setError(e instanceof Error ? e.message : String(e))
       }
     })
   }
@@ -148,10 +149,10 @@ function ServersPage() {
   })
 
   // Submit (create or edit). Editing is a privileged action — require the
-  // admin's own 2FA code before the PATCH. Creating is not gated.
+  // admin's own MFA step-up before the PATCH. Creating is not gated.
   const submit = () => {
     if (editing) {
-      gate2FA(`save changes to server "${editing.name}"`, async (code) =>
+      gateMFA(`save changes to server "${editing.name}"`, async (code) =>
         saveMutation.mutateAsync(code),
       )
     } else {
@@ -176,7 +177,7 @@ function ServersPage() {
 
   const confirmDelete = (server: Server) => {
     if (!confirm(`Delete server "${server.name}" and all of its peers?`)) return
-    gate2FA(`delete server "${server.name}"`, async (code) =>
+    gateMFA(`delete server "${server.name}"`, async (code) =>
       removeMutation.mutateAsync({ ...server, code }),
     )
   }
@@ -208,7 +209,7 @@ function ServersPage() {
   }
 
   // Host setup reveals the server's private key + NAT commands — gated
-  // behind the admin's own 2FA code.
+  // behind the admin's own MFA step-up.
   const fetchHostSetup = async (server: Server, code: string) => {
     setError('')
     try {
@@ -228,7 +229,7 @@ function ServersPage() {
   }
 
   const confirmHostSetup = (server: Server) => {
-    gate2FA(`view the host setup for server "${server.name}"`, async (code) =>
+    gateMFA(`view the host setup for server "${server.name}"`, async (code) =>
       fetchHostSetup(server, code),
     )
   }
@@ -496,17 +497,17 @@ function ServersPage() {
         </div>
       </div>
 
-      {/* Step-up 2FA: edit/delete server or view its host setup */}
-      <Confirm2FA
-        open={pending2FA !== null}
-        onClose={() => setPending2FA(null)}
-        title="Confirm with 2FA"
+      {/* Step-up MFA: edit/delete server or view its host setup */}
+      <ConfirmMFA
+        open={pendingMFA !== null}
+        onClose={() => setPendingMFA(null)}
+        title="Confirm with MFA"
         description={
-          pending2FA
-            ? `Enter your own authenticator code to ${pending2FA.label}.`
+          pendingMFA
+            ? `Confirm this action with your passkey or an authenticator code to ${pendingMFA.label}.`
             : undefined
         }
-        onSubmit={pending2FA ? pending2FA.run : null}
+        onSubmit={pendingMFA ? pendingMFA.run : null}
         submitLabel="Authorize"
       />
     </div>

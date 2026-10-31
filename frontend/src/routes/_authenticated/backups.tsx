@@ -15,9 +15,9 @@ import {
   tdCls,
   thCls,
 } from '../../lib/ui'
-import { Confirm2FA } from '../../lib/Confirm2FA'
+import { ConfirmMFA } from '../../lib/ConfirmMFA'
 import { apiFetch, apiJson } from '../../lib/api'
-import { is2FAError, useStepUpMinutes } from '../../lib/stepup'
+import { isMFAError, useStepUpMinutes } from '../../lib/stepup'
 import { getTimezone } from '../../lib/timezone'
 
 interface BackupList {
@@ -67,8 +67,8 @@ export function backupLabel(name: string): string {
   return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}`
 }
 
-/** A pending privileged backup action awaiting the admin's own 2FA code. */
-interface Pending2FA {
+/** A pending privileged backup action awaiting the admin's own MFA step-up. */
+interface PendingMFA {
   label: string
   run: (code: string) => Promise<void>
 }
@@ -87,22 +87,23 @@ function BackupsPage() {
   const fileInput = useRef<HTMLInputElement>(null)
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
-  const [pending2FA, setPending2FA] = useState<Pending2FA | null>(null)
+  const [pendingMFA, setPendingMFA] = useState<PendingMFA | null>(null)
 
-  // 2FA step-up grace: try the action without a code first — the server
-  // accepts it when this session already verified within the window. Only
-  // when the server answers with a 2FA error do we open the code modal.
+  // MFA step-up grace: try the action without a code first — the server
+  // accepts it when this session already verified within the window (or a
+  // fresh passkey step-up stamped it). Only when the server answers with an
+  // MFA step-up error do we open the confirmation modal.
   const stepUpMinutes = useStepUpMinutes()
-  const gate2FA = (label: string, run: (code: string) => Promise<void>) => {
+  const gateMFA = (label: string, run: (code: string) => Promise<void>) => {
     if (stepUpMinutes <= 0) {
-      setPending2FA({ label, run }) // grace off — ask immediately
+      setPendingMFA({ label, run }) // grace off — ask immediately
       return
     }
-    run('').catch((e: Error) => {
-      if (is2FAError(e.message)) {
-        setPending2FA({ label, run })
+    run('').catch((e) => {
+      if (isMFAError(e)) {
+        setPendingMFA({ label, run })
       } else {
-        setError(e.message)
+        setError(e instanceof Error ? e.message : String(e))
       }
     })
   }
@@ -126,7 +127,7 @@ function BackupsPage() {
     onError: (e: Error) => setError(e.message),
   })
 
-  // Download streams the file; the server requires the actor's 2FA code.
+  // Download streams the file; the server requires the actor's MFA step-up.
   const download = (filename: string, code: string) => {
     return apiFetch('/api/backup/download', {
       method: 'POST',
@@ -144,10 +145,10 @@ function BackupsPage() {
   }
 
   const confirmDownload = (filename: string) => {
-    gate2FA(`download backup ${filename}`, (code) => download(filename, code))
+    gateMFA(`download backup ${filename}`, (code) => download(filename, code))
   }
 
-  // Restore from an existing server-side backup (2FA-gated).
+  // Restore from an existing server-side backup (MFA step-up gated).
   const restoreMutation = useMutation({
     mutationFn: async (a: { filename: string; code: string }) => {
       return apiJson('/api/backup/restore', {
@@ -171,12 +172,12 @@ function BackupsPage() {
     ) {
       return
     }
-    gate2FA(`restore backup ${filename} (replaces current data)`, (code) =>
+    gateMFA(`restore backup ${filename} (replaces current data)`, (code) =>
       restoreMutation.mutateAsync({ filename, code }).then(() => undefined),
     )
   }
 
-  // Restore from an uploaded .sql.gz file (2FA-gated).
+  // Restore from an uploaded .sql.gz file (MFA step-up gated).
   const uploadMutation = useMutation({
     mutationFn: async (a: { file: File; code: string }) => {
       const fd = new FormData()
@@ -218,7 +219,7 @@ function BackupsPage() {
     ) {
       return
     }
-    gate2FA(`delete backup ${filename}`, (code) =>
+    gateMFA(`delete backup ${filename}`, (code) =>
       deleteMutation.mutateAsync({ filename, code }).then(() => undefined),
     )
   }
@@ -236,7 +237,7 @@ function BackupsPage() {
       return
     }
     setError('')
-    gate2FA(`restore from uploaded file ${file.name} (replaces current data)`, (code) =>
+    gateMFA(`restore from uploaded file ${file.name} (replaces current data)`, (code) =>
       uploadMutation.mutateAsync({ file, code }).then(() => undefined),
     )
   }
@@ -245,7 +246,7 @@ function BackupsPage() {
     <div>
       <PageHeader
         title="Backups"
-        description="One-click database backups live on the console server (Docker volume, /var/backups/wgconsole). Creating one runs pg_dump; restoring replaces the current database with a saved copy. Downloading, restoring, uploading or deleting a backup requires your own 2FA code."
+        description="One-click database backups live on the console server (Docker volume, /var/backups/wgconsole). Creating one runs pg_dump; restoring replaces the current database with a saved copy. Downloading, restoring, uploading or deleting a backup requires an MFA step-up (passkey or authenticator code)."
         actions={
           <PrimaryButton onClick={() => createMutation.mutate()} disabled={createMutation.isPending}>
             <IconArchive size={16} stroke={1.6} aria-hidden="true" />
@@ -352,20 +353,20 @@ function BackupsPage() {
       <p className="mt-4 text-xs text-zinc-600 max-w-3xl leading-relaxed">
         Tip: back up before major changes, and copy backups off this server for disaster recovery
         (they live only on the Docker volume). Downloading a backup lets you keep an off-site copy;
-        restoring wipes current data, so every destructive action asks for your 2FA code first.
+        restoring wipes current data, so every destructive action asks for an MFA step-up first.
       </p>
 
-      {/* Step-up 2FA gate for backup actions */}
-      <Confirm2FA
-        open={pending2FA !== null}
-        onClose={() => setPending2FA(null)}
-        title="Confirm with 2FA"
+      {/* Step-up MFA gate for backup actions */}
+      <ConfirmMFA
+        open={pendingMFA !== null}
+        onClose={() => setPendingMFA(null)}
+        title="Confirm with MFA"
         description={
-          pending2FA
-            ? `Enter your own authenticator code to ${pending2FA.label}.`
+          pendingMFA
+            ? `Confirm this action with your passkey or an authenticator code to ${pendingMFA.label}.`
             : undefined
         }
-        onSubmit={pending2FA ? pending2FA.run : null}
+        onSubmit={pendingMFA ? pendingMFA.run : null}
       />
     </div>
   )

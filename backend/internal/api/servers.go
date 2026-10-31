@@ -240,7 +240,7 @@ func UpdateServer(store *Store) http.HandlerFunc {
 			DefaultAllowedIPs   string   `json:"default_allowed_ips"`
 			MTU                 int      `json:"mtu"`
 			PersistentKeepalive int      `json:"persistent_keepalive"`
-			Code                string   `json:"code"` // step-up 2FA
+			Code                string   `json:"code"` // step-up MFA
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
@@ -251,8 +251,8 @@ func UpdateServer(store *Store) http.HandlerFunc {
 		adminID := getAdminID(r)
 
 		// Editing a server reconfigures live VPN routing/NAT — require the
-		// acting admin's own 2FA code first.
-		if !verifyActor2FA(w, r, ctx, store, adminID, req.Code) {
+		// acting admin's own MFA code first.
+		if !verifyActorMFA(w, r, ctx, store, adminID, req.Code) {
 			return
 		}
 		_, err = store.pool.Exec(ctx, `
@@ -287,13 +287,13 @@ func DeleteServer(store *Store) http.HandlerFunc {
 		adminID := getAdminID(r)
 
 		// Deleting a server tears down the interface and every peer — require
-		// the acting admin's own 2FA code first.
+		// the acting admin's own MFA code first.
 		var req stepUpRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
-		if !verifyActor2FA(w, r, ctx, store, adminID, req.Code) {
+		if !verifyActorMFA(w, r, ctx, store, adminID, req.Code) {
 			return
 		}
 
@@ -343,7 +343,7 @@ func DeleteServer(store *Store) http.HandlerFunc {
 // command required for client internet access.
 //
 // Served as POST (not GET): the config contains the server's private key,
-// so the acting admin must confirm with their own 2FA code first.
+// so the acting admin must confirm with their own MFA code first.
 func GetServerHostConfig(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		serverID, err := parseUUID(r.PathValue("id"))
@@ -360,7 +360,7 @@ func GetServerHostConfig(store *Store) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
-		if !verifyActor2FA(w, r, ctx, store, adminID, req.Code) {
+		if !verifyActorMFA(w, r, ctx, store, adminID, req.Code) {
 			return
 		}
 
@@ -508,10 +508,20 @@ func ListAdmins(store *Store) http.HandlerFunc {
 				writeError(w, http.StatusInternalServerError, "Failed to scan admin")
 				return
 			}
+			// Factor summary per row so the Admins page can show an MFA
+			// column and offer helpdesk resets.
+			summary, err := loadMFASummary(ctx, store, id)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to load MFA state")
+				return
+			}
 			admins = append(admins, map[string]interface{}{
 				"id": id.String(), "email": email, "role": role,
 				"totp_enabled": totpEnabled, "status": status,
-				"created_at": createdAt.UTC().Format(time.RFC3339),
+				"created_at":    createdAt.UTC().Format(time.RFC3339),
+				"mfa_enabled":   summary.Enabled,
+				"mfa_methods":   summary.Methods,
+				"passkey_count": summary.PasskeyCount,
 			})
 		}
 
@@ -587,7 +597,7 @@ func InviteAdmin(store *Store) http.HandlerFunc {
 		// Email the initial credentials (silent without SMTP, like invites).
 		subject, body := loadEmailTemplate(ctx, store.pool, "admin_invite",
 			"You've been invited to manage WireGuard Console",
-			"Login at {{console_url}} with email {{email}} and the temporary password {{password}}, then change it in Profile.")
+			"Login at {{console_url}} with email {{email}} and the temporary password {{password}}, then change it in Profile and set up MFA (passkey or authenticator app).")
 		vars := map[string]string{
 			"console_url": "https://" + domainFromEnv(),
 			"email":       req.Email,
@@ -658,10 +668,19 @@ func GetAdmin(store *Store) http.HandlerFunc {
 			return
 		}
 
+		summary, err := loadMFASummary(ctx, store, a.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to load MFA state")
+			return
+		}
+
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"id": a.ID.String(), "email": a.Email, "role": a.Role,
 			"totp_enabled": a.TOTPEnabled, "status": a.Status,
-			"created_at": createdAt.UTC().Format(time.RFC3339),
+			"created_at":    createdAt.UTC().Format(time.RFC3339),
+			"mfa_enabled":   summary.Enabled,
+			"mfa_methods":   summary.Methods,
+			"passkey_count": summary.PasskeyCount,
 		})
 	}
 }
@@ -690,11 +709,11 @@ func UpdateAdmin(store *Store) http.HandlerFunc {
 		isSelf := adminID == actorID
 
 		// Changing an admin's email, role or status is a privileged action:
-		// the acting admin must confirm with their own 2FA code (step-up).
+		// the acting admin must confirm with their own MFA code (step-up).
 		// A no-op PATCH (nothing to change) is allowed through untouched so
 		// the UI can send the current values safely.
 		if req.Email != "" || req.Role != "" || req.Status != "" {
-			if !verifyActor2FA(w, r, ctx, store, actorID, req.Code) {
+			if !verifyActorMFA(w, r, ctx, store, actorID, req.Code) {
 				return
 			}
 		}
@@ -818,7 +837,7 @@ func UpdateAdmin(store *Store) http.HandlerFunc {
 
 			// Role/email/status changed: revoke the target admin's sessions
 			// so the new state applies immediately. When the actor edited
-			// themselves the current (2FA-confirmed) session survives.
+			// themselves the current (MFA-confirmed) session survives.
 			if isSelf {
 				if err := revokeAdminSessionsExcept(ctx, store, adminID, currentSessionTokenHash(r)); err != nil {
 					log.Printf("Failed to revoke other sessions after self admin.update: admin_id=%s, err=%v", adminID, err)
@@ -836,7 +855,7 @@ func UpdateAdmin(store *Store) http.HandlerFunc {
 
 // ResetAdminPassword issues a new temporary password for an admin
 // (emailed when SMTP is configured; always returned once for manual share).
-// The acting super_admin must confirm with their own 2FA code.
+// The acting super_admin must confirm with their own MFA code.
 func ResetAdminPassword(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		adminID, err := parseUUID(r.PathValue("id"))
@@ -848,13 +867,13 @@ func ResetAdminPassword(store *Store) http.HandlerFunc {
 		actorID := getAdminID(r)
 
 		// Resetting someone's password is a privileged action: require the
-		// actor's own 2FA code (step-up) before issuing a new password.
+		// actor's own MFA code (step-up) before issuing a new password.
 		var req stepUpRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
-		if !verifyActor2FA(w, r, ctx, store, actorID, req.Code) {
+		if !verifyActorMFA(w, r, ctx, store, actorID, req.Code) {
 			return
 		}
 
