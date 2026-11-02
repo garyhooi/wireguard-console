@@ -74,6 +74,12 @@ export interface MFAStatus {
   totp_enabled: boolean
 }
 
+/** GET /api/auth/passkey/status — public passwordless capability probe. */
+export interface PasskeyStatus {
+  passkey_available: boolean
+  passkey_reason?: string
+}
+
 /** Normalized passkey ceremony start (begin response). */
 export interface PasskeyBegin {
   challengeId: string
@@ -160,6 +166,68 @@ export function mfaRetryAfterSeconds(err: unknown): number | undefined {
     if (typeof raw === 'number' && raw > 0) return Math.ceil(raw)
   }
   return undefined
+}
+
+// --- passwordless passkey login (public, /login page) --------------------
+
+/**
+ * GET /api/auth/passkey/status — capability-only probe used to decide whether
+ * /login shows the "Sign in with a passkey" button. Public and cheap; callers
+ * treat any failure as "hide the button".
+ */
+export async function getPasskeyStatus(): Promise<PasskeyStatus> {
+  return apiJson<PasskeyStatus>('/api/auth/passkey/status', { noAuthRedirect: true })
+}
+
+/**
+ * POST /api/auth/passkey/options — begin a discoverable-credential login.
+ * The server sets the short-lived wgc_passkey_login HttpOnly cookie; the
+ * returned options carry no allowCredentials (usernameless).
+ */
+export async function beginPasswordlessPasskey(): Promise<PasskeyBegin> {
+  const data = await apiJson<PasskeyBeginResponse>('/api/auth/passkey/options', {
+    method: 'POST',
+    skipCsrf: true,
+    noAuthRedirect: true,
+  })
+  const options = unwrapPublicKey(data.options) as PublicKeyCredentialRequestOptionsJSON
+  pendingCeremonyOptions.set(data.challenge_id, options)
+  pendingPasswordlessChallenge = data.challenge_id
+  return {
+    challengeId: data.challenge_id,
+    options,
+    rpId: data.rp_id,
+    expiresInSeconds: data.expires_in_seconds ?? 0,
+  }
+}
+
+/**
+ * Complete a passwordless passkey login: runs the browser assertion ceremony
+ * for the challenge captured by beginPasswordlessPasskey, posts it to
+ * /api/auth/passkey/finish, captures the session CSRF token and (by default)
+ * hard-navigates to /dashboard. The login page passes { navigate: false } so
+ * the success overlay can play first.
+ */
+export async function completePasswordlessPasskey(redirect: RedirectOption = {}): Promise<void> {
+  const challengeId = pendingPasswordlessChallenge
+  const options = challengeId ? pendingCeremonyOptions.get(challengeId) : undefined
+  if (!challengeId || !options) {
+    throw new Error('Passkey sign-in could not be started. Try again.')
+  }
+  try {
+    const credential: AuthenticationResponseJSON = await authenticatePasskey(options)
+    const data = await apiJson<LoginFinishResponse>('/api/auth/passkey/finish', {
+      method: 'POST',
+      body: { challenge_id: challengeId, credential },
+      skipCsrf: true,
+      noAuthRedirect: true,
+    })
+    setCsrfToken(data.csrf_token)
+    if (redirect.navigate !== false) navigateTo('/dashboard')
+  } finally {
+    pendingCeremonyOptions.delete(challengeId)
+    pendingPasswordlessChallenge = null
+  }
 }
 
 // --- pending-cookie login routes -----------------------------------------
@@ -452,6 +520,9 @@ export async function startPasskeyStepUp(): Promise<void> {
  * secrets, and are dropped as soon as the ceremony finishes).
  */
 const pendingCeremonyOptions = new Map<string, unknown>()
+
+/** Challenge captured by beginPasswordlessPasskey for the no-arg complete call. */
+let pendingPasswordlessChallenge: string | null = null
 
 /** Re-exported for the challenge pages (single redirect indirection). */
 export { navigateTo }

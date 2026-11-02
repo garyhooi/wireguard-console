@@ -149,6 +149,13 @@ func main() {
 		// Per-IP lockout state so the login page can resume its countdown
 		// after a refresh (no session exists yet while locked out).
 		r.Get("/auth/lockout-status", api.LoginLockoutStatus(store))
+		// Passwordless passkey sign-in: no password step at all. The account is
+		// resolved from the discoverable credential's user handle at finish, and
+		// the ceremony is bound to a short-lived HttpOnly cookie. Password login
+		// remains the fallback and still requires a second factor.
+		r.Get("/auth/passkey/status", api.PasskeyStatus(store))
+		r.Post("/auth/passkey/options", api.PasskeyPasswordlessBegin(store))
+		r.Post("/auth/passkey/finish", api.PasskeyPasswordlessFinish(store))
 		// MFA challenge (pending cookie only — these never mint a session
 		// without a proven factor; see mfa_shared.go finishMFALogin).
 		r.Get("/auth/mfa/state", api.MFAState(store))

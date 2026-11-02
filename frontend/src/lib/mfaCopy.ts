@@ -19,6 +19,15 @@ export function navigateTo(path: string): void {
 
 /** Product copy: title / body / button strings for the two screens. */
 export const mfaCopy = {
+  /** Login page: the secondary passwordless passkey entry (one button). */
+  login: {
+    passkeyButton: 'Sign in with a passkey',
+    passkeyBusy: 'Waiting for your passkey…',
+    passkeyDivider: 'or',
+    passkeyCancelled: 'No passkey was used. Try again, or sign in with your password.',
+    passkeyFailed: 'Passkey sign-in failed. Use your password instead.',
+  },
+
   common: {
     signInAgain: 'Sign in again',
     signOutAndRestart: 'Sign in with a different account',
@@ -76,12 +85,12 @@ export const mfaCopy = {
       'Multi-factor authentication is required for every admin before the console can be used. Set up at least one method now — you will confirm with it on every future sign-in.',
     chooseTitle: 'Choose your methods',
     chooseSubtitle:
-      'You can add both. A passkey is the fastest and most phishing-resistant option; an authenticator app works with any phone.',
+      'You can add both. A passkey is the fastest and most phishing-resistant option — after setup it can also sign you in without a password; an authenticator app works with any phone.',
     chooseHint: 'Choose at least one method to continue.',
     passkeyCardTitle: 'Passkey',
     passkeyCardBadge: 'Recommended',
     passkeyCardBody:
-      'Face ID, Touch ID, Windows Hello or a security key. Fast, phishing-resistant, and nothing to type.',
+      'Face ID, Touch ID, Windows Hello or a security key. Fast, phishing-resistant, and nothing to type — it can also sign you in without a password.',
     passkeyRecommendedButton: 'Use a passkey',
     totpCardTitle: 'Authenticator app',
     totpCardBody:
@@ -105,7 +114,9 @@ export const mfaCopy = {
     totpAdded: 'Authenticator app added.',
     passkeyTitle: 'Create a passkey',
     passkeySubtitle:
-      'Your browser will ask for Face ID, Touch ID, Windows Hello, or your security key. The passkey stays on your device — the console only stores its public key.',
+      'Your browser will ask for Face ID, Touch ID, Windows Hello, or your security key. The passkey stays on your device — the console only stores its public key. After setup, you can sign in with this passkey instead of your password.',
+    passkeyPasswordlessNote:
+      'This passkey will also appear on the login page: one tap can sign you in without a password.',
     passkeyCreateButton: 'Create passkey',
     passkeyCreatingButton: 'Waiting for your passkey…',
     passkeyAdded: 'Passkey added.',

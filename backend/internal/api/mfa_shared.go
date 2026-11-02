@@ -32,17 +32,22 @@ const (
 	mfaPendingCookieName    = "wgc_mfa_pending"
 	legacyPendingCookieName = "wgc_pending2fa"
 	mfaPendingLife          = 10 * time.Minute
-	mfaMaxAttempts          = 5
-	pendingKindVerify       = "verify"
-	pendingKindEnroll       = "enroll"
-	mfaMethodPasskey        = "passkey"
-	mfaMethodTOTP           = "totp"
-	mfaMethodRecoveryCode   = "recovery_code"
-	recoveryCodeAlphabet    = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-	recoveryCodeLength      = 12
-	recoveryCodeCount       = 10
-	recoveryCodeHashPrefix  = "v2:"
-	defaultMFAPolicy        = "any"
+	// Passwordless passkey ceremonies have no pending row (the account is only
+	// resolved from the assertion's user handle), so a short-lived cookie binds
+	// begin/finish to this browser.
+	passkeyLoginCookieName = "wgc_passkey_login"
+	passkeyLoginLife       = 5 * time.Minute
+	mfaMaxAttempts         = 5
+	pendingKindVerify      = "verify"
+	pendingKindEnroll      = "enroll"
+	mfaMethodPasskey       = "passkey"
+	mfaMethodTOTP          = "totp"
+	mfaMethodRecoveryCode  = "recovery_code"
+	recoveryCodeAlphabet   = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+	recoveryCodeLength     = 12
+	recoveryCodeCount      = 10
+	recoveryCodeHashPrefix = "v2:"
+	defaultMFAPolicy       = "any"
 )
 
 // MFA policy values stored in config.mfa_require_methods.
@@ -275,6 +280,21 @@ func clearPendingMFACookies(w http.ResponseWriter, r *http.Request) {
 	clearSessionCookie(w, r, legacyPendingCookieName)
 }
 
+// Passwordless passkey ceremonies: the begin response sets this cookie and the
+// finish request must present it, so a leaked challenge id alone cannot
+// complete an assertion in another browser.
+func setPasskeyLoginCookie(w http.ResponseWriter, r *http.Request, raw string) {
+	setSessionCookie(w, r, passkeyLoginCookieName, raw, int(passkeyLoginLife.Seconds()))
+}
+
+func readPasskeyLoginToken(r *http.Request) string {
+	return readCookieToken(r, passkeyLoginCookieName)
+}
+
+func clearPasskeyLoginCookie(w http.ResponseWriter, r *http.Request) {
+	clearSessionCookie(w, r, passkeyLoginCookieName)
+}
+
 // resolvePendingMFA maps the pending cookie to its admin. wantKind may be
 // empty ("any pending state") or verify/enroll to require an exact state.
 func resolvePendingMFA(ctx context.Context, store *Store, r *http.Request, wantKind string) (uuid.UUID, string, time.Time, string, error) {
@@ -351,6 +371,22 @@ func finishMFALogin(ctx context.Context, store *Store, w http.ResponseWriter, r 
 		return "", errNoPendingMFA
 	}
 
+	clearPendingMFACookies(w, r)
+
+	// Pending-bound ceremonies are spent with the login.
+	_, _ = store.pool.Exec(ctx, `
+		DELETE FROM webauthn_challenges WHERE admin_id = $1 AND purpose IN ('login','enroll')
+	`, adminID)
+
+	return mintLoginSession(ctx, store, w, r, adminID, "mfa.login_"+method, map[string]interface{}{
+		"method": method,
+	})
+}
+
+// mintLoginSession is the ONE place that turns a completed authentication into
+// a real session. Callers must already have proven a factor (MFA challenge,
+// completed enrollment, or a passwordless passkey assertion in this browser).
+func mintLoginSession(ctx context.Context, store *Store, w http.ResponseWriter, r *http.Request, adminID uuid.UUID, auditAction string, metadata map[string]interface{}) (string, error) {
 	token, err := generateToken()
 	if err != nil {
 		return "", err
@@ -361,18 +397,12 @@ func finishMFALogin(ctx context.Context, store *Store, w http.ResponseWriter, r 
 	}
 	setSessionCookie(w, r, sessionCookieName, token, int(sessionLifetime.Seconds()))
 	clearPendingMFACookies(w, r)
+	clearPasskeyLoginCookie(w, r)
 
 	// A completed login resets the password-failure brake for this IP.
 	ipLoginLockout.reset(getClientIP(r))
 
-	// Pending-bound ceremonies are spent with the login.
-	_, _ = store.pool.Exec(ctx, `
-		DELETE FROM webauthn_challenges WHERE admin_id = $1 AND purpose IN ('login','enroll')
-	`, adminID)
-
-	logAudit(ctx, store, adminID, "mfa.login_"+method, "admin", adminID.String(), map[string]interface{}{
-		"method": method,
-	})
+	logAudit(ctx, store, adminID, auditAction, "admin", adminID.String(), metadata)
 	return csrfToken, nil
 }
 

@@ -121,14 +121,14 @@ func derive() *Service {
 		RPID:          rpID,
 		RPDisplayName: display,
 		RPOrigins:     origins,
-		// Self-hosted console: do not ask for attestation (no MDS integration),
-		// keep discoverable credentials optional (login is username-first) and
-		// accept a security-key tap without PIN at login; step-up ceremonies ask
-		// for user verification explicitly.
+		// Self-hosted console: do not ask for attestation (no MDS integration).
+		// Resident keys are REQUIRED so a passkey can sign in without a password
+		// (discoverable credential + account picker); user verification is
+		// preferred at sign-in and required for step-up.
 		AttestationPreference: protocol.PreferNoAttestation,
 		AuthenticatorSelection: protocol.AuthenticatorSelection{
 			UserVerification: protocol.VerificationPreferred,
-			ResidentKey:      protocol.ResidentKeyRequirementDiscouraged,
+			ResidentKey:      protocol.ResidentKeyRequirementRequired,
 		},
 		Timeouts: wa.TimeoutsConfig{Registration: timeout, Login: timeout},
 	})

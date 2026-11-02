@@ -1,20 +1,34 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
-import { IconShieldLock } from '@tabler/icons-react'
-import { PrimaryButton, inputCls, labelCls } from '../lib/ui'
+import { IconFingerprint, IconShieldLock } from '@tabler/icons-react'
+import { GhostButton, PrimaryButton, inputCls, labelCls } from '../lib/ui'
 import { apiFetch } from '../lib/api'
-import { navigateTo } from '../lib/mfaClient'
+import {
+  beginPasswordlessPasskey,
+  completePasswordlessPasskey,
+  getPasskeyStatus,
+  mfaErrorCode,
+  mfaErrorStatus,
+  mfaRetryAfterSeconds,
+  navigateTo,
+} from '../lib/mfaClient'
+import { detectWebAuthnSupport, passwordlessPasskeyErrorMessage } from '../lib/webauthn'
+import { mfaCopy } from '../lib/mfaCopy'
 import { HoloPageBackground } from '../components/HoloPageBackground'
 import { AuthStatusOverlay } from '../components/AuthStatusOverlay'
 import { LoginLockoutOverlay } from '../components/LoginLockoutOverlay'
 
 /**
- * Login NEVER returns a session: a correct password yields either a pending
- * challenge (`pending_mfa`, prove an existing factor) or a forced-enrollment
- * hand-off (`pending_mfa_setup`, enroll the first factor). Only one of the
- * MFA endpoints mints the session; there is deliberately no direct-session
- * branch here.
+ * Password sign-in NEVER returns a session: a correct password yields either a
+ * pending challenge (`pending_mfa`, prove an existing factor) or a
+ * forced-enrollment hand-off (`pending_mfa_setup`, enroll the first factor);
+ * only an MFA endpoint mints the session.
+ *
+ * The secondary "Sign in with a passkey" button is the passwordless path: it
+ * runs a discoverable-credential WebAuthn assertion (no email/password) and
+ * the finish endpoint mints the session directly — see
+ * lib/mfaClient.completePasswordlessPasskey.
  */
 interface LoginResponse {
   csrf_token?: string
@@ -75,13 +89,18 @@ export const Route = createFileRoute('/login')({
   component: LoginPage,
 })
 
-export function LoginPage() {
+export function LoginPage({ successOverlayMs = 2000 }: { successOverlayMs?: number } = {}) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
-  // Full-page verification animation on a rejected password. Successful
-  // passwords never land here as a session: they continue to /mfa-verify or
-  // /mfa-setup, so only the failure animation is ever shown on this page.
-  const [authOutcome, setAuthOutcome] = useState<'failure' | null>(null)
+  // Full-page verification animation. Passwords never land here as a session:
+  // they continue to /mfa-verify or /mfa-setup. A successful passwordless
+  // passkey sign-in does complete here, so it uses the green variant.
+  const [authOutcome, setAuthOutcome] = useState<'success' | 'failure' | null>(null)
+  // Passwordless passkey entry: hidden until the server capability probe and
+  // browser support both say yes. Best-effort — any failure keeps it hidden.
+  const [passkeyEnabled, setPasskeyEnabled] = useState(false)
+  const [passkeyBusy, setPasskeyBusy] = useState(false)
+  const [passkeyHint, setPasskeyHint] = useState('')
   // Remaining seconds of a server-enforced IP lockout (null = not locked).
   const [lockoutSeconds, setLockoutSeconds] = useState<number | null>(null)
 
@@ -105,6 +124,26 @@ export function LoginPage() {
       .catch(() => {
         // Lockout status is best-effort: a failed probe must not block login.
       })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // Capability-gate the secondary "Sign in with a passkey" button: the
+  // deployment must have passkeys enabled AND this browser must be able to run
+  // a ceremony. The probe is best-effort — unreachable/unsupported => hidden.
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      const [status, support] = await Promise.allSettled([
+        getPasskeyStatus(),
+        detectWebAuthnSupport(),
+      ])
+      if (cancelled) return
+      const available = status.status === 'fulfilled' && status.value.passkey_available === true
+      const supported = support.status === 'fulfilled' && support.value.supported
+      setPasskeyEnabled(available && supported)
+    })()
     return () => {
       cancelled = true
     }
@@ -189,12 +228,48 @@ export function LoginPage() {
     }
     forgetLockoutEmail()
     setLockoutSeconds(null)
+    setPasskeyHint('')
     loginMutation.reset()
   }
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
+    setPasskeyHint('')
     loginMutation.mutate({ email, password })
+  }
+
+  // Passwordless sign-in: options -> browser ceremony -> finish -> success
+  // animation -> /dashboard. Every failure keeps the password form usable.
+  const handlePasskeySignIn = async () => {
+    if (passkeyBusy || loginMutation.isPending || lockoutSeconds !== null) return
+    setPasskeyBusy(true)
+    setPasskeyHint('')
+    setAuthOutcome(null)
+    try {
+      await beginPasswordlessPasskey()
+      await completePasswordlessPasskey({ navigate: false })
+      setAuthOutcome('success')
+    } catch (err) {
+      const code = mfaErrorCode(err)
+      const status = mfaErrorStatus(err)
+      if (code === 'mfa_unavailable' || status === 409) {
+        // The deployment cannot do passwordless passkeys after all — hide the
+        // entry point instead of leaving a dead button.
+        setPasskeyEnabled(false)
+        return
+      }
+      if (status === 429 || code === 'mfa_locked') {
+        const seconds = mfaRetryAfterSeconds(err)
+        if (seconds) {
+          setLockoutSeconds(seconds)
+          return
+        }
+      }
+      const message = passwordlessPasskeyErrorMessage(err)
+      if (message) setPasskeyHint(message)
+    } finally {
+      setPasskeyBusy(false)
+    }
   }
 
   return (
@@ -262,6 +337,34 @@ export function LoginPage() {
               {loginMutation.isPending ? 'Signing in…' : 'Sign in'}
             </PrimaryButton>
           </form>
+
+          {passkeyEnabled && (
+            <div className="mt-6">
+              <div className="flex items-center gap-3" aria-hidden="true">
+                <span className="h-px flex-1 bg-zinc-800" />
+                <span className="text-[11px] uppercase tracking-[0.2em] text-zinc-600">
+                  {mfaCopy.login.passkeyDivider}
+                </span>
+                <span className="h-px flex-1 bg-zinc-800" />
+              </div>
+              <GhostButton
+                type="button"
+                onClick={() => {
+                  void handlePasskeySignIn()
+                }}
+                disabled={passkeyBusy || loginMutation.isPending || lockoutSeconds !== null}
+                className="mt-4 w-full py-2.5"
+              >
+                <IconFingerprint size={16} aria-hidden="true" />
+                {passkeyBusy ? mfaCopy.login.passkeyBusy : mfaCopy.login.passkeyButton}
+              </GhostButton>
+              {passkeyHint && (
+                <p role="status" className="mt-3 text-center text-sm text-amber-400/90">
+                  {passkeyHint}
+                </p>
+              )}
+            </div>
+          )}
         </div>
 
         <p className="mt-6 text-center text-xs tracking-wide text-zinc-500">
@@ -283,6 +386,14 @@ export function LoginPage() {
           status="failure"
           message={loginMutation.error?.message}
           onDone={() => setAuthOutcome(null)}
+        />
+      )}
+
+      {authOutcome === 'success' && (
+        <AuthStatusOverlay
+          status="success"
+          durationMs={successOverlayMs}
+          onDone={() => navigateTo('/dashboard')}
         />
       )}
     </div>

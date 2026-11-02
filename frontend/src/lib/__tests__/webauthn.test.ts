@@ -21,6 +21,7 @@ vi.mock('@simplewebauthn/browser', () => ({
 import {
   _resetWebAuthnSupportForTests,
   authenticatePasskey,
+  passwordlessPasskeyErrorMessage,
   cancelCeremony,
   detectWebAuthnSupport,
   isWebAuthnCancel,
@@ -229,5 +230,34 @@ describe('webAuthnErrorKey / webauthnErrorMessage', () => {
     expect(isWebAuthnCancel({ code: 'ERROR_CEREMONY_ABORTED' })).toBe(true)
     expect(isWebAuthnCancel({ code: 'ERROR_INVALID_RP_ID' })).toBe(false)
     expect(isWebAuthnCancel(new Error('boom'))).toBe(false)
+  })
+})
+
+describe('passwordlessPasskeyErrorMessage', () => {
+  it('uses the gentle hint for a dismissed or timed-out prompt', () => {
+    expect(passwordlessPasskeyErrorMessage({ name: 'NotAllowedError' })).toBe(
+      mfaCopy.login.passkeyCancelled,
+    )
+    expect(
+      passwordlessPasskeyErrorMessage({
+        code: 'ERROR_PASSTHROUGH_SEE_CAUSE_PROPERTY',
+        cause: { name: 'NotAllowedError' },
+      }),
+    ).toBe(mfaCopy.login.passkeyCancelled)
+  })
+
+  it('collapses other failures to the short password fallback', () => {
+    expect(passwordlessPasskeyErrorMessage({ code: 'ERROR_INVALID_RP_ID' })).toBe(
+      mfaCopy.login.passkeyFailed,
+    )
+    expect(passwordlessPasskeyErrorMessage(new WebAuthnUnsupportedError())).toBe(
+      mfaCopy.login.passkeyFailed,
+    )
+    expect(passwordlessPasskeyErrorMessage(new Error('boom'))).toBe(mfaCopy.login.passkeyFailed)
+  })
+
+  it('stays silent for aborted ceremonies (route change / unmount)', () => {
+    expect(passwordlessPasskeyErrorMessage({ code: 'ERROR_CEREMONY_ABORTED' })).toBe('')
+    expect(passwordlessPasskeyErrorMessage({ name: 'AbortError' })).toBe('')
   })
 })

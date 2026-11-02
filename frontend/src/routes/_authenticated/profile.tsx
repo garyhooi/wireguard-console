@@ -161,7 +161,7 @@ export function ProfilePage() {
     setStepUp({
       title: 'Add passkey',
       description:
-        'Confirm this action to register a passkey on this device. Your browser will then ask for Face ID, Touch ID, Windows Hello or a security key.',
+        'Confirm this action to register a passkey on this device. Your browser will then ask for Face ID, Touch ID, Windows Hello or a security key. Once added, this passkey can also sign you in from the login page without a password.',
       submitLabel: 'Continue',
       run: stepUpAction(async (code) => {
         await addPasskey(code)
@@ -300,8 +300,9 @@ export function ProfilePage() {
             Multi-factor authentication is not set up for your account.
           </p>
           <p className="mt-1 text-sm text-amber-200/80">
-            Add a passkey or an authenticator app below. Until then, sensitive console actions
-            stay locked and your next sign-in will force enrollment.
+            Add a passkey or an authenticator app below. A passkey can also sign you in without
+            a password. Until then, sensitive console actions stay locked and your next sign-in
+            will force enrollment.
           </p>
         </div>
       )}
@@ -400,7 +401,8 @@ export function ProfilePage() {
           <div className="px-5 py-4 space-y-5">
             <p className="text-sm text-zinc-500">
               Sign in and authorize sensitive actions with a passkey, an authenticator app, or a
-              one-time recovery code. At least one factor is required for every admin.
+              one-time recovery code. A passkey can also sign you in from the login page without a
+              password. At least one factor is required for every admin.
               {requiredPolicy ? (
                 <span className="block mt-1 text-amber-400/90">
                   Console policy requires {POLICY_LABELS[status?.require_methods || 'any']}.
@@ -485,8 +487,8 @@ export function ProfilePage() {
 
                   {passkeyFactors.length === 0 && (
                     <li className="px-4 py-3 text-xs text-zinc-600">
-                      No passkeys registered yet. A passkey is phishing-resistant and faster than
-                      typing a code.
+                      No passkeys registered yet. A passkey is phishing-resistant, faster than
+                      typing a code, and can sign you in without a password.
                     </li>
                   )}
                 </ul>

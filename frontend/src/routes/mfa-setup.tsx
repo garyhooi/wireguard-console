@@ -729,6 +729,7 @@ export function MFASetupPage({ successOverlayMs = 2000 }: { successOverlayMs?: n
                 <IconFingerprint size={20} className="mt-0.5 shrink-0 text-teal-300" aria-hidden="true" />
                 <span>{mfaCopy.setup.passkeySubtitle}</span>
               </div>
+              <p className="text-xs text-zinc-500">{mfaCopy.setup.passkeyPasswordlessNote}</p>
 
               {hint && (
                 <div role="status" className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm text-amber-300">

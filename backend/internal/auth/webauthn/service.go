@@ -37,6 +37,7 @@ var (
 // webauthn.User. WebAuthnID is the stable opaque handle from webauthn_users,
 // never the admin UUID; name/displayName are the admin email.
 type adminUser struct {
+	adminID     uuid.UUID
 	handle      []byte
 	name        string
 	displayName string
@@ -76,7 +77,7 @@ func loadAdminUser(ctx context.Context, pool *pgxpool.Pool, adminID uuid.UUID, r
 		return nil, err
 	}
 
-	user := &adminUser{handle: handle, name: email, displayName: email}
+	user := &adminUser{adminID: adminID, handle: handle, name: email, displayName: email}
 	if withCredentials {
 		records, err := ListCredentials(ctx, pool, adminID, rpID)
 		if err != nil {
@@ -111,14 +112,15 @@ func beginLoginOptions(svc *Service, user *adminUser, purpose string) (*protocol
 
 // beginRegistrationOptions builds the credential-creation options + session
 // data: attestation none (no MDS integration), UV preferred, resident key
-// discouraged (login is username-first), credProps requested so the SPA can
+// REQUIRED so every new passkey is discoverable and can sign in without a
+// password (login can be passwordless), credProps requested so the SPA can
 // tell discoverable passkeys apart, and the RP's existing credentials excluded
 // so one authenticator is not enrolled twice under the same account.
 func beginRegistrationOptions(svc *Service, user *adminUser) (*protocol.CredentialCreation, *wa.SessionData, error) {
 	opts := []wa.RegistrationOption{
 		wa.WithAuthenticatorSelection(protocol.AuthenticatorSelection{
 			UserVerification: protocol.VerificationPreferred,
-			ResidentKey:      protocol.ResidentKeyRequirementDiscouraged,
+			ResidentKey:      protocol.ResidentKeyRequirementRequired,
 		}),
 		wa.WithConveyancePreference(protocol.PreferNoAttestation),
 		wa.WithExtensions(wa.WithExtensionCredProps()),
@@ -278,4 +280,137 @@ func FinishRegistrationFor(ctx context.Context, pool *pgxpool.Pool, adminID uuid
 		return CredentialRecord{}, err
 	}
 	return InsertCredential(ctx, pool, adminID, svc.RPID, validated, label)
+}
+
+// ---- discoverable (passwordless) login ------------------------------------
+
+// beginDiscoverableLoginOptions builds the assertion options + session data for
+// a passwordless sign-in. Nothing about the account is known yet, so no
+// allowCredentials are sent (the authenticator uses its discoverable
+// credential) and UV is REQUIRED: a bare possession tap is not an
+// authentication factor in this single-step flow.
+func beginDiscoverableLoginOptions(svc *Service) (*protocol.CredentialAssertion, *wa.SessionData, error) {
+	opts := []wa.LoginOption{
+		wa.WithUserVerification(protocol.VerificationRequired),
+	}
+	if origin := svc.CeremonyOrigin(); origin != "" {
+		opts = append(opts, wa.WithLoginOrigin(origin))
+	}
+	return svc.WA.BeginDiscoverableLogin(opts...)
+}
+
+// validateDiscoverableAssertion parses a raw AuthenticationResponseJSON and
+// validates it against the persisted ceremony session. resolve maps the
+// assertion's opaque user handle to the owning account; the library then
+// enforces credential ownership, RP ID hash, origin, challenge, UV and the
+// signature before returning.
+func validateDiscoverableAssertion(svc *Service, session wa.SessionData, body []byte, resolve wa.DiscoverableUserHandler) (*adminUser, *wa.Credential, error) {
+	if resolve == nil {
+		return nil, nil, errors.New("discoverable login requires a user handler")
+	}
+	parsed, err := protocol.ParseCredentialRequestResponseBytes(body)
+	if err != nil {
+		return nil, nil, err
+	}
+	validatedUser, validated, err := svc.WA.ValidatePasskeyLogin(resolve, session, parsed)
+	if err != nil {
+		return nil, nil, err
+	}
+	user, ok := validatedUser.(*adminUser)
+	if !ok || user == nil {
+		return nil, nil, errors.New("discoverable user handler returned an unexpected user")
+	}
+	return user, validated, nil
+}
+
+// BeginDiscoverableLoginFor begins a passwordless (discoverable credential)
+// assertion ceremony bound to sessionBinding, the sha256 of the browser's
+// short-lived ceremony cookie. It returns the INNER
+// PublicKeyCredentialRequestOptions, the challenge row id and its expiry.
+func BeginDiscoverableLoginFor(ctx context.Context, pool *pgxpool.Pool, sessionBinding string) (*protocol.PublicKeyCredentialRequestOptions, uuid.UUID, time.Time, error) {
+	if sessionBinding == "" {
+		return nil, uuid.Nil, time.Time{}, ErrChallengeUnbound
+	}
+	svc, err := requireService()
+	if err != nil {
+		return nil, uuid.Nil, time.Time{}, err
+	}
+	assertion, session, err := beginDiscoverableLoginOptions(svc)
+	if err != nil {
+		return nil, uuid.Nil, time.Time{}, err
+	}
+	challengeID, expiresAt, err := CreatePasswordlessChallenge(ctx, pool, sessionBinding, svc.CeremonyOrigin(), session)
+	if err != nil {
+		return nil, uuid.Nil, time.Time{}, err
+	}
+	return &assertion.Response, challengeID, expiresAt, nil
+}
+
+// FinishDiscoverableLoginFor claims a passwordless ceremony, resolves the
+// account from the assertion's user handle, validates the assertion and saves
+// the credential state. It returns the resolved admin id and credential record;
+// a session may only be minted by the caller after this returns cleanly.
+func FinishDiscoverableLoginFor(ctx context.Context, pool *pgxpool.Pool, sessionBinding string, challengeID uuid.UUID, body []byte) (uuid.UUID, CredentialRecord, error) {
+	svc, err := requireService()
+	if err != nil {
+		return uuid.Nil, CredentialRecord{}, err
+	}
+	challenge, err := ClaimPasswordlessChallenge(ctx, pool, challengeID, sessionBinding)
+	if err != nil {
+		return uuid.Nil, CredentialRecord{}, err
+	}
+	if challenge.RPID != "" && challenge.RPID != svc.RPID {
+		return uuid.Nil, CredentialRecord{}, fmt.Errorf("challenge was begun for RP ID %q", challenge.RPID)
+	}
+
+	// Resolve the account from the discoverable credential's user handle. Every
+	// failure is the same generic error: the caller answers a generic 401, so
+	// an attacker cannot tell an unknown handle from a disabled account.
+	resolve := func(rawID, userHandle []byte) (wa.User, error) {
+		var adminID uuid.UUID
+		err := pool.QueryRow(ctx,
+			"SELECT admin_id FROM webauthn_users WHERE rp_id = $1 AND handle = $2",
+			svc.RPID, userHandle).Scan(&adminID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, errors.New("unknown credential")
+		}
+		if err != nil {
+			return nil, err
+		}
+		var status string
+		if err := pool.QueryRow(ctx, "SELECT status FROM admins WHERE id = $1", adminID).Scan(&status); err != nil {
+			return nil, errors.New("unknown credential")
+		}
+		if status != "active" {
+			return nil, errors.New("unknown credential")
+		}
+		user, err := loadAdminUser(ctx, pool, adminID, svc.RPID, true)
+		if err != nil {
+			return nil, err
+		}
+		return user, nil
+	}
+
+	user, validated, err := validateDiscoverableAssertion(svc, challenge.SessionData, body, resolve)
+	if err != nil {
+		return uuid.Nil, CredentialRecord{}, err
+	}
+
+	record := CredentialRecord{}
+	found := false
+	for _, candidate := range user.records {
+		if bytes.Equal(candidate.Credential.ID, validated.ID) {
+			record = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		return uuid.Nil, CredentialRecord{}, errors.New("validated credential is not stored for this admin")
+	}
+	record.Credential = *validated
+	if err := SaveAfterLogin(ctx, pool, record); err != nil {
+		return uuid.Nil, CredentialRecord{}, err
+	}
+	return user.adminID, record, nil
 }

@@ -232,3 +232,18 @@ export function webAuthnErrorMessage(err: unknown): string {
   if (!key) return ''
   return mfaCopy.webauthnErrors[key] ?? mfaCopy.webauthnErrors.general_error
 }
+
+/**
+ * Short copy for a failed PASSWORDLESS sign-in attempt on the login page.
+ *
+ * The password form always stays usable, so a cancelled/timed-out prompt gets
+ * a gentle hint ("no passkey was used") while any other failure collapses to
+ * "use your password instead" — no RP-ID/origin details on a public page.
+ * Returns '' for silent aborts (route change/unmount).
+ */
+export function passwordlessPasskeyErrorMessage(err: unknown): string {
+  const key = webAuthnErrorKey(err)
+  if (key === 'ceremony_aborted') return ''
+  if (key === 'cancelled_or_timeout') return mfaCopy.login.passkeyCancelled
+  return mfaCopy.login.passkeyFailed
+}

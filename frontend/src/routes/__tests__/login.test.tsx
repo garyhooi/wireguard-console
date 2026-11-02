@@ -3,14 +3,32 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
-const mocks = vi.hoisted(() => ({ navigateTo: vi.fn() }))
+const mocks = vi.hoisted(() => ({
+  navigateTo: vi.fn(),
+  getPasskeyStatus: vi.fn(),
+  beginPasswordlessPasskey: vi.fn(),
+  completePasswordlessPasskey: vi.fn(),
+  detectWebAuthnSupport: vi.fn(),
+}))
 
 vi.mock('../../lib/mfaClient', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../lib/mfaClient')>()
-  return { ...actual, navigateTo: mocks.navigateTo }
+  return {
+    ...actual,
+    navigateTo: mocks.navigateTo,
+    getPasskeyStatus: mocks.getPasskeyStatus,
+    beginPasswordlessPasskey: mocks.beginPasswordlessPasskey,
+    completePasswordlessPasskey: mocks.completePasswordlessPasskey,
+  }
+})
+
+vi.mock('../../lib/webauthn', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../lib/webauthn')>()
+  return { ...actual, detectWebAuthnSupport: mocks.detectWebAuthnSupport }
 })
 
 import { LoginPage } from '../login'
+import { mfaCopy } from '../../lib/mfaCopy'
 
 function renderLogin() {
   const qc = new QueryClient({
@@ -18,7 +36,7 @@ function renderLogin() {
   })
   return render(
     <QueryClientProvider client={qc}>
-      <LoginPage />
+      <LoginPage successOverlayMs={20} />
     </QueryClientProvider>,
   )
 }
@@ -32,6 +50,22 @@ function jsonRes(data: unknown, status = 200): Response {
   } as Response
 }
 
+interface ApiErr extends Error {
+  status?: number
+  body?: unknown
+}
+
+function apiError(status: number, body: Record<string, unknown>): ApiErr {
+  const err = new Error(String(body.error ?? 'Request failed')) as ApiErr
+  err.status = status
+  err.body = body
+  return err
+}
+
+function passkeyButton() {
+  return screen.queryByRole('button', { name: mfaCopy.login.passkeyButton })
+}
+
 let lockoutStatus: { locked: boolean; retry_after_seconds: number }
 let loginReply: { status: number; body: unknown }
 
@@ -40,6 +74,20 @@ describe('LoginPage', () => {
     // jsdom has no canvas backend; the hologram component must degrade quietly.
     HTMLCanvasElement.prototype.getContext = (() => null) as unknown as typeof HTMLCanvasElement.prototype.getContext
     mocks.navigateTo.mockReset()
+    mocks.getPasskeyStatus.mockReset().mockResolvedValue({ passkey_available: true })
+    mocks.beginPasswordlessPasskey.mockReset().mockResolvedValue({
+      challengeId: 'pw-challenge-1',
+      options: { challenge: 'abc' },
+      rpId: 'example.com',
+      expiresInSeconds: 300,
+    })
+    mocks.completePasswordlessPasskey.mockReset().mockResolvedValue(undefined)
+    mocks.detectWebAuthnSupport.mockReset().mockResolvedValue({
+      secureContext: true,
+      hasPublicKeyCredential: true,
+      platformAuthenticatorAvailable: true,
+      supported: true,
+    })
     lockoutStatus = { locked: false, retry_after_seconds: 0 }
     loginReply = { status: 401, body: { error: 'Invalid email or password' } }
     vi.stubGlobal(
@@ -62,7 +110,12 @@ describe('LoginPage', () => {
   function submitCredentials() {
     fireEvent.change(screen.getByLabelText(/email address/i), { target: { value: 'admin@example.com' } })
     fireEvent.change(screen.getByLabelText(/^password$/i), { target: { value: 'wrong' } })
-    fireEvent.click(screen.getByRole('button', { name: /sign in/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^sign in$/i }))
+  }
+
+  async function probePasskey() {
+    await waitFor(() => expect(mocks.getPasskeyStatus).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(mocks.detectWebAuthnSupport).toHaveBeenCalledTimes(1))
   }
 
   it('renders the sign-in form above the holographic backdrop', () => {
@@ -70,9 +123,102 @@ describe('LoginPage', () => {
     expect(screen.getByRole('heading', { name: 'WireGuard Console' })).toBeTruthy()
     expect(screen.getByLabelText(/email address/i)).toBeTruthy()
     expect(screen.getByLabelText(/^password$/i)).toBeTruthy()
-    expect(screen.getByRole('button', { name: /sign in/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /^sign in$/i })).toBeTruthy()
     const canvas = document.querySelector('canvas[aria-hidden="true"]')
     expect(canvas).not.toBeNull()
+  })
+
+  it('shows the secondary passkey button when the deployment and browser support it', async () => {
+    renderLogin()
+    expect(await screen.findByRole('button', { name: mfaCopy.login.passkeyButton })).toBeTruthy()
+    expect(screen.getByLabelText(/^password$/i)).toBeTruthy()
+  })
+
+  it('hides the passkey button when the deployment disables passkeys', async () => {
+    mocks.getPasskeyStatus.mockResolvedValueOnce({
+      passkey_available: false,
+      passkey_reason: 'This console is served from an IP address',
+    })
+    renderLogin()
+    await probePasskey()
+    expect(passkeyButton()).toBeNull()
+  })
+
+  it('hides the passkey button when the browser cannot use passkeys', async () => {
+    mocks.detectWebAuthnSupport.mockResolvedValueOnce({
+      secureContext: false,
+      hasPublicKeyCredential: false,
+      platformAuthenticatorAvailable: null,
+      supported: false,
+    })
+    renderLogin()
+    await probePasskey()
+    expect(passkeyButton()).toBeNull()
+  })
+
+  it('hides the passkey button when the capability probe fails', async () => {
+    mocks.getPasskeyStatus.mockRejectedValueOnce(new Error('network down'))
+    renderLogin()
+    await probePasskey()
+    expect(passkeyButton()).toBeNull()
+  })
+
+  it('signs in with a passkey, captures the session and plays the success animation', async () => {
+    renderLogin()
+    fireEvent.click(await screen.findByRole('button', { name: mfaCopy.login.passkeyButton }))
+
+    await waitFor(() => expect(mocks.beginPasswordlessPasskey).toHaveBeenCalledTimes(1))
+    await waitFor(() =>
+      expect(mocks.completePasswordlessPasskey).toHaveBeenCalledWith({ navigate: false }),
+    )
+    expect(await screen.findByText('IDENTITY VERIFIED')).toBeTruthy()
+    await waitFor(() => expect(mocks.navigateTo).toHaveBeenCalledWith('/dashboard'))
+    expect(screen.queryByText('VERIFICATION FAILED')).toBeNull()
+  })
+
+  it('shows the cancel hint and keeps the password form usable', async () => {
+    const cancelled = new Error('The operation was cancelled') as Error & { name: string }
+    cancelled.name = 'NotAllowedError'
+    mocks.completePasswordlessPasskey.mockRejectedValueOnce(cancelled)
+    renderLogin()
+
+    fireEvent.click(await screen.findByRole('button', { name: mfaCopy.login.passkeyButton }))
+    expect(await screen.findByText(mfaCopy.login.passkeyCancelled)).toBeTruthy()
+    expect(screen.getByLabelText(/^password$/i)).toBeTruthy()
+
+    submitCredentials()
+    expect(await screen.findByText('VERIFICATION FAILED')).toBeTruthy()
+  })
+
+  it('shows the existing lockout countdown when passkey sign-in is rate limited', async () => {
+    mocks.beginPasswordlessPasskey.mockRejectedValueOnce(
+      apiError(429, { error: 'Too many attempts', code: 'mfa_locked', retry_after_seconds: 3 }),
+    )
+    renderLogin()
+
+    fireEvent.click(await screen.findByRole('button', { name: mfaCopy.login.passkeyButton }))
+    expect(await screen.findByText('TOO MANY ATTEMPTS')).toBeTruthy()
+    expect(screen.getByTestId('lockout-remaining').textContent).toBe('0:03')
+  })
+
+  it('hides the passkey button when the server reports passkeys unavailable', async () => {
+    mocks.beginPasswordlessPasskey.mockRejectedValueOnce(
+      apiError(409, { error: 'Passkeys are not available on this console', code: 'mfa_unavailable' }),
+    )
+    renderLogin()
+
+    fireEvent.click(await screen.findByRole('button', { name: mfaCopy.login.passkeyButton }))
+    await waitFor(() => expect(passkeyButton()).toBeNull())
+    expect(screen.getByLabelText(/^password$/i)).toBeTruthy()
+  })
+
+  it('shows a short error for other passkey failures and keeps the form usable', async () => {
+    mocks.completePasswordlessPasskey.mockRejectedValueOnce(new Error('boom'))
+    renderLogin()
+
+    fireEvent.click(await screen.findByRole('button', { name: mfaCopy.login.passkeyButton }))
+    expect(await screen.findByText(mfaCopy.login.passkeyFailed)).toBeTruthy()
+    expect(screen.getByLabelText(/^password$/i)).toBeTruthy()
   })
 
   it('plays the red verification animation on a wrong password (no reload)', async () => {

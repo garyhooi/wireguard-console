@@ -8,7 +8,7 @@ A self-hosted web console for issuing, monitoring, and revoking company WireGuar
   <tr>
     <td align="center" width="50%">
       <img src="docs/demo/login.png" alt="Login" width="100%" />
-      <br /><em>Login — self-hosted sign-in with mandatory MFA (passkey or authenticator app) for admins</em>
+      <br /><em>Login — passwordless passkey sign-in, or password + mandatory MFA for admins</em>
     </td>
     <td align="center" width="50%">
       <img src="docs/demo/dashboard.png" alt="Dashboard" width="100%" />
@@ -160,7 +160,10 @@ Repeat steps 2–6 for each location. Deleting a node is safe — its servers fa
 
 Every admin must complete a second factor after the password: a **passkey** (Touch ID / Windows Hello / security key) or an **authenticator app** code, with one-time recovery codes as the fallback. On the first sign-in after an invite (or after an MFA reset) no factor exists yet, so the console **forces enrollment before issuing a session** — at least one factor is required, and both can be added.
 
+- **Passwordless sign-in.** A saved passkey can also replace the password entirely: click **Sign in with a passkey** on the login page and confirm with Face ID / Touch ID / Windows Hello. Passwords, whenever they are used, always require a second factor — the password step alone never issues a session.
+
 - **Passkeys need a domain.** WebAuthn binds credentials to the console hostname, so IP-only installs (`CONSOLE_DOMAIN` = an IP address) have no passkey option; authenticator-app MFA is used instead. The installer summary shows which mode applies.
+- **Passkeys registered before passwordless sign-in was added** may not be discoverable: the password path still works, and adding a fresh passkey from Profile enables one-tap sign-in. Passkeys created from now on are discoverable by default.
 - **Changing `CONSOLE_DOMAIN` orphans passkeys** — they were registered for the old address. The installer warns when this happens; affected admins re-enroll (TOTP and recovery codes keep working).
 - **Recovery**: a super admin can reset another admin's MFA from **Directory → Admins → Reset MFA** (their sessions are signed out and they re-enroll at next sign-in). Save the recovery codes shown at enrollment.
 - **Policy**: Configuration → Security can require authenticator app, passkey, or both for every admin (default: at least one).

@@ -37,6 +37,10 @@ const (
 	PurposeEnroll = "enroll"
 	// PurposeStepUp is an assertion that unlocks a sensitive action.
 	PurposeStepUp = "stepup"
+	// PurposePasswordless is a discoverable-credential sign-in: no account is
+	// known when the ceremony begins, so the row has admin_id NULL and the
+	// account is resolved from the assertion's user handle at finish.
+	PurposePasswordless = "passwordless"
 
 	// challengeTTL bounds how long a begun ceremony may be finished. The
 	// library's configured ceremony timeout is also five minutes; the
@@ -81,10 +85,10 @@ func challengeHash(challenge string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// validPurpose reports whether purpose is one of the three allowed values.
+// validPurpose reports whether purpose is one of the allowed ceremony values.
 func validPurpose(purpose string) bool {
 	switch purpose {
-	case PurposeLogin, PurposeEnroll, PurposeStepUp:
+	case PurposeLogin, PurposeEnroll, PurposeStepUp, PurposePasswordless:
 		return true
 	}
 	return false
@@ -177,6 +181,97 @@ func ClaimChallenge(ctx context.Context, pool *pgxpool.Pool, id, adminID uuid.UU
 		  AND consumed_at IS NULL AND expires_at > now()
 		RETURNING purpose, admin_id, session_binding, rp_id, origin, session_data, created_at, expires_at
 	`, id, adminID, sessionBinding, purpose).Scan(
+		&challenge.Purpose, &challenge.AdminID, &challenge.SessionBinding,
+		&challenge.RPID, &challenge.Origin, &sessionJSON,
+		&challenge.CreatedAt, &challenge.ExpiresAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Challenge{}, ErrChallengeNotFound
+	}
+	if err != nil {
+		return Challenge{}, err
+	}
+	challenge.ID = id
+	if err := json.Unmarshal(sessionJSON, &challenge.SessionData); err != nil {
+		return Challenge{}, fmt.Errorf("decode session data: %w", err)
+	}
+	return challenge, nil
+}
+
+// CreatePasswordlessChallenge persists a begun discoverable-credential sign-in
+// ceremony. Unlike CreateChallenge there is no admin yet, so admin_id is NULL
+// and ownership can only be proven at finish by the assertion's user handle.
+// The row is still bound to the beginning browser by session_binding, which is
+// the only thing that makes the challenge claimable.
+func CreatePasswordlessChallenge(ctx context.Context, pool *pgxpool.Pool, sessionBinding, origin string, session *wa.SessionData) (uuid.UUID, time.Time, error) {
+	if session == nil || session.Challenge == "" {
+		return uuid.Nil, time.Time{}, errors.New("challenge session data is empty")
+	}
+	if sessionBinding == "" {
+		return uuid.Nil, time.Time{}, ErrChallengeUnbound
+	}
+
+	sessionJSON, err := json.Marshal(session)
+	if err != nil {
+		return uuid.Nil, time.Time{}, fmt.Errorf("marshal session data: %w", err)
+	}
+
+	expiresAt := time.Now().Add(challengeTTL)
+	if !session.Expires.IsZero() && session.Expires.Before(expiresAt) {
+		expiresAt = session.Expires
+	}
+	rpID := session.GetRelyingPartyID(Current().RPID)
+	if origin == "" {
+		origin = session.Origin
+	}
+
+	// Best-effort cleanup of finished/expired passwordless rows for this RP.
+	// They have no owner to scope by, so the TTL and this prune are what keep
+	// the table bounded. A cleanup failure must not block a sign-in attempt.
+	_, _ = pool.Exec(ctx, `
+		DELETE FROM webauthn_challenges
+		WHERE purpose = $1 AND rp_id = $2 AND admin_id IS NULL
+		  AND (consumed_at IS NOT NULL OR expires_at <= now())
+	`, PurposePasswordless, rpID)
+
+	var id uuid.UUID
+	err = pool.QueryRow(ctx, `
+		INSERT INTO webauthn_challenges (
+			purpose, admin_id, session_binding, rp_id, origin,
+			challenge_hash, session_data, lib_version, expires_at
+		) VALUES ($1, NULL, $2, $3, $4, $5, $6, $7, $8)
+		RETURNING id
+	`, PurposePasswordless, sessionBinding, rpID, origin,
+		challengeHash(session.Challenge), sessionJSON, libraryVersion, expiresAt,
+	).Scan(&id)
+	if err != nil {
+		return uuid.Nil, time.Time{}, err
+	}
+	return id, expiresAt, nil
+}
+
+// ClaimPasswordlessChallenge atomically consumes a begun passwordless ceremony.
+// The WHERE clause is the security boundary: the row id, the beginning
+// browser's binding and the passwordless purpose must all match, and the
+// ceremony must still be live. It deliberately has no admin filter because the
+// account is only known after the assertion has been validated.
+func ClaimPasswordlessChallenge(ctx context.Context, pool *pgxpool.Pool, id uuid.UUID, sessionBinding string) (Challenge, error) {
+	if sessionBinding == "" {
+		return Challenge{}, ErrChallengeUnbound
+	}
+
+	var (
+		challenge   Challenge
+		sessionJSON []byte
+	)
+	err := pool.QueryRow(ctx, `
+		UPDATE webauthn_challenges
+		SET consumed_at = now()
+		WHERE id = $1 AND session_binding = $2 AND purpose = $3
+		  AND consumed_at IS NULL AND expires_at > now()
+		RETURNING purpose, COALESCE(admin_id, '00000000-0000-0000-0000-000000000000'::uuid),
+		          session_binding, rp_id, origin, session_data, created_at, expires_at
+	`, id, sessionBinding, PurposePasswordless).Scan(
 		&challenge.Purpose, &challenge.AdminID, &challenge.SessionBinding,
 		&challenge.RPID, &challenge.Origin, &sessionJSON,
 		&challenge.CreatedAt, &challenge.ExpiresAt,

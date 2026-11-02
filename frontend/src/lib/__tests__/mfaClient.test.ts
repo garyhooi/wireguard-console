@@ -30,14 +30,17 @@ import {
   addTOTP,
   beginPasskeyEnrollment,
   beginPasskeyLogin,
+  beginPasswordlessPasskey,
   beginTOTPEnrollment,
   completeEnrollment,
   completePasskeyEnrollment,
   completePasskeyLogin,
+  completePasswordlessPasskey,
   finishTOTP,
   finishTOTPEnrollment,
   getMFAState,
   getMFAStatus,
+  getPasskeyStatus,
   mfaErrorCode,
   mfaErrorStatus,
   mfaRetryAfterSeconds,
@@ -346,6 +349,90 @@ describe('authed management routes', () => {
     expect(fetchCall(1).url).toBe('/api/auth/mfa/stepup/passkey/finish')
     expect(fetchCall(1).body).toEqual({ challenge_id: 'stepup-1', credential: { id: 'assertion' } })
     expect(nav.navigateTo).not.toHaveBeenCalled()
+  })
+})
+
+describe('passwordless passkey login', () => {
+  it('refuses to complete without a begun ceremony', async () => {
+    await expect(completePasswordlessPasskey()).rejects.toThrow(/could not be started/)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('getPasskeyStatus probes the public capability endpoint without CSRF', async () => {
+    setCsrfToken('should-not-be-sent')
+    fetchMock.mockResolvedValueOnce(jsonRes({ passkey_available: true }))
+    await expect(getPasskeyStatus()).resolves.toEqual({ passkey_available: true })
+    const call = fetchCall()
+    expect(call.url).toBe('/api/auth/passkey/status')
+    expect(call.method).toBe('GET')
+    expect(call.headers.get('X-CSRF-Token')).toBeNull()
+  })
+
+  it('beginPasswordlessPasskey posts options, unwraps them and keeps the challenge', async () => {
+    setCsrfToken('should-not-be-sent')
+    fetchMock.mockResolvedValueOnce(
+      jsonRes({
+        challenge_id: 'pw-1',
+        options: { publicKey: { challenge: 'abc', rpId: 'example.com', allowCredentials: [] } },
+        rp_id: 'example.com',
+        expires_in_seconds: 300,
+      }),
+    )
+    const begin = await beginPasswordlessPasskey()
+    expect(begin.challengeId).toBe('pw-1')
+    expect(begin.options).toEqual({ challenge: 'abc', rpId: 'example.com', allowCredentials: [] })
+    expect(begin.rpId).toBe('example.com')
+    const call = fetchCall()
+    expect(call.url).toBe('/api/auth/passkey/options')
+    expect(call.method).toBe('POST')
+    expect(call.headers.get('X-CSRF-Token')).toBeNull()
+  })
+
+  it('completePasswordlessPasskey posts the assertion, stores csrf and navigates', async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonRes({ challenge_id: 'pw-2', options: { challenge: 'def' }, rp_id: 'example.com' }),
+      )
+      .mockResolvedValueOnce(jsonRes({ csrf_token: 'pw-csrf' }))
+    wa.authenticatePasskey.mockResolvedValueOnce({ id: 'assertion-1', type: 'public-key' })
+
+    await beginPasswordlessPasskey()
+    await completePasswordlessPasskey()
+
+    expect(wa.authenticatePasskey).toHaveBeenCalledWith({ challenge: 'def' })
+    expect(fetchCall(1).url).toBe('/api/auth/passkey/finish')
+    expect(fetchCall(1).body).toEqual({
+      challenge_id: 'pw-2',
+      credential: { id: 'assertion-1', type: 'public-key' },
+    })
+    expect(getCsrfToken()).toBe('pw-csrf')
+    expect(nav.navigateTo).toHaveBeenCalledWith('/dashboard')
+  })
+
+  it('completePasswordlessPasskey can defer navigation for the success overlay', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonRes({ challenge_id: 'pw-3', options: { challenge: 'ghi' } }))
+      .mockResolvedValueOnce(jsonRes({ csrf_token: 'pw-csrf' }))
+    wa.authenticatePasskey.mockResolvedValueOnce({ id: 'assertion-2' })
+
+    await beginPasswordlessPasskey()
+    await completePasswordlessPasskey({ navigate: false })
+    expect(nav.navigateTo).not.toHaveBeenCalled()
+  })
+
+  it('propagates mfa_unavailable from the options endpoint', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonRes(
+        { error: 'Passkeys are not available on this console', code: 'mfa_unavailable' },
+        409,
+      ),
+    )
+    const err = await beginPasswordlessPasskey().then(
+      () => null,
+      (caught: unknown) => caught,
+    )
+    expect(mfaErrorCode(err)).toBe('mfa_unavailable')
+    expect(mfaErrorStatus(err)).toBe(409)
   })
 })
 
