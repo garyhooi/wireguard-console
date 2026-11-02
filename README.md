@@ -96,7 +96,6 @@ CONSOLE_DOMAIN=vpn.example.com sudo bash install.sh   # new domain (WireGuard en
 WGCONSOLE_TLS=domain sudo bash install.sh             # Caddy HTTPS on :443 (Full / Automatic / DNS-only)
 WGCONSOLE_TLS=external-proxy sudo bash install.sh     # plain-HTTP origin (Cloudflare Flexible)
 ```
-```
 
 To add more operators: **System → Admins → Invite Admin**. Add VPN users under **Directory → VPN Users**, then issue peers to them.
 
