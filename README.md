@@ -75,7 +75,6 @@ Requires:
 - **Docker:** Engine with the Compose plugin (installed automatically)
 - **systemd:** used for the stack, firewall boot rules and service management
 - **Address:** a **domain** (recommended) or a public IP
-- **Ports:** 80/tcp, 443/tcp and 51820/udp open on the host and any cloud firewall
 
 The one-command installer supports both Ubuntu 22.04+ and Debian 12+. Exit nodes can also run either distribution.
 

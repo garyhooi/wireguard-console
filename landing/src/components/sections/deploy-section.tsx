@@ -48,7 +48,6 @@ export function DeploySection() {
                 ["Host OS", "Ubuntu 22.04+ / Debian 12+"],
                 ["Console host", "Docker, Postgres, Caddy, AdGuard"],
                 ["Exit host", "Docker, node agent, WireGuard"],
-                ["Ports", "80/tcp, 443/tcp, 51820/udp"],
               ].map(([label, value]) => (
                 <div key={label} className="rounded-[10px] border border-line bg-panel/50 px-3.5 py-3">
                   <div className="font-mono text-[9px] uppercase tracking-[0.12em] text-dim">
