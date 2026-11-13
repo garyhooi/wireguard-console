@@ -62,42 +62,43 @@ func CreateBackup(store *Store) http.HandlerFunc {
 		adminID := getAdminID(r)
 		ctx := context.Background()
 
-		state, err := loadBackupPassphraseState(ctx, store.pool)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to load backup encryption setting")
-			return
-		}
-		passphrase, err := state.CurrentPassphrase()
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-
-		svc := backup.NewBackupService(backupDataDir())
-		result, err := svc.CreateBackup(passphrase)
+		outcome, err := runBackup(ctx, store)
 		if err != nil {
 			log.Printf("Failed to create backup: %v", err)
 			writeError(w, http.StatusInternalServerError, "Failed to create backup")
 			return
 		}
+		result := outcome.Result
 
 		logAudit(ctx, store, adminID, "backup.create", "backup", result.Filename, map[string]interface{}{
-			"encrypted": result.Encrypted,
-			"verified":  result.Verified,
-			"size":      result.Size,
+			"encrypted":     result.Encrypted,
+			"verified":      result.Verified,
+			"size":          result.Size,
+			"s3_configured": outcome.S3Configured,
+			"s3_uploaded":   outcome.S3Uploaded,
+			"s3_key":        outcome.S3Key,
 		})
 
 		resp := map[string]interface{}{
-			"status":    "created",
-			"filepath":  result.Path,
-			"filename":  result.Filename,
-			"encrypted": result.Encrypted,
-			"verified":  result.Verified,
-			"size":      result.Size,
+			"status":        "created",
+			"filepath":      result.Path,
+			"filename":      result.Filename,
+			"encrypted":     result.Encrypted,
+			"verified":      result.Verified,
+			"size":          result.Size,
+			"s3_configured": outcome.S3Configured,
+			"s3_uploaded":   outcome.S3Uploaded,
+			"s3_key":        outcome.S3Key,
 		}
 		if result.VerificationErr != nil {
 			log.Printf("Backup %s created but verification failed: %v", result.Filename, result.VerificationErr)
 			resp["verification_warning"] = "Backup was created, but the automatic restore check failed. See server logs before relying on it."
+		}
+		if outcome.S3Warning != "" {
+			resp["s3_warning"] = outcome.S3Warning
+		}
+		if outcome.RetentionWarning != "" {
+			resp["retention_warning"] = outcome.RetentionWarning
 		}
 		writeJSON(w, http.StatusOK, resp)
 	}
@@ -194,6 +195,9 @@ func RestoreBackup(store *Store) http.HandlerFunc {
 			return
 		}
 
+		backupOperationMu.Lock()
+		defer backupOperationMu.Unlock()
+
 		passphrases, err := backupRestorePassphrases(ctx, store, backupPath)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -247,6 +251,8 @@ func RestoreBackupUpload(store *Store) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Uploaded file must be a .sql.gz or .sql.gz.enc backup")
 			return
 		}
+		backupOperationMu.Lock()
+		defer backupOperationMu.Unlock()
 		// Prefix with a timestamp to avoid clobbering an existing file with
 		// the same name.
 		finalName := fmt.Sprintf("%s_%s", time.Now().Format("20060102_150405"), uploadName)
@@ -306,6 +312,8 @@ func DeleteBackup(store *Store) http.HandlerFunc {
 			return
 		}
 
+		backupOperationMu.Lock()
+		defer backupOperationMu.Unlock()
 		svc := backup.NewBackupService(backupDataDir())
 		if err := svc.DeleteBackup(req.Filename); err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to delete backup")

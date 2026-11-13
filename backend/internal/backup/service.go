@@ -38,6 +38,8 @@ type Metadata struct {
 	VerifiedKnown bool   `json:"verified_known"`
 	VerifiedAt    string `json:"verified_at,omitempty"`
 	Size          int64  `json:"size"`
+	S3Uploaded    bool   `json:"s3_uploaded"`
+	S3Key         string `json:"s3_key,omitempty"`
 }
 
 type dbConfig struct {
@@ -316,6 +318,16 @@ func (s *BackupService) writeMetadata(filename string, meta Metadata) error {
 		return err
 	}
 	return os.WriteFile(metadataPath(s.dataDir, filename), data, 0o600)
+}
+
+// MarkS3Uploaded records the exact object key on the sidecar after a
+// successful upload. Retention uses this key even if the configured prefix
+// later changes.
+func (s *BackupService) MarkS3Uploaded(filename, key string) error {
+	meta := s.ReadMetadata(filename)
+	meta.S3Uploaded = true
+	meta.S3Key = key
+	return s.writeMetadata(filename, meta)
 }
 
 // ReadMetadata returns sidecar data when present. Older backups have no

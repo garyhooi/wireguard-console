@@ -112,6 +112,9 @@ func main() {
 	// Remove expired admin_sessions rows (absolute-expiry backstop; idle-
 	// expired rows are deleted inline on next use).
 	go worker.NewSessionPurgeWorker(conn.Pool(), time.Hour).Start(ctx)
+	// Automatic database backups (local + optional S3), sharing the manual
+	// backup path so both are serialised and apply retention.
+	go worker.NewBackupScheduleWorker(conn.Pool(), time.Minute).Start(ctx)
 
 	// Repush persisted domain-block rules into AdGuard Home. A server reset /
 	// redeploy provisions AdGuard with a clean config (empty user_rules), so
@@ -348,6 +351,7 @@ func main() {
 				r.Get("/config/mfa", api.GetMFAPolicyConfig(store))
 				r.Get("/config/security", api.GetSecurityConfig(store))
 				r.Get("/config/backup-passphrase", api.GetBackupPassphraseConfig(store))
+				r.Get("/config/backup-settings", api.GetBackupSettings(store))
 			})
 			r.Group(func(r chi.Router) {
 				r.Use(api.RequirePermission(authz.SystemManage))
@@ -356,6 +360,9 @@ func main() {
 				r.Patch("/config/timezone", api.UpdateTimezoneConfig(store))
 				r.Patch("/config/email-templates/{key}", api.UpdateEmailTemplate(store))
 				r.Post("/config/email/test", api.SendTestEmail(store))
+				r.Patch("/config/backup-settings/s3", api.UpdateS3Settings(store))
+				r.Post("/config/backup-settings/s3/test", api.TestS3Settings(store))
+				r.Patch("/config/backup-settings/schedule", api.UpdateBackupSchedule(store))
 			})
 			r.Group(func(r chi.Router) {
 				r.Use(api.RequirePermission(authz.BackupsView))

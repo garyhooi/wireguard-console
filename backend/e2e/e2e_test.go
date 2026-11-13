@@ -17,6 +17,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -2379,6 +2380,145 @@ func TestEndToEnd(t *testing.T) {
 		"enabled": false, "code": actorCode(),
 	})
 	expectStatus(t, disableAgain, 200, "PATCH /api/config/backup-passphrase (disable after restore)")
+
+	// ---- Backup destination settings and automatic schedule ----
+	settingsRaw := rawGet(t, baseURL+"/api/config/backup-settings", token)
+	var settings map[string]interface{}
+	json.Unmarshal([]byte(settingsRaw), &settings)
+	s3Out, _ := settings["s3"].(map[string]interface{})
+	if enabled, _ := s3Out["enabled"].(bool); enabled {
+		t.Fatalf("S3 unexpectedly enabled by default: %s", settingsRaw)
+	}
+	scheduleOut, _ := settings["schedule"].(map[string]interface{})
+	if interval, _ := scheduleOut["interval_hours"].(float64); interval != 0 {
+		t.Fatalf("backup interval = %v, want 0 (%s)", scheduleOut["interval_hours"], settingsRaw)
+	}
+	schedResp, _ := api(t, "PATCH", "/api/config/backup-settings/schedule", token, map[string]interface{}{
+		"interval_hours": 24, "retention_count": 7,
+	})
+	expectStatus(t, schedResp, 200, "PATCH /api/config/backup-settings/schedule")
+	settingsRaw = rawGet(t, baseURL+"/api/config/backup-settings", token)
+	json.Unmarshal([]byte(settingsRaw), &settings)
+	scheduleOut, _ = settings["schedule"].(map[string]interface{})
+	if interval, _ := scheduleOut["interval_hours"].(float64); interval != 24 {
+		t.Fatalf("saved backup interval = %v, want 24 (%s)", scheduleOut["interval_hours"], settingsRaw)
+	}
+	if retention, _ := scheduleOut["retention_count"].(float64); retention != 7 {
+		t.Fatalf("saved retention = %v, want 7 (%s)", scheduleOut["retention_count"], settingsRaw)
+	}
+	badSchedule, _ := api(t, "PATCH", "/api/config/backup-settings/schedule", token, map[string]interface{}{
+		"interval_hours": 721, "retention_count": 7,
+	})
+	expectStatus(t, badSchedule, 400, "PATCH /api/config/backup-settings/schedule (invalid)")
+	resetSchedule, _ := api(t, "PATCH", "/api/config/backup-settings/schedule", token, map[string]interface{}{
+		"interval_hours": 0, "retention_count": 0,
+	})
+	expectStatus(t, resetSchedule, 200, "PATCH /api/config/backup-settings/schedule (reset)")
+
+	badS3, _ := api(t, "PATCH", "/api/config/backup-settings/s3", token, map[string]interface{}{
+		"enabled": true, "bucket": "", "region": "us-east-1",
+	})
+	expectStatus(t, badS3, 400, "PATCH /api/config/backup-settings/s3 (missing bucket)")
+
+	// A fake path-style S3 endpoint proves upload, test and retention delete
+	// through the real AWS SDK client, without external credentials.
+	var s3Mu sync.Mutex
+	s3Objects := map[string][]byte{}
+	s3Server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := strings.TrimPrefix(r.URL.Path, "/backups")
+		key = strings.TrimPrefix(key, "/")
+		s3Mu.Lock()
+		defer s3Mu.Unlock()
+		switch r.Method {
+		case http.MethodHead:
+			if strings.TrimPrefix(r.URL.Path, "/") == "backups" {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		case http.MethodPut:
+			body, _ := io.ReadAll(r.Body)
+			s3Objects[key] = body
+			w.Header().Set("ETag", `"`+fmt.Sprintf("%d", len(body))+`"`)
+			w.WriteHeader(http.StatusOK)
+		case http.MethodGet:
+			body, ok := s3Objects[key]
+			if !ok {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(body)
+		case http.MethodDelete:
+			delete(s3Objects, key)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer s3Server.Close()
+	s3Body := map[string]interface{}{
+		"enabled": true, "endpoint": s3Server.URL, "region": "us-east-1",
+		"bucket": "backups", "prefix": "e2e", "access_key_id": "test-key",
+		"secret_access_key": "test-secret", "force_path_style": true,
+	}
+	s3Save, _ := api(t, "PATCH", "/api/config/backup-settings/s3", token, s3Body)
+	expectStatus(t, s3Save, 200, "PATCH /api/config/backup-settings/s3")
+	settingsRaw = rawGet(t, baseURL+"/api/config/backup-settings", token)
+	json.Unmarshal([]byte(settingsRaw), &settings)
+	s3Out, _ = settings["s3"].(map[string]interface{})
+	if enabled, _ := s3Out["enabled"].(bool); !enabled {
+		t.Fatalf("S3 not enabled after save: %s", settingsRaw)
+	}
+	if secretSet, _ := s3Out["secret_set"].(bool); !secretSet {
+		t.Fatalf("S3 secret_set = false after save: %s", settingsRaw)
+	}
+	if key, _ := s3Out["access_key_id"].(string); key != "test-key" {
+		t.Fatalf("S3 access_key_id = %q, want test-key", key)
+	}
+	if _, leaked := s3Out["secret_access_key"]; leaked {
+		t.Fatal("S3 settings response leaked secret_access_key")
+	}
+	s3Test, _ := api(t, "POST", "/api/config/backup-settings/s3/test", token, s3Body)
+	expectStatus(t, s3Test, 200, "POST /api/config/backup-settings/s3/test")
+	s3Create1, s3Out1 := api(t, "POST", "/api/backup/create", token, nil)
+	expectStatus(t, s3Create1, 200, "POST /api/backup/create (S3)")
+	if uploaded, _ := s3Out1["s3_uploaded"].(bool); !uploaded {
+		t.Fatalf("S3 backup uploaded = %v, want true (%v)", s3Out1["s3_uploaded"], s3Out1)
+	}
+	s3Key1, _ := s3Out1["s3_key"].(string)
+	s3Mu.Lock()
+	_, s3Present := s3Objects[s3Key1]
+	s3Mu.Unlock()
+	if !s3Present {
+		t.Fatalf("S3 object %q missing after backup upload", s3Key1)
+	}
+	retentionResp, _ := api(t, "PATCH", "/api/config/backup-settings/schedule", token, map[string]interface{}{
+		"interval_hours": 0, "retention_count": 1,
+	})
+	expectStatus(t, retentionResp, 200, "PATCH backup retention=1")
+	s3Create2, s3Out2 := api(t, "POST", "/api/backup/create", token, nil)
+	expectStatus(t, s3Create2, 200, "POST /api/backup/create (S3 retention)")
+	if uploaded, _ := s3Out2["s3_uploaded"].(bool); !uploaded {
+		t.Fatalf("second S3 backup uploaded = %v, want true", s3Out2["s3_uploaded"])
+	}
+	s3Mu.Lock()
+	s3Count := len(s3Objects)
+	s3Mu.Unlock()
+	if s3Count != 1 {
+		t.Fatalf("S3 retention left %d objects, want 1", s3Count)
+	}
+	s3Disable, _ := api(t, "PATCH", "/api/config/backup-settings/s3", token, map[string]interface{}{
+		"enabled": false, "endpoint": s3Server.URL, "region": "us-east-1",
+		"bucket": "backups", "prefix": "e2e", "access_key_id": "test-key",
+		"force_path_style": true,
+	})
+	expectStatus(t, s3Disable, 200, "PATCH /api/config/backup-settings/s3 (disable)")
+	resetRetention, _ := api(t, "PATCH", "/api/config/backup-settings/schedule", token, map[string]interface{}{
+		"interval_hours": 0, "retention_count": 0,
+	})
+	expectStatus(t, resetRetention, 200, "PATCH backup retention=0")
 
 	// ---- Audit-log housekeeping (super_admin only) ----
 	// Many actions above logged audit rows. A purge with a huge cutoff

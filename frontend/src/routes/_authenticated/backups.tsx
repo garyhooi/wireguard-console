@@ -1,7 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
-import { IconArchive, IconDownload, IconLoader2, IconLock, IconShieldCheck, IconUpload } from '@tabler/icons-react'
+import { IconArchive, IconCloud, IconDownload, IconLoader2, IconLock, IconShieldCheck, IconUpload } from '@tabler/icons-react'
 import {
   ActionLink,
   Badge,
@@ -29,6 +29,8 @@ interface BackupDetail {
   verified_known: boolean
   verified_at?: string
   size: number
+  s3_uploaded?: boolean
+  s3_key?: string
 }
 
 interface BackupList {
@@ -44,6 +46,11 @@ interface CreateBackupResponse {
   verified: boolean
   size: number
   verification_warning?: string
+  s3_configured?: boolean
+  s3_uploaded?: boolean
+  s3_key?: string
+  s3_warning?: string
+  retention_warning?: string
 }
 
 const CREATE_STAGES = [
@@ -51,6 +58,7 @@ const CREATE_STAGES = [
   'Compressing the archive…',
   'Encrypting with the backup passphrase when enabled…',
   'Verifying the backup by restoring it into a temporary database…',
+  'Uploading to S3 when configured…',
 ]
 
 export function formatBytes(bytes?: number): string {
@@ -167,10 +175,11 @@ function BackupsPage() {
     onSuccess: (result) => {
       if (result.verified) {
         const protection = result.encrypted ? 'passphrase-encrypted and ' : ''
+        const destination = result.s3_uploaded ? ', uploaded to S3' : ''
         setNotice(
-          `Backup ${result.filename} created — ${protection}restore-verified (${formatBytes(result.size)}).`,
+          `Backup ${result.filename} created — ${protection}restore-verified (${formatBytes(result.size)}${destination}).`,
         )
-        setError('')
+        setError(result.s3_warning || result.retention_warning || '')
       } else {
         setNotice('')
         setError(
@@ -316,7 +325,7 @@ function BackupsPage() {
     <div>
       <PageHeader
         title="Backups"
-        description="One-click database backups live on the console server (Docker volume, /var/backups/wgconsole). Creating one runs pg_dump, encrypts it when backup encryption is enabled, and restores it into a temporary database to verify it before reporting success. Downloading, restoring, uploading or deleting a backup requires an MFA step-up (passkey or authenticator code)."
+        description="One-click database backups live on the console server (Docker volume, /var/backups/wgconsole). Creating one runs pg_dump, encrypts it when backup encryption is enabled, restores it into a temporary database to verify it, then uploads it to S3 when configured. Downloading, restoring, uploading or deleting a backup requires an MFA step-up (passkey or authenticator code)."
         actions={canManage ? (
           <PrimaryButton onClick={() => createMutation.mutate()} disabled={createMutation.isPending}>
             <IconArchive size={16} stroke={1.6} aria-hidden="true" />
@@ -409,10 +418,18 @@ function BackupsPage() {
                     <td className={tdCls + ' font-mono text-zinc-200'}>{name}</td>
                     <td className={tdCls + ' font-mono tabular-nums'}>{formatBytes(detail?.size)}</td>
                     <td className={tdCls}>
-                      <Badge tone={encrypted ? 'good' : 'neutral'}>
-                        {encrypted && <IconLock size={12} stroke={1.7} aria-hidden="true" />}
-                        {encrypted ? 'Encrypted' : 'Plain'}
-                      </Badge>
+                      <div className="flex flex-wrap gap-1">
+                        <Badge tone={encrypted ? 'good' : 'neutral'}>
+                          {encrypted && <IconLock size={12} stroke={1.7} aria-hidden="true" />}
+                          {encrypted ? 'Encrypted' : 'Plain'}
+                        </Badge>
+                        {detail?.s3_uploaded && (
+                          <Badge tone="info">
+                            <IconCloud size={12} stroke={1.7} aria-hidden="true" />
+                            S3
+                          </Badge>
+                        )}
+                      </div>
                     </td>
                     <td className={tdCls}>
                       {detail?.verified ? (
@@ -479,7 +496,7 @@ function BackupsPage() {
           <div className="h-1.5 overflow-hidden rounded-full bg-zinc-800">
             <div className="h-full w-1/3 animate-pulse rounded-full bg-teal-500" />
           </div>
-          <div className="grid grid-cols-4 gap-1.5">
+          <div className="grid grid-cols-5 gap-1.5">
             {CREATE_STAGES.map((_, i) => (
               <span
                 key={i}

@@ -478,3 +478,85 @@ describe('Configuration → Security backup encryption', () => {
     await screen.findByText(/new backups will be encrypted with the backup passphrase/)
   })
 })
+
+
+describe('Configuration → Backup storage', () => {
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
+
+  it('saves S3 settings and the automatic schedule', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init })
+      const method = (init?.method ?? 'GET').toUpperCase()
+      if (url.includes('/api/admins/me') && method === 'GET') {
+        return { ok: true, status: 200, json: async () => ({ role: 'super_admin', permissions: ['*'] }) } as Response
+      }
+      if (url.includes('/api/config/backup-settings') && method === 'GET') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            s3: {
+              enabled: false,
+              endpoint: '',
+              region: 'us-east-1',
+              bucket: '',
+              prefix: 'wireguard-console/backups',
+              access_key_id: '',
+              secret_set: false,
+              session_token_set: false,
+              force_path_style: false,
+            },
+            schedule: { interval_hours: 0, retention_count: 0 },
+          }),
+        } as Response
+      }
+      if (url.includes('/api/config/backup-settings/s3') && method === 'PATCH') {
+        const body = JSON.parse(String(init?.body ?? '{}'))
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ status: 'updated', s3: { ...body, secret_set: false, session_token_set: false } }),
+        } as Response
+      }
+      if (url.includes('/api/config/backup-settings/schedule') && method === 'PATCH') {
+        const body = JSON.parse(String(init?.body ?? '{}'))
+        return { ok: true, status: 200, json: async () => ({ status: 'updated', schedule: body }) } as Response
+      }
+      throw new Error('unexpected fetch: ' + method + ' ' + url)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderPage()
+    await screen.findByRole('button', { name: 'Backup storage' })
+    fireEvent.click(screen.getByRole('button', { name: 'Backup storage' }))
+    await screen.findByText('S3-compatible destination')
+    await waitFor(() => expect(screen.queryByText('Loading…')).toBeNull())
+
+    fireEvent.click(screen.getByRole('checkbox', { name: /Upload backups to S3/ }))
+    fireEvent.change(screen.getByLabelText('Bucket'), { target: { value: 'my-backups' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save S3 settings' }))
+    await waitFor(() => {
+      const patches = calls.filter((c) => c.url.includes('/api/config/backup-settings/s3') && (c.init?.method ?? 'GET').toUpperCase() === 'PATCH')
+      expect(patches).toHaveLength(1)
+      expect(JSON.parse(String(patches[0].init?.body))).toMatchObject({
+        enabled: true,
+        region: 'us-east-1',
+        bucket: 'my-backups',
+        prefix: 'wireguard-console/backups',
+      })
+    })
+
+    fireEvent.change(screen.getByLabelText('Backup interval'), { target: { value: '24' } })
+    fireEvent.change(screen.getByLabelText('Keep last N backups'), { target: { value: '7' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save schedule' }))
+    await waitFor(() => {
+      const patches = calls.filter((c) => c.url.includes('/api/config/backup-settings/schedule') && (c.init?.method ?? 'GET').toUpperCase() === 'PATCH')
+      expect(patches).toHaveLength(1)
+      expect(JSON.parse(String(patches[0].init?.body))).toEqual({ interval_hours: 24, retention_count: 7 })
+    })
+  })
+})

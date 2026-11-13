@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   IconClock,
+  IconCloud,
   IconCode,
   IconMail,
   IconSend,
@@ -14,6 +15,7 @@ import { apiJson } from '../../lib/api'
 import { useCan } from '../../lib/permissions'
 import { ConfirmMFA } from '../../lib/ConfirmMFA'
 import { EmailTemplatesSection } from '../../components/EmailTemplatesSection'
+import { BackupStorageSettings } from '../../components/BackupStorageSettings'
 import { getTimezone, setTimezone } from '../../lib/timezone'
 
 interface SMTPConfig {
@@ -30,7 +32,7 @@ export const Route = createFileRoute('/_authenticated/config')({
   component: ConfigPage,
 })
 
-type ConfigTab = 'smtp' | 'templates' | 'timezone' | 'security'
+type ConfigTab = 'smtp' | 'templates' | 'timezone' | 'storage' | 'security'
 
 // Each tab keeps its own scroll container so the page never grows into one
 // long column as configuration sections are added. Sections that belong to a
@@ -39,6 +41,7 @@ const TABS: { id: ConfigTab; label: string; icon: React.ComponentType<{ size?: n
   { id: 'smtp', label: 'Email (SMTP)', icon: IconSettings },
   { id: 'templates', label: 'Email templates', icon: IconCode },
   { id: 'timezone', label: 'Timezone', icon: IconClock },
+  { id: 'storage', label: 'Backup storage', icon: IconCloud },
   { id: 'security', label: 'Security', icon: IconShieldLock },
 ]
 
@@ -52,7 +55,7 @@ export function ConfigPage() {
     <div>
       <PageHeader
         title="Configuration"
-        description="Outbound email (SMTP), the templates the console uses for invites, the display timezone for reports and logs, and security policy."
+        description="Outbound email (SMTP), invite templates, the display timezone, S3 backup storage and automatic backup retention, plus security policy."
       />
 
       {readOnly && (
@@ -88,6 +91,8 @@ export function ConfigPage() {
         <SmtpSettings />
       ) : tab === 'templates' ? (
         <EmailTemplatesSection />
+      ) : tab === 'storage' ? (
+        <BackupStorageSettings />
       ) : tab === 'security' ? (
         <SecuritySettings />
       ) : (

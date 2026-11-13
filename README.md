@@ -202,6 +202,53 @@ Destructive actions ask for your MFA confirmation (passkey or authenticator code
 
 **Optional backup encryption:** **Configuration → Security → Backup encryption** sets a passphrase used automatically for every new backup created by any admin. The passphrase is stored encrypted on the server; the backup file itself is authenticated and cannot be read without it. Changing or disabling the passphrase keeps up to 10 previous passphrases encrypted so older archives remain restorable. Keep the passphrase somewhere safe — if both the server and its database are lost, it is the only way to open an encrypted archive.
 
+### S3 backup destination
+
+**Configuration → Backup storage** configures a generic S3-compatible destination. After a backup passes its restore check it is also uploaded to the bucket. The local archive remains on the console volume for the one-click restore list; the S3 object is the off-site copy.
+
+- **AWS S3:** leave Endpoint empty, set the region and bucket. Path-style URLs are optional.
+- **MinIO / R2 / Backblaze B2 / Wasabi:** set the provider's HTTPS endpoint, region (use the value the provider documents, often `auto` or `us-east-1`), and enable path-style URLs only when required.
+- **Credentials:** static access key + secret are encrypted with `APP_ENCRYPTION_KEY`. Leave both blank to use the API container's AWS credential chain (environment variables or instance role). A session token is supported for temporary credentials.
+- **Test connection** checks `HeadBucket` and a temporary put/get/delete under the configured prefix.
+- Use an HTTPS endpoint outside a trusted local network; plain HTTP sends the access key and secret in cleartext.
+
+Minimum IAM permissions (replace the bucket and prefix):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": "arn:aws:s3:::YOUR_BUCKET"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:AbortMultipartUpload",
+        "s3:ListMultipartUploadParts"
+      ],
+      "Resource": "arn:aws:s3:::YOUR_BUCKET/wireguard-console/backups/*"
+    }
+  ]
+}
+```
+
+For non-AWS providers, grant the equivalent list/read/write/delete permissions on the bucket and prefix. The test button needs list + put + get + delete; large backups use multipart upload, so include the multipart abort permission.
+
+### Automatic backups and retention
+
+The same **Backup storage** page can enable automatic backups and a retention limit:
+
+- Choose an interval: hourly, every 6/12 hours, daily, every 3 days, weekly, or every 30 days. The API process checks the schedule every minute and records the last automatic attempt.
+- **Keep last N backups**: after every successful backup, older archives beyond N are removed. `0` keeps everything; the maximum is 100.
+- Retention removes the matching S3 object when S3 is enabled, and the local archive. If the newest upload failed or its restore check did not pass, retention pauses so an older copy is not deleted while the current one is only local.
+- The local archive is not removed by a successful upload; it is what the Backups page restores. If the console volume is lost, download the object from S3 and use **Restore from upload**.
+
 ## Upgrading
 
 Re-run the same install command — it updates the code and keeps all admins, peers, and data:
