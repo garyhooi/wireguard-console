@@ -315,16 +315,28 @@ func DeleteBackup(store *Store) http.HandlerFunc {
 		backupOperationMu.Lock()
 		defer backupOperationMu.Unlock()
 		svc := backup.NewBackupService(backupDataDir())
+
+		s3Deleted, s3Key, err := deleteBackupS3Copy(ctx, store, svc, req.Filename)
+		if err != nil {
+			log.Printf("Failed to delete S3 copy of backup %s: %v", req.Filename, err)
+			writeError(w, http.StatusBadGateway, "Backup was kept because its S3 copy could not be removed: "+err.Error())
+			return
+		}
 		if err := svc.DeleteBackup(req.Filename); err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to delete backup")
 			return
 		}
 
-		logAudit(ctx, store, adminID, "backup.delete", "backup", req.Filename, nil)
+		logAudit(ctx, store, adminID, "backup.delete", "backup", req.Filename, map[string]interface{}{
+			"s3_deleted": s3Deleted,
+			"s3_key":     s3Key,
+		})
 
-		writeJSON(w, http.StatusOK, map[string]string{
-			"status":   "deleted",
-			"filename": req.Filename,
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"status":     "deleted",
+			"filename":   req.Filename,
+			"s3_deleted": s3Deleted,
+			"s3_key":     s3Key,
 		})
 	}
 }

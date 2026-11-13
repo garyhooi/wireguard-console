@@ -2494,6 +2494,24 @@ func TestEndToEnd(t *testing.T) {
 	if !s3Present {
 		t.Fatalf("S3 object %q missing after backup upload", s3Key1)
 	}
+	s3Filename1, _ := s3Out1["filename"].(string)
+	s3Delete, s3DeleteOut := api(t, "POST", "/api/backup/delete", token, map[string]interface{}{
+		"filename": s3Filename1, "code": actorCode(),
+	})
+	expectStatus(t, s3Delete, 200, "POST /api/backup/delete (S3 copy)")
+	if deleted, _ := s3DeleteOut["s3_deleted"].(bool); !deleted {
+		t.Fatalf("manual delete did not delete S3 copy: %v", s3DeleteOut)
+	}
+	s3Mu.Lock()
+	_, s3StillPresent := s3Objects[s3Key1]
+	s3Mu.Unlock()
+	if s3StillPresent {
+		t.Fatalf("S3 object %q still present after manual delete", s3Key1)
+	}
+	s3ListAfterDelete := rawGet(t, baseURL+"/api/backup/list", token)
+	if strings.Contains(s3ListAfterDelete, s3Filename1) {
+		t.Fatalf("local backup %q still listed after delete: %s", s3Filename1, s3ListAfterDelete)
+	}
 	retentionResp, _ := api(t, "PATCH", "/api/config/backup-settings/schedule", token, map[string]interface{}{
 		"interval_hours": 0, "retention_count": 1,
 	})

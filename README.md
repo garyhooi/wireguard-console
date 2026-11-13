@@ -210,6 +210,7 @@ Destructive actions ask for your MFA confirmation (passkey or authenticator code
 - **MinIO / R2 / Backblaze B2 / Wasabi:** set the provider's HTTPS endpoint, region (use the value the provider documents, often `auto` or `us-east-1`), and enable path-style URLs only when required.
 - **Credentials:** static access key + secret are encrypted with `APP_ENCRYPTION_KEY`. Leave both blank to use the API container's AWS credential chain (environment variables or instance role). A session token is supported for temporary credentials.
 - **Test connection** checks `HeadBucket` and a temporary put/get/delete under the configured prefix.
+- Deleting a backup removes both the local archive and its matching S3 object. If the S3 copy cannot be removed, the local file is kept and the error is shown so you can fix the destination and retry.
 - Use an HTTPS endpoint outside a trusted local network; plain HTTP sends the access key and secret in cleartext.
 
 Minimum IAM permissions (replace the bucket and prefix):

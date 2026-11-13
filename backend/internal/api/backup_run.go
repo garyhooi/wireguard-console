@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -111,6 +112,39 @@ func runBackup(ctx context.Context, store *Store) (backupRunOutcome, error) {
 		}
 	}
 	return outcome, nil
+}
+
+// deleteBackupS3Copy removes the remote object recorded on a backup sidecar.
+// It runs even when S3 is currently disabled, because disabling new uploads
+// must not leave previously uploaded copies undeletable. The local archive is
+// only removed by the caller after this succeeds.
+func deleteBackupS3Copy(ctx context.Context, store *Store, svc *backup.BackupService, filename string) (bool, string, error) {
+	meta := svc.ReadMetadata(filename)
+	if !meta.S3Uploaded && meta.S3Key == "" {
+		return false, "", nil
+	}
+	s3State, err := loadS3Settings(ctx, store.pool)
+	if err != nil {
+		return false, meta.S3Key, fmt.Errorf("load S3 settings: %w", err)
+	}
+	if strings.TrimSpace(s3State.Bucket) == "" {
+		return false, meta.S3Key, fmt.Errorf("this backup has an S3 copy, but S3 is no longer configured")
+	}
+	cfg, err := s3State.config()
+	if err != nil {
+		return false, meta.S3Key, err
+	}
+	if err := cfg.Validate(); err != nil {
+		return false, meta.S3Key, err
+	}
+	key := meta.S3Key
+	if key == "" {
+		key = cfg.Key(filename)
+	}
+	if err := cfg.Delete(ctx, key); err != nil {
+		return false, key, err
+	}
+	return true, key, nil
 }
 
 func applyBackupRetention(ctx context.Context, svc *backup.BackupService, s3State s3SettingsState, s3Cfg backup.S3Config, keep int) error {

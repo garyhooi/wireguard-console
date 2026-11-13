@@ -53,6 +53,13 @@ interface CreateBackupResponse {
   retention_warning?: string
 }
 
+interface DeleteBackupResponse {
+  status: string
+  filename: string
+  s3_deleted?: boolean
+  s3_key?: string
+}
+
 const CREATE_STAGES = [
   'Snapshotting the PostgreSQL database…',
   'Compressing the archive…',
@@ -278,23 +285,26 @@ function BackupsPage() {
 
   const deleteMutation = useMutation({
     mutationFn: async (a: { filename: string; code: string }) => {
-      return apiJson('/api/backup/delete', {
+      return apiJson<DeleteBackupResponse>('/api/backup/delete', {
         method: 'POST',
         body: { filename: a.filename, code: a.code },
       })
     },
-    onSuccess: () => {
-      setNotice('Backup deleted.')
+    onSuccess: (result) => {
+      setNotice(result.s3_deleted ? 'Backup deleted from the console server and S3.' : 'Backup deleted.')
       setError('')
       queryClient.invalidateQueries({ queryKey: ['backups'] })
     },
     onError: (e: Error) => setError(e.message),
   })
 
-  const confirmDelete = (filename: string) => {
+  const confirmDelete = (filename: string, s3Uploaded: boolean) => {
+    const remoteNote = s3Uploaded
+      ? '\n\nThis also deletes the S3 object from the configured bucket. If the S3 copy cannot be removed, the local backup is kept so it can be retried.'
+      : ''
     if (
       !confirm(
-        `Delete backup "${filename}"?\n\nThis permanently removes the file from the console server. This cannot be undone.`,
+        `Delete backup "${filename}"?\n\nThis permanently removes the file from the console server.${remoteNote} This cannot be undone.`,
       )
     ) {
       return
@@ -455,7 +465,7 @@ function BackupsPage() {
                           <GhostButton disabled={restoreMutation.isPending} onClick={() => confirmRestore(name)}>
                             {restoreMutation.isPending ? 'Restoring…' : 'Restore'}
                           </GhostButton>
-                          <ActionLink tone="danger" onClick={() => confirmDelete(name)}>
+                          <ActionLink tone="danger" onClick={() => confirmDelete(name, Boolean(detail?.s3_uploaded))}>
                             {deleteMutation.isPending ? 'Deleting…' : 'Delete'}
                           </ActionLink>
                         </div>
@@ -471,9 +481,10 @@ function BackupsPage() {
       </Panel>
 
       <p className="mt-4 text-xs text-zinc-600 max-w-3xl leading-relaxed">
-        Tip: back up before major changes, and copy backups off this server for disaster recovery
-        (they live only on the Docker volume). Downloading a backup lets you keep an off-site copy;
-        restoring wipes current data, so every destructive action asks for an MFA step-up first.
+        Tip: back up before major changes. Local backups live on the Docker volume; when S3 is
+        configured, verified backups are also copied to the bucket. Downloading still gives you an
+        independent off-site copy. Restoring wipes current data, so every destructive action asks for
+        an MFA step-up first.
       </p>
 
       <Modal
