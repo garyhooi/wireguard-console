@@ -16,6 +16,7 @@ const columns = [
   {
     title: "Deploy",
     links: [
+      { label: "Firewall", href: "/#firewall" },
       { label: "Install", href: "/#deploy" },
       { label: "Node setup", href: `${siteConfig.docs}` },
       { label: "Requirements", href: "/#faq" },

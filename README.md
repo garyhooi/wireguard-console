@@ -113,10 +113,19 @@ To add more operators: **Directory → Admins → Invite Admin**. Add VPN users 
 | `80/tcp` | Caddy: HTTPS certificate issuance + block page | ✅ |
 | `443/tcp` | Console web UI + API | ✅ |
 | `3000/tcp` | AdGuard API — Docker containers only (never the internet) | 🔒 internal |
-| `53/udp+tcp` | AdGuard DNS for VPN peers (WireGuard interface only) | ✅ on VPN hosts |
+| `53/udp+tcp` | AdGuard DNS for VPN peers (WireGuard interface only) | ✅ console host |
 | `51820/udp` | WireGuard (use your custom port if you changed it) | ✅ only if this machine also runs a VPN server |
 
-The installer opens these on the **host** firewall itself, whichever manager is active: `ufw`, `firewalld`, or a bare `iptables` ruleset. The last case matters on images that ship an iptables ruleset with a catch-all `REJECT` instead of ufw — some cloud images do (for example Oracle Cloud's Ubuntu images). There, rules are inserted *before* that REJECT (an appended rule never matches, so WireGuard handshakes are silently dropped: "last handshake: never") and re-applied at boot by a `wg-console-firewall.service` unit. That same image ruleset can also shadow ufw: it is loaded before ufw appends its own chains, so every ufw allow rule would be unreachable and the VPN still would not hand-shake. The installer detects that ordering, removes the redundant catch-all REJECT rules (ufw keeps its default DROP policy, so nothing else is exposed) and the boot unit repeats the repair after a reboot. Port 53 is scoped to the WireGuard interface, so tunnel peers reach AdGuard on the gateway while it stays closed to the internet, and port 3000 is opened **only for Docker's private bridge subnets** (172.16.0.0/12) so the console's api container can reach AdGuard's API — AdGuard itself stays closed to the internet. On a **cloud** firewall (OCI Security List/NSG, AWS security group, GCP VPC firewall, Azure NSG) open 80/tcp, 443/tcp and 51820/udp yourself; the installer cannot change those. **Never** open 3000 publicly.
+The installer opens the console-host ports above on the **host** firewall itself, whichever manager is active: `ufw`, `firewalld`, or a bare `iptables` ruleset. The last case matters on images that ship an iptables ruleset with a catch-all `REJECT` instead of ufw — some cloud images do (for example Oracle Cloud's Ubuntu images). There, rules are inserted *before* that REJECT (an appended rule never matches, so WireGuard handshakes are silently dropped: "last handshake: never") and re-applied at boot by a `wg-console-firewall.service` unit. That same image ruleset can also shadow ufw: it is loaded before ufw appends its own chains, so every ufw allow rule would be unreachable and the VPN still would not hand-shake. The installer detects that ordering, removes the redundant catch-all REJECT rules (ufw keeps its default DROP policy, so nothing else is exposed) and the boot unit repeats the repair after a reboot. Port 53 is scoped to the WireGuard interface, so tunnel peers reach AdGuard on the gateway while it stays closed to the internet, and port 3000 is opened **only for Docker's private bridge subnets** (172.16.0.0/12) so the console's api container can reach AdGuard's API — AdGuard itself stays closed to the internet. On a **cloud** firewall (OCI Security List/NSG, AWS security group, GCP VPC firewall, Azure NSG) open 80/tcp, 443/tcp and 51820/udp yourself on the console host; the installer cannot change those. On an exit node, open only its WireGuard UDP port (plus temporary SSH if needed) and allow outbound 443/tcp. **Never** open 3000 publicly.
+
+**Exit node ports.** A machine that only runs the node agent needs much less than the console host:
+
+| Port | Direction | Why |
+|---|---|---|
+| `51820/udp` (or your custom port) | inbound | WireGuard peers connect here — required when the node runs an exit. |
+| `443/tcp` | outbound | The agent polls the console over HTTPS every 15s. No inbound management port is needed. |
+| `53/udp+tcp` | outbound | Optional: only when peers on this node use the console's AdGuard resolver. |
+| `22/tcp` | inbound | One-time install SSH. Restrict it to your admin IP and close or limit it afterwards. |
 
 ## Distributed nodes (one console, many regions)
 

@@ -30,5 +30,6 @@ export const navItems = [
   { href: "/#console", label: "Console" },
   { href: "/#topology", label: "Topology" },
   { href: "/#security", label: "Security" },
+  { href: "/#firewall", label: "Firewall" },
   { href: "/#deploy", label: "Deploy" },
 ] as const;

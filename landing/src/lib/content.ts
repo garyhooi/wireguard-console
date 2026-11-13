@@ -181,3 +181,63 @@ export const faqs = [
     a: "Apache 2.0. You can run it internally, modify it or fork it without a per-admin fee.",
   },
 ] as const;
+export const firewallPorts = {
+  console: [
+    {
+      port: "80/tcp",
+      direction: "IN",
+      label: "HTTP + ACME",
+      detail: "Certificate issuance and the branded block page.",
+    },
+    {
+      port: "443/tcp",
+      direction: "IN",
+      label: "Console UI + API",
+      detail: "Admin traffic, plus node polling.",
+    },
+    {
+      port: "51820/udp",
+      direction: "IN",
+      label: "WireGuard peers",
+      detail: "Only when this host is also an exit.",
+    },
+    {
+      port: "53/udp+tcp",
+      direction: "IN",
+      label: "AdGuard DNS",
+      detail: "WireGuard interface only, console host.",
+    },
+    {
+      port: "3000/tcp",
+      direction: "INTERNAL",
+      label: "AdGuard API",
+      detail: "Docker bridge only. Never expose publicly.",
+    },
+  ],
+  node: [
+    {
+      port: "51820/udp",
+      direction: "IN",
+      label: "WireGuard peers",
+      detail: "Required for the exit. Use your custom port if changed.",
+    },
+    {
+      port: "443/tcp",
+      direction: "OUT",
+      label: "Agent → console",
+      detail: "Polls every 15s. No inbound management port.",
+    },
+    {
+      port: "53/udp+tcp",
+      direction: "OUT",
+      label: "Console DNS",
+      detail: "Optional — only when peers use the console's AdGuard.",
+    },
+    {
+      port: "22/tcp",
+      direction: "IN",
+      label: "One-time SSH",
+      detail: "Restrict to your admin IP; close or limit after setup.",
+    },
+  ],
+} as const;

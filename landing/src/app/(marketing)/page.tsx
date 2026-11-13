@@ -4,6 +4,7 @@ import { TopologySection } from "@/components/topology/topology-section";
 import { ConsoleShowcase } from "@/components/sections/console-showcase";
 import { SecuritySection } from "@/components/sections/security-section";
 import { OperationsBento } from "@/components/sections/operations-bento";
+import { FirewallSection } from "@/components/sections/firewall-section";
 import { DeploySection } from "@/components/sections/deploy-section";
 import { FaqSection } from "@/components/sections/faq-section";
 import { FinalCta } from "@/components/sections/final-cta";
@@ -18,6 +19,7 @@ export default function Home() {
       <ConsoleShowcase />
       <SecuritySection />
       <OperationsBento />
+      <FirewallSection />
       <DeploySection />
       <FaqSection />
       <FinalCta />
