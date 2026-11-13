@@ -9,10 +9,12 @@ import { DeploySection } from "@/components/sections/deploy-section";
 import { FaqSection } from "@/components/sections/faq-section";
 import { FinalCta } from "@/components/sections/final-cta";
 import { StructuredData } from "@/components/structured-data";
+import { HashScroll } from "@/components/hash-link";
 
 export default function Home() {
   return (
     <>
+      <HashScroll />
       <Hero />
       <MetricsStrip />
       <TopologySection />

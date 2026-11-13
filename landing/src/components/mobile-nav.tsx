@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import Link from "next/link";
 import { List, X } from "@phosphor-icons/react";
 import { navItems, siteConfig } from "@/lib/site";
+import { HashLink } from "@/components/hash-link";
 
 export function MobileNav() {
   const [open, setOpen] = useState(false);
@@ -48,14 +48,14 @@ export function MobileNav() {
         >
           <nav aria-label="Mobile" className="grid gap-1">
             {navItems.map((item) => (
-              <Link
+              <HashLink
                 key={item.href}
                 href={item.href}
                 onClick={() => setOpen(false)}
                 className="rounded-lg px-3 py-3 text-[15px] text-text transition-colors hover:bg-panel"
               >
                 {item.label}
-              </Link>
+              </HashLink>
             ))}
             <a
               href={siteConfig.repo}

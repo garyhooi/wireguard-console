@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { ArrowRight, Play, TerminalWindow } from "@phosphor-icons/react/dist/ssr";
 import { NetworkStage } from "@/components/topology/network-stage";
+import { HashLink } from "@/components/hash-link";
 
 export function Hero() {
   return (
@@ -37,13 +38,13 @@ export function Hero() {
                 className="transition-transform group-hover:translate-x-0.5"
               />
             </Link>
-            <Link
+            <HashLink
               href="/#deploy"
               className="inline-flex h-11 items-center gap-2 rounded-full border border-line-strong bg-panel/60 px-5 text-sm font-medium text-text transition-colors hover:border-muted/50 hover:bg-panel active:scale-[0.985]"
             >
               <TerminalWindow size={16} aria-hidden="true" />
               Deploy it
-            </Link>
+            </HashLink>
           </div>
         </div>
 

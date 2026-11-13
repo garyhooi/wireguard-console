@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { ArrowRight, ArrowUpRight, Play } from "@phosphor-icons/react/dist/ssr";
 import { siteConfig } from "@/lib/site";
+import { HashLink } from "@/components/hash-link";
 
 export function FinalCta() {
   return (
@@ -34,12 +35,12 @@ export function FinalCta() {
                 className="transition-transform group-hover:translate-x-0.5"
               />
             </Link>
-            <Link
+            <HashLink
               href="/#deploy"
               className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-full border border-line-strong px-6 text-sm font-medium text-text transition-colors hover:border-muted/50 hover:bg-panel active:scale-[0.985] sm:w-auto"
             >
               Deploy it
-            </Link>
+            </HashLink>
             <Link
               href={siteConfig.license}
               target="_blank"

@@ -2,6 +2,7 @@ import Link from "next/link";
 import { IconBrandGithub } from "@tabler/icons-react";
 import { siteConfig } from "@/lib/site";
 import { BrandMark } from "@/components/brand";
+import { HashLink } from "@/components/hash-link";
 
 const columns = [
   {
@@ -69,7 +70,7 @@ export function SiteFooter() {
               <ul className="mt-4 space-y-3">
                 {column.links.map((link) => (
                   <li key={link.label}>
-                    <Link
+                    <HashLink
                       href={link.href}
                       {...(link.href.startsWith("http")
                         ? { target: "_blank", rel: "noreferrer" }
@@ -77,7 +78,7 @@ export function SiteFooter() {
                       className="text-sm text-muted transition-colors hover:text-text"
                     >
                       {link.label}
-                    </Link>
+                    </HashLink>
                   </li>
                 ))}
               </ul>
