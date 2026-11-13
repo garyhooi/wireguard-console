@@ -105,7 +105,7 @@ WGCONSOLE_TLS=domain sudo bash install.sh             # Caddy HTTPS on :443 (Ful
 WGCONSOLE_TLS=external-proxy sudo bash install.sh     # plain-HTTP origin (Cloudflare Flexible)
 ```
 
-To add more operators: **System → Admins → Invite Admin**. Add VPN users under **Directory → VPN Users**, then issue peers to them.
+To add more operators: **Directory → Admins → Invite Admin**. Add VPN users under **Directory → VPN Users**, then issue peers to them.
 
 ## Firewall — which ports to open
 
@@ -172,8 +172,19 @@ Every admin must complete a second factor after the password: a **passkey** (Tou
 - **Passkeys need a domain.** WebAuthn binds credentials to the console hostname, so IP-only installs (`CONSOLE_DOMAIN` = an IP address) have no passkey option; authenticator-app MFA is used instead. The installer summary shows which mode applies.
 - **Passkeys registered before passwordless sign-in was added** may not be discoverable: the password path still works, and adding a fresh passkey from Profile enables one-tap sign-in. Passkeys created from now on are discoverable by default.
 - **Changing `CONSOLE_DOMAIN` orphans passkeys** — they were registered for the old address. The installer warns when this happens; affected admins re-enroll (TOTP and recovery codes keep working).
+- **Changing an admin's email resets their passkeys.** Passkeys are bound to the account identity, so the console warns before the change and requires explicit confirmation; authenticator-app codes and recovery codes keep working (Directory → Admins → Edit). Use **Reset MFA** if the admin also lost their other factors.
 - **Recovery**: a super admin can reset another admin's MFA from **Directory → Admins → Reset MFA** (their sessions are signed out and they re-enroll at next sign-in). Save the recovery codes shown at enrollment.
 - **Policy**: Configuration → Security can require authenticator app, passkey, or both for every admin (default: at least one).
+
+## Admin roles, policies & groups
+
+Access control lives under **Directory → Admins**:
+
+- **Admins** — invite operators, change an admin's single role, and see the groups they belong to.
+- **Admin groups** — organizational groups (for example "Network operators"). Groups do not grant permissions; they make the admin list filterable and let you reassign a role to every member at once.
+- **Roles & policies** — create custom roles and edit the built-in **Admin** and **Auditor** roles in place. Edits apply to every admin assigned to that role on their next request; no re-invite or reassignment is needed.
+
+Each admin has exactly one role. **Super admin** is locked to full access so the console cannot lose its break-glass account. **Admin** and **Auditor** are ordinary editable roles, and they can be reset to their seeded policies. Custom roles can use every operational capability, but access-control, security-policy, audit-purge and maintenance capabilities are reserved for super admins. Changing a role policy or bulk-assigning a group role requires an MFA step-up.
 
 ## Backup & restore
 

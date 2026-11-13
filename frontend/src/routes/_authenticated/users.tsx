@@ -1,6 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { apiJson } from '../../lib/api'
 import { fmtDateTime } from '../../lib/timezone'
+import { useCan } from '../../lib/permissions'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 import { IconCopy, IconMailForward, IconMailPlus, IconPencil } from '@tabler/icons-react'
@@ -60,6 +61,7 @@ const USER_TONE: Record<string, 'good' | 'warn' | 'info' | 'bad' | 'neutral'> = 
 }
 
 export function UsersPage() {
+  const canManage = useCan('directory.manage')
   const [showInviteModal, setShowInviteModal] = useState(false)
   const [inviteEmail, setInviteEmail] = useState('')
   const [inviteName, setInviteName] = useState('')
@@ -263,10 +265,12 @@ export function UsersPage() {
             People who receive tunnel configs — separate from the admins who operate this console.
           </p>
         </div>
-        <PrimaryButton onClick={() => setShowInviteModal(true)}>
-          <IconMailPlus size={16} stroke={1.6} aria-hidden="true" />
-          Invite User
-        </PrimaryButton>
+        {canManage && (
+          <PrimaryButton onClick={() => setShowInviteModal(true)}>
+            <IconMailPlus size={16} stroke={1.6} aria-hidden="true" />
+            Invite User
+          </PrimaryButton>
+        )}
       </div>
 
       <Modal
@@ -542,7 +546,7 @@ export function UsersPage() {
                   <th className={thCls}>Department</th>
                   <th className={thCls}>Status</th>
                   <th className={thCls}>Invited At</th>
-                  <th className={thCls + ' text-right'}>Actions</th>
+                  {canManage && <th className={thCls + ' text-right'}>Actions</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800/60">
@@ -559,6 +563,7 @@ export function UsersPage() {
                     <td className={tdCls}>
                       {user.invited_at ? fmtDateTime(user.invited_at) : '-'}
                     </td>
+                    {canManage && (
                     <td className="px-5 py-3.5 whitespace-nowrap text-right text-sm">
                       <div className="flex justify-end gap-1">
                         {user.status !== 'removed' && (
@@ -613,6 +618,7 @@ export function UsersPage() {
                         )}
                       </div>
                     </td>
+                    )}
                   </tr>
                 ))}
               </tbody>

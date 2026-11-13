@@ -4,6 +4,7 @@ import { userLabel } from '../../lib/userLabel'
 import { dateKey, fmtDateTime } from '../../lib/timezone'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCan } from '../../lib/permissions'
 import { IconChevronDown, IconChevronRight, IconDownload, IconSearch } from '@tabler/icons-react'
 import {
   Badge,
@@ -79,11 +80,6 @@ interface BlockedIPResponse {
   records: BlockedIPRecord[]
 }
 
-interface Me {
-  id: string
-  role: string
-}
-
 interface Selectable {
   id: string
   label: string
@@ -130,13 +126,7 @@ export function WebActivityPage() {
     }
   }, [qInput])
 
-  const { data: me } = useQuery<Me>({
-    queryKey: ['me'],
-    queryFn: async () => {
-      return apiJson<Me>('/api/admins/me')
-    },
-  })
-  const isSuperAdmin = me?.role === 'super_admin'
+  const canPurge = useCan('audit.manage')
 
   const { data: users } = useQuery<Selectable[]>({
     queryKey: ['users'],
@@ -468,7 +458,7 @@ export function WebActivityPage() {
       </Panel>
 
       {/* Housekeeping — super_admin only */}
-      {isSuperAdmin && (
+      {canPurge && (
         <Panel title="Housekeeping" className="mt-6">
           <div className="px-5 py-4">
             <p className="text-sm text-zinc-500 mb-4 max-w-2xl">

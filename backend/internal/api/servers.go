@@ -484,9 +484,10 @@ func ListAdmins(store *Store) http.HandlerFunc {
 		ctx := context.Background()
 
 		rows, err := store.pool.Query(ctx, `
-			SELECT id, email, role, totp_enabled, status, created_at
-			FROM admins
-			ORDER BY created_at DESC
+			SELECT a.id, a.email, a.role, COALESCE(r.name, a.role), a.totp_enabled, a.status, a.created_at
+			FROM admins a
+			LEFT JOIN admin_roles r ON r.slug = a.role
+			ORDER BY a.created_at DESC
 		`)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to query admins")
@@ -500,11 +501,12 @@ func ListAdmins(store *Store) http.HandlerFunc {
 				id          uuid.UUID
 				email       string
 				role        string
+				roleName    string
 				totpEnabled bool
 				status      string
 				createdAt   time.Time
 			)
-			if err := rows.Scan(&id, &email, &role, &totpEnabled, &status, &createdAt); err != nil {
+			if err := rows.Scan(&id, &email, &role, &roleName, &totpEnabled, &status, &createdAt); err != nil {
 				writeError(w, http.StatusInternalServerError, "Failed to scan admin")
 				return
 			}
@@ -532,8 +534,9 @@ func ListAdmins(store *Store) http.HandlerFunc {
 func InviteAdmin(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Email string `json:"email"`
-			Role  string `json:"role"`
+			Email    string   `json:"email"`
+			Role     string   `json:"role"`
+			GroupIDs []string `json:"group_ids"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
@@ -543,9 +546,21 @@ func InviteAdmin(store *Store) http.HandlerFunc {
 		if req.Role == "" {
 			req.Role = "admin"
 		}
-		if req.Role != "super_admin" && req.Role != "admin" && req.Role != "auditor" {
-			writeError(w, http.StatusBadRequest, "role must be super_admin, admin or auditor")
+		ctx := context.Background()
+		exists, err := roleExists(ctx, store, req.Role)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to check role")
 			return
+		}
+		if !exists {
+			writeError(w, http.StatusBadRequest, "Unknown role")
+			return
+		}
+		if req.GroupIDs != nil {
+			if _, err := validateAdminGroupIDs(ctx, store, req.GroupIDs); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 		}
 
 		// Generate initial credentials: the invited admin changes the
@@ -553,14 +568,13 @@ func InviteAdmin(store *Store) http.HandlerFunc {
 		initialPassword := randomPassword(16)
 		passwordHash := hashPassword(initialPassword)
 
-		ctx := context.Background()
 		adminID := getAdminID(r)
 		policy := loadInvitePolicy(ctx, store.pool)
 		inviteExpiresAt := time.Now().Add(policy.AdminInvite)
 
 		var existingID uuid.UUID
 		var existingInvite *time.Time
-		err := store.pool.QueryRow(ctx,
+		err = store.pool.QueryRow(ctx,
 			`SELECT id, invite_expires_at FROM admins WHERE email = $1`, req.Email).
 			Scan(&existingID, &existingInvite)
 		switch {
@@ -571,7 +585,9 @@ func InviteAdmin(store *Store) http.HandlerFunc {
 			}
 			// Re-invite: rotate the temporary credentials and refresh the
 			// configured invite window (used when the first email was lost or
-			// its credentials expired).
+			// its credentials expired). The role is intentionally not changed
+			// here: an existing admin's role changes through PATCH /admins/:id,
+			// which enforces the last-super-admin guard.
 			if _, err := store.pool.Exec(ctx, `
 				UPDATE admins SET password_hash = $1, invite_expires_at = $2, updated_at = now()
 				WHERE id = $3
@@ -580,10 +596,11 @@ func InviteAdmin(store *Store) http.HandlerFunc {
 				return
 			}
 		case errors.Is(err, pgx.ErrNoRows):
-			if _, err := store.pool.Exec(ctx, `
+			if err := store.pool.QueryRow(ctx, `
 				INSERT INTO admins (email, password_hash, role, status, invite_expires_at)
 				VALUES ($1, $2, $3, 'active', $4)
-			`, req.Email, passwordHash, req.Role, inviteExpiresAt); err != nil {
+				RETURNING id
+			`, req.Email, passwordHash, req.Role, inviteExpiresAt).Scan(&existingID); err != nil {
 				writeError(w, http.StatusInternalServerError, "Failed to invite admin")
 				return
 			}
@@ -592,7 +609,16 @@ func InviteAdmin(store *Store) http.HandlerFunc {
 			return
 		}
 
-		logAudit(ctx, store, adminID, "admin.invite", "admin", "", nil)
+		if req.GroupIDs != nil {
+			if err := replaceAdminGroupMemberships(ctx, store, existingID, req.GroupIDs); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
+
+		logAudit(ctx, store, adminID, "admin.invite", "admin", existingID.String(), map[string]interface{}{
+			"groups": len(req.GroupIDs),
+		})
 
 		// Email the initial credentials (silent without SMTP, like invites).
 		subject, body := loadEmailTemplate(ctx, store.pool, "admin_invite",
@@ -652,16 +678,18 @@ func GetAdmin(store *Store) http.HandlerFunc {
 				ID          uuid.UUID `json:"id"`
 				Email       string    `json:"email"`
 				Role        string    `json:"role"`
+				RoleName    string    `json:"role_name"`
 				TOTPEnabled bool      `json:"totp_enabled"`
 				Status      string    `json:"status"`
 			}
 			createdAt time.Time
 		)
 		err = store.pool.QueryRow(ctx, `
-			SELECT id, email, role, totp_enabled, status, created_at
-			FROM admins
-			WHERE id = $1
-		`, adminID).Scan(&a.ID, &a.Email, &a.Role, &a.TOTPEnabled, &a.Status, &createdAt)
+			SELECT a.id, a.email, a.role, COALESCE(r.name, a.role), a.totp_enabled, a.status, a.created_at
+			FROM admins a
+			LEFT JOIN admin_roles r ON r.slug = a.role
+			WHERE a.id = $1
+		`, adminID).Scan(&a.ID, &a.Email, &a.Role, &a.RoleName, &a.TOTPEnabled, &a.Status, &createdAt)
 
 		if err != nil {
 			writeError(w, http.StatusNotFound, "Admin not found")
@@ -674,13 +702,23 @@ func GetAdmin(store *Store) http.HandlerFunc {
 			return
 		}
 
+		groupMap, err := loadAdminGroups(ctx, store, []uuid.UUID{a.ID})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to load admin groups")
+			return
+		}
+		groups := groupMap[a.ID]
+		if groups == nil {
+			groups = []adminGroupRef{}
+		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"id": a.ID.String(), "email": a.Email, "role": a.Role,
+			"id": a.ID.String(), "email": a.Email, "role": a.Role, "role_name": a.RoleName,
 			"totp_enabled": a.TOTPEnabled, "status": a.Status,
 			"created_at":    createdAt.UTC().Format(time.RFC3339),
 			"mfa_enabled":   summary.Enabled,
 			"mfa_methods":   summary.Methods,
 			"passkey_count": summary.PasskeyCount,
+			"groups":        groups,
 		})
 	}
 }
@@ -694,10 +732,15 @@ func UpdateAdmin(store *Store) http.HandlerFunc {
 		}
 
 		var req struct {
-			Email  string `json:"email"`
-			Role   string `json:"role"`
-			Status string `json:"status"`
-			Code   string `json:"code"`
+			Email    string   `json:"email"`
+			Role     string   `json:"role"`
+			Status   string   `json:"status"`
+			GroupIDs []string `json:"group_ids"`
+			Code     string   `json:"code"`
+			// ResetPasskeys is the caller's explicit confirmation that changing
+			// the email may delete the target's passkeys (they are bound to the
+			// account's identity, so a new email invalidates them).
+			ResetPasskeys bool `json:"reset_passkeys"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
@@ -707,6 +750,47 @@ func UpdateAdmin(store *Store) http.HandlerFunc {
 		ctx := context.Background()
 		actorID := getAdminID(r)
 		isSelf := adminID == actorID
+
+		// Load the row being edited and its passkey inventory BEFORE the
+		// step-up check. The passkey-reset confirmation is a round-trip with
+		// the caller: answering 409 (or accepting reset_passkeys=true) must
+		// never consume a one-shot passkey step-up stamp first, otherwise a
+		// passkey-only actor could not complete the confirmed retry.
+		var cur struct {
+			email  string
+			role   string
+			status string
+		}
+		if err := store.pool.QueryRow(ctx, `
+			SELECT email, role, status FROM admins WHERE id = $1
+		`, adminID).Scan(&cur.email, &cur.role, &cur.status); err != nil {
+			writeError(w, http.StatusNotFound, "Admin not found")
+			return
+		}
+		var passkeyCount int
+		if err := store.pool.QueryRow(ctx, `
+			SELECT COUNT(*) FROM webauthn_credentials WHERE admin_id = $1
+		`, adminID).Scan(&passkeyCount); err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to check passkeys")
+			return
+		}
+
+		// "Changing" keeps the existing comparison semantics exactly: an
+		// absent/blank email or the target's current email is not a change.
+		emailChanging := req.Email != "" && req.Email != cur.email
+
+		// Passkeys are bound to the account identity. An email change without
+		// the explicit confirmation flag is refused before any write and before
+		// the step-up proof is consumed.
+		if emailChanging && passkeyCount > 0 && !req.ResetPasskeys {
+			writeJSON(w, http.StatusConflict, map[string]interface{}{
+				"error":         "Changing this admin's email resets their passkeys. Confirm to continue.",
+				"code":          "passkeys_will_reset",
+				"passkey_count": passkeyCount,
+			})
+			return
+		}
+		resetPasskeys := emailChanging && req.ResetPasskeys && passkeyCount > 0
 
 		// Changing an admin's email, role or status is a privileged action:
 		// the acting admin must confirm with their own MFA code (step-up).
@@ -724,26 +808,24 @@ func UpdateAdmin(store *Store) http.HandlerFunc {
 			return
 		}
 
-		// Load the row being edited so defaults and role invariants below can
-		// be evaluated against its current state (email and role changes are
-		// optional, partial updates).
-		var cur struct {
-			email  string
-			role   string
-			status string
-		}
-		if err := store.pool.QueryRow(ctx, `
-			SELECT email, role, status FROM admins WHERE id = $1
-		`, adminID).Scan(&cur.email, &cur.role, &cur.status); err != nil {
-			writeError(w, http.StatusNotFound, "Admin not found")
-			return
-		}
-
 		// Role updates are validated up-front so the "last super_admin" guard
 		// below can reason about the target role reliably.
-		if req.Role != "" && req.Role != "super_admin" && req.Role != "admin" && req.Role != "auditor" {
-			writeError(w, http.StatusBadRequest, "role must be super_admin, admin or auditor")
-			return
+		if req.Role != "" {
+			exists, err := roleExists(ctx, store, req.Role)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to check role")
+				return
+			}
+			if !exists {
+				writeError(w, http.StatusBadRequest, "Unknown role")
+				return
+			}
+		}
+		if req.GroupIDs != nil {
+			if _, err := validateAdminGroupIDs(ctx, store, req.GroupIDs); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 		}
 
 		// Resolve effective values: absent fields keep the current value.
@@ -790,7 +872,7 @@ func UpdateAdmin(store *Store) http.HandlerFunc {
 		// disabled target (a disabled admin must not be reachable by a new
 		// email, and reviving them is a separate action).
 		newEmail := req.Email
-		if req.Email != "" && req.Email != cur.email {
+		if emailChanging {
 			if newStatus == "disabled" {
 				writeError(w, http.StatusBadRequest, "Cannot change the email of a disabled admin")
 				return
@@ -811,19 +893,53 @@ func UpdateAdmin(store *Store) http.HandlerFunc {
 			newEmail = cur.email
 		}
 
-		_, err = store.pool.Exec(ctx, `
-			UPDATE admins SET email = $1, role = $2, status = $3, updated_at = now()
-			WHERE id = $4
-		`, newEmail, newRole, newStatus, adminID)
+		if resetPasskeys {
+			// The email change and the passkey deletion are one unit: the
+			// account must never end up with an email that no longer matches
+			// its bound passkeys. TOTP secrets and recovery codes are NOT
+			// touched — only WebAuthn state is identity-bound.
+			tx, err := store.pool.Begin(ctx)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to update admin")
+				return
+			}
+			defer tx.Rollback(ctx)
 
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to update admin")
-			return
+			if _, err := tx.Exec(ctx, `
+				UPDATE admins SET email = $1, role = $2, status = $3, updated_at = now()
+				WHERE id = $4
+			`, newEmail, newRole, newStatus, adminID); err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to update admin")
+				return
+			}
+			for _, stmt := range []string{
+				`DELETE FROM webauthn_challenges WHERE admin_id = $1`,
+				`DELETE FROM webauthn_credentials WHERE admin_id = $1`,
+				`DELETE FROM webauthn_users WHERE admin_id = $1`,
+			} {
+				if _, err := tx.Exec(ctx, stmt, adminID); err != nil {
+					writeError(w, http.StatusInternalServerError, "Failed to reset passkeys")
+					return
+				}
+			}
+			if err := tx.Commit(ctx); err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to update admin")
+				return
+			}
+		} else {
+			_, err = store.pool.Exec(ctx, `
+				UPDATE admins SET email = $1, role = $2, status = $3, updated_at = now()
+				WHERE id = $4
+			`, newEmail, newRole, newStatus, adminID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to update admin")
+				return
+			}
 		}
 
 		// Record what actually changed for the audit trail.
 		meta := map[string]string{}
-		if req.Email != "" && req.Email != cur.email {
+		if emailChanging {
 			meta["email"] = req.Email
 		}
 		if newRole != cur.role {
@@ -834,6 +950,12 @@ func UpdateAdmin(store *Store) http.HandlerFunc {
 		}
 		if len(meta) > 0 {
 			logAudit(ctx, store, actorID, "admin.update", "admin", adminID.String(), meta)
+			if resetPasskeys {
+				logAudit(ctx, store, actorID, "admin.passkeys_reset", "admin", adminID.String(), map[string]interface{}{
+					"reason": "email_change",
+					"count":  passkeyCount,
+				})
+			}
 
 			// Role/email/status changed: revoke the target admin's sessions
 			// so the new state applies immediately. When the actor edited
@@ -849,7 +971,22 @@ func UpdateAdmin(store *Store) http.HandlerFunc {
 			}
 		}
 
-		writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+		if req.GroupIDs != nil {
+			if err := replaceAdminGroupMemberships(ctx, store, adminID, req.GroupIDs); err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to update admin groups")
+				return
+			}
+			logAudit(ctx, store, actorID, "admin.groups", "admin", adminID.String(), map[string]interface{}{
+				"count": len(req.GroupIDs),
+			})
+		}
+
+		resp := map[string]interface{}{"status": "updated"}
+		if resetPasskeys {
+			resp["passkeys_reset"] = true
+			resp["passkey_count"] = passkeyCount
+		}
+		writeJSON(w, http.StatusOK, resp)
 	}
 }
 
@@ -924,11 +1061,43 @@ func DeleteAdmin(store *Store) http.HandlerFunc {
 		ctx := context.Background()
 		actorID := getAdminID(r)
 
-		_, err = store.pool.Exec(ctx, `
-			UPDATE admins SET status = 'disabled', updated_at = now() WHERE id = $1
-		`, adminID)
-
+		var (
+			targetRole   string
+			targetStatus string
+		)
+		err = store.pool.QueryRow(ctx, `
+			SELECT role, status FROM admins WHERE id = $1
+		`, adminID).Scan(&targetRole, &targetStatus)
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "Admin not found")
+			return
+		}
 		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to load admin")
+			return
+		}
+		if adminID == actorID {
+			writeError(w, http.StatusBadRequest, "You cannot delete your own account")
+			return
+		}
+		if targetRole == "super_admin" && targetStatus == "active" {
+			var others int
+			if err := store.pool.QueryRow(ctx, `
+				SELECT COUNT(*) FROM admins
+				WHERE role = 'super_admin' AND status = 'active' AND id <> $1
+			`, adminID).Scan(&others); err != nil {
+				writeError(w, http.StatusInternalServerError, "Failed to check super_admin count")
+				return
+			}
+			if others == 0 {
+				writeError(w, http.StatusBadRequest, "Cannot delete the last active super_admin")
+				return
+			}
+		}
+
+		if _, err := store.pool.Exec(ctx, `
+			UPDATE admins SET status = 'disabled', updated_at = now() WHERE id = $1
+		`, adminID); err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to delete admin")
 			return
 		}

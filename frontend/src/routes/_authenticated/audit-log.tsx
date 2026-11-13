@@ -12,6 +12,7 @@ import {
   thCls,
 } from '../../lib/ui'
 import { apiFetch, apiJson } from '../../lib/api'
+import { useCan } from '../../lib/permissions'
 import { fmtDateTime } from '../../lib/timezone'
 
 interface AuditLog {
@@ -23,11 +24,6 @@ interface AuditLog {
   metadata: string | null
   ip_address: string | null
   created_at: string
-}
-
-interface Me {
-  id: string
-  role: string
 }
 
 export const Route = createFileRoute('/_authenticated/audit-log')({
@@ -51,12 +47,7 @@ function AuditLogPage() {
     refetchInterval: 30000,
   })
 
-  const { data: me } = useQuery<Me>({
-    queryKey: ['me'],
-    queryFn: async () => apiJson<Me>('/api/admins/me'),
-  })
-
-  const isSuperAdmin = me?.role === 'super_admin'
+  const canPurge = useCan('audit.manage')
 
   const purgeMutation = useMutation({
     mutationFn: async (mode: { days?: number }) => {
@@ -98,7 +89,7 @@ function AuditLogPage() {
         description="Immutable record of admin actions across the console. Shown newest-first (latest 100)."
       />
 
-      {isSuperAdmin && (
+      {canPurge && (
         <Panel title="Housekeeping" className="mb-6">
           <div className="px-5 py-4">
             <p className="text-sm text-zinc-500 mb-4 max-w-2xl">

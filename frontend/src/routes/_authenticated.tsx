@@ -22,6 +22,7 @@ import {
   IconX,
 } from '@tabler/icons-react'
 import { apiFetch, clearSessionCache, fetchSession } from '../lib/api'
+import { can, useMe } from '../lib/permissions'
 import { ensureTimezone } from '../lib/timezone'
 import { ConsoleVersionControl } from '../components/ConsoleVersionControl'
 import { AmbientBackdrop } from '../components/AmbientBackdrop'
@@ -58,47 +59,47 @@ const NAV: NavGroup[] = [
   {
     group: 'Monitoring',
     items: [
-      { label: 'Dashboard', to: '/dashboard', icon: IconLayoutDashboard },
-      { label: 'Statistics', to: '/statistics', icon: IconChartBar },
-      { label: 'Server Monitoring', to: '/monitoring', icon: IconGauge },
-      { label: 'Web Activity', to: '/web-activity', icon: IconWorld },
-      { label: 'Audit Log', to: '/audit-log', icon: IconHistory },
+      { label: 'Dashboard', to: '/dashboard', icon: IconLayoutDashboard, permission: 'monitoring.view' },
+      { label: 'Statistics', to: '/statistics', icon: IconChartBar, permission: 'monitoring.view' },
+      { label: 'Server Monitoring', to: '/monitoring', icon: IconGauge, permission: 'monitoring.view' },
+      { label: 'Web Activity', to: '/web-activity', icon: IconWorld, permission: 'activity.view' },
+      { label: 'Audit Log', to: '/audit-log', icon: IconHistory, permission: 'audit.view' },
     ],
   },
   {
     group: 'Network',
     items: [
-      { label: 'Servers', to: '/servers', icon: IconServer },
-      { label: 'Peers', to: '/peers', icon: IconDeviceDesktop },
-      { label: 'Nodes', to: '/nodes', icon: IconDots },
+      { label: 'Servers', to: '/servers', icon: IconServer, permission: 'network.view' },
+      { label: 'Peers', to: '/peers', icon: IconDeviceDesktop, permission: 'network.view' },
+      { label: 'Nodes', to: '/nodes', icon: IconDots, permission: 'network.view' },
     ],
   },
   {
     group: 'Directory',
     items: [
-      { label: 'VPN Users', to: '/users', icon: IconUsers },
-      { label: 'Departments', to: '/departments', icon: IconBuilding },
-      { label: 'Admins', to: '/admins', icon: IconUserShield },
+      { label: 'VPN Users', to: '/users', icon: IconUsers, permission: 'directory.view' },
+      { label: 'Departments', to: '/departments', icon: IconBuilding, permission: 'directory.view' },
+      { label: 'Admins', to: '/admins', icon: IconUserShield, permission: 'admins.view' },
     ],
   },
   {
     group: 'Security',
     items: [
-      { label: 'Domain Blocking', to: '/domain-rules', icon: IconShieldCheck },
-      { label: 'IP Blocking', to: '/ip-rules', icon: IconBan },
+      { label: 'Domain Blocking', to: '/domain-rules', icon: IconShieldCheck, permission: 'rules.view' },
+      { label: 'IP Blocking', to: '/ip-rules', icon: IconBan, permission: 'rules.view' },
     ],
   },
   {
     group: 'System',
     items: [
-      { label: 'Backups', to: '/backups', icon: IconShieldLock },
-      { label: 'Configuration', to: '/config', icon: IconShieldLock },
+      { label: 'Backups', to: '/backups', icon: IconShieldLock, permission: 'backups.view' },
+      { label: 'Configuration', to: '/config', icon: IconShieldLock, permission: 'system.view' },
       { label: 'Profile', to: '/profile', icon: IconHome2 },
     ],
   },
 ]
 
-type NavEntry = { label: string; to: string; icon: Icon }
+type NavEntry = { label: string; to: string; icon: Icon; permission?: string }
 type NavGroup = { group: string; items: NavEntry[] }
 
 function NavLink({
@@ -125,6 +126,13 @@ function NavLink({
 
 function AuthenticatedLayout() {
   const [mobileNav, setMobileNav] = useState(false)
+  const { data: me } = useMe()
+  const visibleNav = me
+    ? NAV.map((group) => ({
+        ...group,
+        items: group.items.filter((item) => !item.permission || can(me, item.permission)),
+      })).filter((group) => group.items.length > 0)
+    : NAV
   const { data: stats } = useQuery<Stats>({
     queryKey: ['stats'],
     queryFn: async () => {
@@ -132,6 +140,7 @@ function AuthenticatedLayout() {
       if (!res.ok) throw new Error('Failed to fetch stats')
       return res.json()
     },
+    enabled: Boolean(me && can(me, 'monitoring.view')),
     refetchInterval: 15000,
   })
 
@@ -155,9 +164,9 @@ function AuthenticatedLayout() {
   }
 
   const currentPath = window.location.pathname
-  const flat = NAV.flatMap((g) => g.items)
+  const flat = visibleNav.flatMap((g) => g.items)
   const current = flat.find((i) => i.to === currentPath)
-  const currentGroup = NAV.find((g) => g.items.some((i) => i.to === currentPath))?.group
+  const currentGroup = visibleNav.find((g) => g.items.some((i) => i.to === currentPath))?.group
   const currentLabel = current?.label
 
   return (
@@ -172,7 +181,7 @@ function AuthenticatedLayout() {
         </div>
 
         <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-6">
-          {NAV.map((group) => (
+          {visibleNav.map((group) => (
             <div key={group.group}>
               <p className="px-3 mb-1.5 text-[11px] uppercase tracking-wider text-zinc-600 font-medium">
                 {group.group}
@@ -265,7 +274,7 @@ function AuthenticatedLayout() {
         {mobileNav && (
           <div className="lg:hidden bg-zinc-900 border-b border-zinc-800">
             <nav className="px-4 py-3 space-y-4 max-h-[70dvh] overflow-y-auto">
-              {NAV.map((group) => (
+              {visibleNav.map((group) => (
                 <div key={group.group}>
                   <p className="text-[11px] uppercase tracking-wider text-zinc-600 font-medium mb-1 px-2">
                     {group.group}

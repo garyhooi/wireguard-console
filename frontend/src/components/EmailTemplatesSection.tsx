@@ -18,6 +18,7 @@ import {
 } from '@tabler/icons-react'
 import { GhostButton, inputCls, labelCls, PrimaryButton } from '../lib/ui'
 import { apiJson } from '../lib/api'
+import { useCan } from '../lib/permissions'
 import { RichTextEditor } from '../lib/RichTextEditor'
 
 interface EmailTemplate {
@@ -78,6 +79,7 @@ function formatUpdatedAt(iso: string): string {
 }
 
 export function EmailTemplatesSection() {
+  const canWrite = useCan('system.manage')
   const queryClient = useQueryClient()
 
   const { data: templates, isLoading } = useQuery<EmailTemplate[]>({
@@ -248,13 +250,15 @@ export function EmailTemplatesSection() {
                   Last saved {formatUpdatedAt(selected.updated_at)}
                 </p>
               </div>
-              <PrimaryButton
-                onClick={() => saveMutation.mutate(selected.key)}
-                disabled={!dirty || saveMutation.isPending}
-              >
-                <IconDeviceFloppy size={15} stroke={1.8} aria-hidden="true" />
-                {saveMutation.isPending ? 'Saving…' : dirty ? 'Save template' : 'Saved'}
-              </PrimaryButton>
+              {canWrite && (
+                <PrimaryButton
+                  onClick={() => saveMutation.mutate(selected.key)}
+                  disabled={!dirty || saveMutation.isPending}
+                >
+                  <IconDeviceFloppy size={15} stroke={1.8} aria-hidden="true" />
+                  {saveMutation.isPending ? 'Saving…' : dirty ? 'Save template' : 'Saved'}
+                </PrimaryButton>
+              )}
             </div>
 
             {flash && (

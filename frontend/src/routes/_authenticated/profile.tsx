@@ -33,6 +33,7 @@ interface Me {
   id: string
   email: string
   role: string
+  role_name?: string
   totp_enabled: boolean
   status: string
   created_at: string
@@ -320,7 +321,7 @@ export function ProfilePage() {
             <div className="flex items-center justify-between">
               <span className="text-sm text-zinc-500">Role</span>
               <Badge tone={me?.role === 'super_admin' ? 'accent' : me?.role === 'admin' ? 'good' : 'neutral'}>
-                {me?.role || 'admin'}
+                {me?.role_name || me?.role || 'admin'}
               </Badge>
             </div>
             <div className="flex items-center justify-between">

@@ -1,5 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { apiFetch, apiJson } from '../../lib/api'
+import { useCan } from '../../lib/permissions'
 import { userLabel } from '../../lib/userLabel'
 import { fmtDateTime } from '../../lib/timezone'
 import { configFileName } from '../../lib/filename'
@@ -97,6 +98,8 @@ export const Route = createFileRoute('/_authenticated/peers')({
 
 
 export function PeersPage() {
+  const canManage = useCan('network.manage')
+  const canSecrets = useCan('network.secrets')
   const queryClient = useQueryClient()
   const [showAdd, setShowAdd] = useState(false)
   const [editing, setEditing] = useState<Peer | null>(null)
@@ -346,12 +349,12 @@ export function PeersPage() {
       <PageHeader
         title="Peers"
         description="One peer is one device (laptop, phone…) for a user on a server. Keys and the tunnel IP are generated automatically."
-        actions={
+        actions={canManage ? (
           <PrimaryButton onClick={openAdd}>
             <IconPlus size={16} stroke={1.6} aria-hidden="true" />
             Add Peer
           </PrimaryButton>
-        }
+        ) : undefined}
       />
 
       {error && <p className="text-red-400 text-sm mb-3">{error}</p>}
@@ -642,12 +645,12 @@ export function PeersPage() {
         <EmptyState
           title="No peers yet"
           hint="Create a server, invite a user, then add a peer — the tunnel config is generated automatically."
-          action={
+          action={canManage ? (
             <PrimaryButton onClick={openAdd}>
               <IconPlus size={16} stroke={1.6} aria-hidden="true" />
               Add peer
             </PrimaryButton>
-          }
+          ) : undefined}
         />
       ) : (
         <div className={tableWrapCls}>
@@ -662,7 +665,7 @@ export function PeersPage() {
                   <th className={thCls}>Allowed IP</th>
                   <th className={thCls}>Status</th>
                   <th className={thCls}>Last Handshake</th>
-                  <th className={thCls + ' text-right'}>Actions</th>
+                  {(canManage || canSecrets) && <th className={thCls + ' text-right'}>Actions</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800/60">
@@ -685,46 +688,54 @@ export function PeersPage() {
                     <td className={tdCls + ' font-mono tabular-nums'}>
                       {peer.last_handshake_at ? fmtDateTime(peer.last_handshake_at) : 'Never'}
                     </td>
-                    <td className="px-5 py-3.5 whitespace-nowrap text-right text-sm">
-                      <div className="flex justify-end gap-1">
-                        <ActionLink
-                          onClick={() => {
-                            setCreatedLink('')
-                            setEditing(peer)
-                            setForm({ name: peer.name, server_id: peer.server_id, user_id: peer.user_id, send_email: false })
-                            setShowAdd(false)
-                          }}
-                        >
-                          Edit
-                        </ActionLink>
-                        <ActionLink
-                          onClick={() => downloadConfig(peer)}
-                        >
-                          <IconDownload size={14} stroke={1.6} aria-hidden="true" />
-                          Config
-                        </ActionLink>
-                        <ActionLink onClick={() => showQR(peer)}>
-                          <IconQrcode size={14} stroke={1.6} aria-hidden="true" />
-                          QR
-                        </ActionLink>
-                        <ActionLink
-                          onClick={() => {
-                            if (resendingId !== peer.id) setConfirmResendPeer(peer)
-                          }}
-                        >
-                          <IconMailForward size={14} stroke={1.6} aria-hidden="true" />
-                          Email link
-                        </ActionLink>
-                        <ActionLink
-                          tone="danger"
-                          onClick={() => {
-                            if (confirm(`Remove peer "${peer.name}"?`)) removeMutation.mutate(peer)
-                          }}
-                        >
-                          Remove
-                        </ActionLink>
-                      </div>
-                    </td>
+                    {(canManage || canSecrets) && (
+                      <td className="px-5 py-3.5 whitespace-nowrap text-right text-sm">
+                        <div className="flex justify-end gap-1">
+                          {canManage && (
+                            <ActionLink
+                              onClick={() => {
+                                setCreatedLink('')
+                                setEditing(peer)
+                                setForm({ name: peer.name, server_id: peer.server_id, user_id: peer.user_id, send_email: false })
+                                setShowAdd(false)
+                              }}
+                            >
+                              Edit
+                            </ActionLink>
+                          )}
+                          {canSecrets && (
+                            <>
+                              <ActionLink onClick={() => downloadConfig(peer)}>
+                                <IconDownload size={14} stroke={1.6} aria-hidden="true" />
+                                Config
+                              </ActionLink>
+                              <ActionLink onClick={() => showQR(peer)}>
+                                <IconQrcode size={14} stroke={1.6} aria-hidden="true" />
+                                QR
+                              </ActionLink>
+                              <ActionLink
+                                onClick={() => {
+                                  if (resendingId !== peer.id) setConfirmResendPeer(peer)
+                                }}
+                              >
+                                <IconMailForward size={14} stroke={1.6} aria-hidden="true" />
+                                Email link
+                              </ActionLink>
+                            </>
+                          )}
+                          {canManage && (
+                            <ActionLink
+                              tone="danger"
+                              onClick={() => {
+                                if (confirm(`Remove peer "${peer.name}"?`)) removeMutation.mutate(peer)
+                              }}
+                            >
+                              Remove
+                            </ActionLink>
+                          )}
+                        </div>
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>

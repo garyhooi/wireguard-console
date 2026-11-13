@@ -10,6 +10,7 @@ import {
   IconTrash,
 } from '@tabler/icons-react'
 import { apiJson } from '../../lib/api'
+import { useCan } from '../../lib/permissions'
 import { userLabel } from '../../lib/userLabel'
 import { fmtDate } from '../../lib/timezone'
 import {
@@ -300,6 +301,8 @@ export const Route = createFileRoute('/_authenticated/domain-rules')({
 })
 
 export function DomainRulesPage() {
+  const canManage = useCan('rules.manage')
+  const canMaintenance = useCan('maintenance.run')
   const [showAddModal, setShowAddModal] = useState(false)
   const [scope, setScope] = useState<RuleScope>('global')
   const [departmentId, setDepartmentId] = useState('')
@@ -600,12 +603,12 @@ export function DomainRulesPage() {
       <PageHeader
         title="Domain Blocking"
         description="AdGuard Home rules that block domains for all users or specific users. Changes sync to AdGuard immediately."
-        actions={
+        actions={canManage ? (
           <PrimaryButton onClick={openAddModal}>
             <IconPlus size={16} stroke={1.6} aria-hidden="true" />
             Add Rule
           </PrimaryButton>
-        }
+        ) : undefined}
       />
 
       {/* AdGuard sync / health status — one mutually-exclusive state. */}
@@ -626,7 +629,7 @@ export function DomainRulesPage() {
               <span className="opacity-80 font-mono text-xs break-all">{status.error}</span>
             )}
           </div>
-          {status.reachable && (
+          {status.reachable && canMaintenance && (
             <button
               type="button"
               onClick={() => syncMutation.mutate()}
@@ -1141,12 +1144,12 @@ export function DomainRulesPage() {
       <Panel
         title="Domain groups"
         className="mb-6"
-        right={
+        right={canManage ? (
           <button type="button" onClick={openNewGroupModal} className={smallButtonCls}>
             <IconPlus size={13} stroke={1.6} aria-hidden="true" />
             New group
           </button>
-        }
+        ) : undefined}
       >
         {deleteGroupResult && (
           <p role="status" className="px-5 pb-2 text-xs text-zinc-500">
@@ -1195,7 +1198,7 @@ export function DomainRulesPage() {
                     <span className="text-xs text-zinc-500 tabular-nums">
                       used by {group.rule_count} rule{group.rule_count === 1 ? '' : 's'}
                     </span>
-                    <div className="flex items-center gap-1">
+                    {canManage && <div className="flex items-center gap-1">
                       <button
                         type="button"
                         onClick={() => openEditGroupModal(group)}
@@ -1214,7 +1217,7 @@ export function DomainRulesPage() {
                       >
                         <IconTrash size={14} stroke={1.6} aria-hidden="true" />
                       </button>
-                    </div>
+                    </div>}
                   </div>
                   {expanded && (
                     <div className="flex flex-wrap gap-1.5 px-5 pb-3 pl-10">
@@ -1249,7 +1252,7 @@ export function DomainRulesPage() {
           <EmptyState
             title="No domain rules yet"
             hint="Add a rule to block domains via AdGuard Home for all users or a specific user."
-            action={<PrimaryButton onClick={openAddModal}><IconPlus size={16} stroke={1.6} aria-hidden="true" />Add Rule</PrimaryButton>}
+            action={canManage ? <PrimaryButton onClick={openAddModal}><IconPlus size={16} stroke={1.6} aria-hidden="true" />Add Rule</PrimaryButton> : undefined}
           />
         ) : (
           <div className="overflow-x-auto">
@@ -1260,7 +1263,7 @@ export function DomainRulesPage() {
                   <th className={thCls}>Scope</th>
                   <th className={thCls}>User</th>
                   <th className={thCls}>Created</th>
-                  <th className={thCls + ' text-right'}>Actions</th>
+                  {canManage && <th className={thCls + ' text-right'}>Actions</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800/60">
@@ -1323,14 +1326,16 @@ export function DomainRulesPage() {
                         )}
                       </td>
                       <td className={tdCls}>{fmtDate(rule.created_at)}</td>
-                      <td className="px-5 py-3.5 whitespace-nowrap text-right text-sm font-medium">
-                        <button
-                          onClick={() => deleteMutation.mutate(rule.id)}
-                          className="inline-flex items-center text-sm rounded-md px-2 py-1 text-red-400 hover:text-red-300 hover:bg-red-500/10 transition-colors"
-                        >
-                          Delete
-                        </button>
-                      </td>
+                      {canManage && (
+                        <td className="px-5 py-3.5 whitespace-nowrap text-right text-sm font-medium">
+                          <button
+                            onClick={() => deleteMutation.mutate(rule.id)}
+                            className="inline-flex items-center text-sm rounded-md px-2 py-1 text-red-400 hover:text-red-300 hover:bg-red-500/10 transition-colors"
+                          >
+                            Delete
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   )
                 })}

@@ -11,6 +11,7 @@ import {
 } from '@tabler/icons-react'
 import { PageHeader, PrimaryButton, GhostButton, inputCls, labelCls } from '../../lib/ui'
 import { apiJson } from '../../lib/api'
+import { useCan } from '../../lib/permissions'
 import { ConfirmMFA } from '../../lib/ConfirmMFA'
 import { EmailTemplatesSection } from '../../components/EmailTemplatesSection'
 import { getTimezone, setTimezone } from '../../lib/timezone'
@@ -43,6 +44,7 @@ const TABS: { id: ConfigTab; label: string; icon: React.ComponentType<{ size?: n
 
 export function ConfigPage() {
   const [tab, setTab] = useState<ConfigTab>('smtp')
+  const canSystemWrite = useCan('system.manage')
 
   return (
     <div>
@@ -50,6 +52,10 @@ export function ConfigPage() {
         title="Configuration"
         description="Outbound email (SMTP), the templates the console uses for invites, the display timezone for reports and logs, and security policy."
       />
+
+      {!canSystemWrite && (
+        <p className="mb-4 text-sm text-zinc-500">Read-only access: an admin with the system.manage capability can change these settings.</p>
+      )}
 
       {/* Tab bar */}
       <div className="mb-6 flex flex-wrap items-center gap-1 border-b border-zinc-800">
@@ -88,6 +94,7 @@ export function ConfigPage() {
 }
 
 function SmtpSettings() {
+  const canWrite = useCan('system.manage')
   const queryClient = useQueryClient()
   const [form, setForm] = useState({ host: '', port: '587', username: '', password: '', from: '' })
   const [testTo, setTestTo] = useState('')
@@ -243,10 +250,12 @@ function SmtpSettings() {
             </div>
 
             <div className="flex flex-wrap items-center gap-3 pt-2">
-              <PrimaryButton onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>
-                {saveMutation.isPending ? 'Saving…' : 'Save SMTP Settings'}
-              </PrimaryButton>
-              {smtp?.configured && (
+              {canWrite && (
+                <PrimaryButton onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>
+                  {saveMutation.isPending ? 'Saving…' : 'Save SMTP Settings'}
+                </PrimaryButton>
+              )}
+              {canWrite && smtp?.configured && (
                 <div className="flex items-center gap-2">
                   <input
                     value={testTo}
@@ -367,6 +376,7 @@ function zoneOffset(name: string): string {
 }
 
 function TimezoneSettings() {
+  const canWrite = useCan('system.manage')
   const queryClient = useQueryClient()
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
@@ -498,20 +508,22 @@ function TimezoneSettings() {
               </p>
             )}
 
-            <div className="flex flex-wrap items-center gap-3 pt-1">
-              <PrimaryButton
-                onClick={() => saveMutation.mutate(draft)}
-                disabled={saveMutation.isPending || draft === current}
-              >
-                {saveMutation.isPending ? 'Saving…' : 'Save timezone'}
-              </PrimaryButton>
-              <GhostButton
-                onClick={() => saveMutation.mutate('')}
-                disabled={current === '' || saveMutation.isPending}
-              >
-                Reset to browser timezone
-              </GhostButton>
-            </div>
+            {canWrite && (
+              <div className="flex flex-wrap items-center gap-3 pt-1">
+                <PrimaryButton
+                  onClick={() => saveMutation.mutate(draft)}
+                  disabled={saveMutation.isPending || draft === current}
+                >
+                  {saveMutation.isPending ? 'Saving…' : 'Save timezone'}
+                </PrimaryButton>
+                <GhostButton
+                  onClick={() => saveMutation.mutate('')}
+                  disabled={current === '' || saveMutation.isPending}
+                >
+                  Reset to browser timezone
+                </GhostButton>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -1243,4 +1255,3 @@ function InviteExpirySettings({
     </div>
   )
 }
-

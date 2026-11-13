@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	authwebauthn "github.com/wireguard-console/backend/internal/auth/webauthn"
+	"github.com/wireguard-console/backend/internal/authz"
 	"github.com/wireguard-console/backend/internal/db"
 	"golang.org/x/crypto/argon2"
 )
@@ -397,21 +398,31 @@ func AuthMiddleware(store *Store) func(http.Handler) http.Handler {
 			ctx := context.Background()
 
 			var (
-				adminID   uuid.UUID
-				csrfToken string
-				sessionID uuid.UUID
-				lastSeen  *time.Time
+				adminID     uuid.UUID
+				csrfToken   string
+				sessionID   uuid.UUID
+				lastSeen    *time.Time
+				role        string
+				roleName    string
+				permissions []string
 			)
 			err := store.pool.QueryRow(ctx, `
-				SELECT s.admin_id, s.csrf_token, s.id, s.last_seen_at
+				SELECT s.admin_id, s.csrf_token, s.id, s.last_seen_at,
+				       a.role, COALESCE(r.name, a.role),
+				       COALESCE(r.permissions, ARRAY[]::text[])
 				FROM admin_sessions s
+				JOIN admins a ON a.id = s.admin_id
+				LEFT JOIN admin_roles r ON r.slug = a.role
 				WHERE s.token_hash = $1 AND s.expires_at > now()
 				  AND s.csrf_token IS NOT NULL AND s.pending_kind IS NULL
-			`, hashToken(token)).Scan(&adminID, &csrfToken, &sessionID, &lastSeen)
+			`, hashToken(token)).Scan(&adminID, &csrfToken, &sessionID, &lastSeen, &role, &roleName, &permissions)
 
 			if err != nil {
 				writeError(w, http.StatusUnauthorized, "Invalid or expired session")
 				return
+			}
+			if permissions == nil {
+				permissions = []string{}
 			}
 
 			// Idle timeout: reject sessions that have been inactive for
@@ -439,6 +450,9 @@ func AuthMiddleware(store *Store) func(http.Handler) http.Handler {
 			ctx = context.WithValue(ctx, adminIDKey{}, adminID)
 			ctx = context.WithValue(ctx, csrfTokenKey{}, csrfToken)
 			ctx = context.WithValue(ctx, sessionRowIDKey{}, sessionID)
+			ctx = context.WithValue(ctx, adminRoleKey{}, role)
+			ctx = context.WithValue(ctx, adminRoleNameKey{}, roleName)
+			ctx = context.WithValue(ctx, adminPermissionsKey{}, permissions)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -483,6 +497,25 @@ func RequireCSRF(store *Store) func(http.Handler) http.Handler {
 func getAdminID(r *http.Request) uuid.UUID {
 	adminID, _ := r.Context().Value(adminIDKey{}).(uuid.UUID)
 	return adminID
+}
+
+func getAdminRole(r *http.Request) string {
+	role, _ := r.Context().Value(adminRoleKey{}).(string)
+	return role
+}
+
+func getAdminRoleName(r *http.Request) string {
+	name, _ := r.Context().Value(adminRoleNameKey{}).(string)
+	return name
+}
+
+func getAdminPermissions(r *http.Request) []string {
+	permissions, _ := r.Context().Value(adminPermissionsKey{}).([]string)
+	return permissions
+}
+
+func adminCan(r *http.Request, permission string) bool {
+	return authz.Has(getAdminPermissions(r), permission)
 }
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
@@ -589,6 +622,26 @@ func (rl *rateLimiter) isLimited(key string) bool {
 	return false
 }
 
+// RequirePermission allows the request when the acting admin has any one of
+// the supplied capabilities. Super admins hold "*" and therefore pass every
+// check. The permission map is loaded once by AuthMiddleware.
+func RequirePermission(permissions ...string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			granted := getAdminPermissions(r)
+			for _, needed := range permissions {
+				if authz.Has(granted, needed) {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+			writeError(w, http.StatusForbidden, "Insufficient permissions")
+		})
+	}
+}
+
+// RequireRole is kept for a small number of super-admin break-glass paths.
+// Prefer RequirePermission for ordinary capability checks.
 func RequireRole(store *Store, roles ...string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

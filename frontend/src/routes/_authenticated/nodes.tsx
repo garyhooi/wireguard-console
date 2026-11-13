@@ -3,6 +3,7 @@ import { ConfirmMFA } from '../../lib/ConfirmMFA'
 import { apiFetch, apiJson } from '../../lib/api'
 import { isMFAError, useStepUpMinutes } from '../../lib/stepup'
 import { fmtDateTime } from '../../lib/timezone'
+import { useCan } from '../../lib/permissions'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { IconCopy, IconPlus, IconTerminal2 } from '@tabler/icons-react'
@@ -42,6 +43,8 @@ export const Route = createFileRoute('/_authenticated/nodes')({
 
 
 function NodesPage() {
+  const canManage = useCan('network.manage')
+  const canMaintenance = useCan('maintenance.run')
   const queryClient = useQueryClient()
   const [showAdd, setShowAdd] = useState(false)
   const [form, setForm] = useState({ name: '', location: '' })
@@ -78,16 +81,6 @@ function NodesPage() {
       }
     })
   }
-
-  // Which admin is signed in — the Join-command (token rotate) action is
-  // super_admin only, like the other sensitive re-issue actions.
-  const { data: me } = useQuery<{ id: string; email: string; role: string }>({
-    queryKey: ['me'],
-    queryFn: async () => {
-      return apiJson('/api/admins/me')
-    },
-  })
-  const isSuperAdmin = me?.role === 'super_admin'
 
   const { data: nodes, isLoading } = useQuery<Node[]>({
     queryKey: ['nodes'],
@@ -196,7 +189,7 @@ function NodesPage() {
       <PageHeader
         title="Nodes"
         description="Each node is a machine running the wg-helper agent. One console manages every node: add a server with a node selected and the agent applies it there automatically."
-        actions={<PrimaryButton onClick={() => setShowAdd(true)}><IconPlus size={16} stroke={1.6} aria-hidden="true" />Add Node</PrimaryButton>}
+        actions={canManage ? <PrimaryButton onClick={() => setShowAdd(true)}><IconPlus size={16} stroke={1.6} aria-hidden="true" />Add Node</PrimaryButton> : undefined}
       />
 
       {error && <p className="text-red-400 text-sm mb-3">{error}</p>}
@@ -294,7 +287,7 @@ function NodesPage() {
           <EmptyState
             title="No nodes yet"
             hint="The console host manages its own servers automatically. Add a node to manage machines in other regions."
-            action={<PrimaryButton onClick={() => setShowAdd(true)}><IconPlus size={16} stroke={1.6} aria-hidden="true" />Add Node</PrimaryButton>}
+            action={canManage ? <PrimaryButton onClick={() => setShowAdd(true)}><IconPlus size={16} stroke={1.6} aria-hidden="true" />Add Node</PrimaryButton> : undefined}
           />
         ) : (
           <div className="overflow-x-auto">
@@ -309,7 +302,7 @@ function NodesPage() {
                   <th className={thCls} title="The agent's own status text from its most recent report (e.g. 'ok', or apply warnings)">
                     Last report
                   </th>
-                  <th className={thCls + ' text-right'}>Actions</th>
+                  {(canManage || canMaintenance) && <th className={thCls + ' text-right'}>Actions</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800/60">
@@ -350,26 +343,30 @@ function NodesPage() {
                       <td className="px-5 py-3 text-xs text-zinc-500 max-w-[220px] truncate" title={node.last_status}>
                         {node.last_status || '—'}
                       </td>
-                      <td className="px-5 py-3 text-right">
-                        {isSuperAdmin && (
-                          <ActionLink
-                            onClick={() => {
-                              setShowAdd(false)
-                              setCopied(false)
-                              confirmJoinCommand(node)
-                            }}
-                          >
-                            <IconTerminal2 size={14} stroke={1.6} aria-hidden="true" />
-                            Join command
-                          </ActionLink>
-                        )}
-                        <ActionLink
-                          tone="danger"
-                          onClick={() => confirmDeleteNode(node)}
-                        >
-                          Delete
-                        </ActionLink>
-                      </td>
+                      {(canManage || canMaintenance) && (
+                        <td className="px-5 py-3 text-right">
+                          {canMaintenance && (
+                            <ActionLink
+                              onClick={() => {
+                                setShowAdd(false)
+                                setCopied(false)
+                                confirmJoinCommand(node)
+                              }}
+                            >
+                              <IconTerminal2 size={14} stroke={1.6} aria-hidden="true" />
+                              Join command
+                            </ActionLink>
+                          )}
+                          {canManage && (
+                            <ActionLink
+                              tone="danger"
+                              onClick={() => confirmDeleteNode(node)}
+                            >
+                              Delete
+                            </ActionLink>
+                          )}
+                        </td>
+                      )}
                     </tr>
                   )
                 })}

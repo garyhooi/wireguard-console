@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { IconPencil, IconPlus, IconTrash } from '@tabler/icons-react'
 import { apiJson } from '../../lib/api'
+import { useCan } from '../../lib/permissions'
 import {
   EmptyState,
   GhostButton,
@@ -41,6 +42,7 @@ export const Route = createFileRoute('/_authenticated/departments')({
 })
 
 export function DepartmentsPage() {
+  const canManage = useCan('directory.manage')
   const [showModal, setShowModal] = useState(false)
   const [editing, setEditing] = useState<Department | null>(null)
   const [name, setName] = useState('')
@@ -123,12 +125,12 @@ export function DepartmentsPage() {
       <PageHeader
         title="Departments"
         description="Group VPN users into departments so user lists, rules and activity read at a glance."
-        actions={
+        actions={canManage ? (
           <button type="button" onClick={openAddModal} className={smallPrimaryButtonCls}>
             <IconPlus size={14} stroke={1.8} aria-hidden="true" />
             Add department
           </button>
-        }
+        ) : undefined}
       />
 
       {isLoading ? (
@@ -147,12 +149,12 @@ export function DepartmentsPage() {
           <EmptyState
             title="No departments yet"
             hint="Add a department to group VPN users and label them consistently."
-            action={
+            action={canManage ? (
               <PrimaryButton onClick={openAddModal}>
                 <IconPlus size={16} stroke={1.6} aria-hidden="true" />
                 Add department
               </PrimaryButton>
-            }
+            ) : undefined}
           />
         </div>
       ) : (
@@ -163,7 +165,7 @@ export function DepartmentsPage() {
                 <tr className="bg-zinc-800/40 text-left text-[11px] uppercase tracking-wider text-zinc-500">
                   <th className={thCls}>Name</th>
                   <th className={thCls}>Users</th>
-                  <th className={thCls + ' text-right'}>Actions</th>
+                  {canManage && <th className={thCls + ' text-right'}>Actions</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800/60">
@@ -173,28 +175,30 @@ export function DepartmentsPage() {
                       {department.name}
                     </td>
                     <td className={tdCls + ' tabular-nums'}>{department.user_count}</td>
-                    <td className="px-5 py-3.5 whitespace-nowrap text-right text-sm font-medium">
-                      <div className="flex justify-end gap-1">
-                        <button
-                          type="button"
-                          onClick={() => openEditModal(department)}
-                          aria-label={`Edit ${department.name}`}
-                          title="Edit department"
-                          className={iconButtonCls}
-                        >
-                          <IconPencil size={14} stroke={1.6} aria-hidden="true" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => confirmDelete(department)}
-                          aria-label={`Delete ${department.name}`}
-                          title="Delete department"
-                          className={`${iconButtonCls} hover:bg-red-500/10 hover:text-red-300`}
-                        >
-                          <IconTrash size={14} stroke={1.6} aria-hidden="true" />
-                        </button>
-                      </div>
-                    </td>
+                    {canManage && (
+                      <td className="px-5 py-3.5 whitespace-nowrap text-right text-sm font-medium">
+                        <div className="flex justify-end gap-1">
+                          <button
+                            type="button"
+                            onClick={() => openEditModal(department)}
+                            aria-label={`Edit ${department.name}`}
+                            title="Edit department"
+                            className={iconButtonCls}
+                          >
+                            <IconPencil size={14} stroke={1.6} aria-hidden="true" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => confirmDelete(department)}
+                            aria-label={`Delete ${department.name}`}
+                            title="Delete department"
+                            className={`${iconButtonCls} hover:bg-red-500/10 hover:text-red-300`}
+                          >
+                            <IconTrash size={14} stroke={1.6} aria-hidden="true" />
+                          </button>
+                        </div>
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>

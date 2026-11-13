@@ -17,6 +17,7 @@ import {
 } from '../../lib/ui'
 import { ConfirmMFA } from '../../lib/ConfirmMFA'
 import { apiFetch, apiJson } from '../../lib/api'
+import { useCan } from '../../lib/permissions'
 import { isMFAError, useStepUpMinutes } from '../../lib/stepup'
 import { getTimezone } from '../../lib/timezone'
 
@@ -107,6 +108,8 @@ function BackupsPage() {
       }
     })
   }
+
+  const canManage = useCan('backups.manage')
 
   const { data, isLoading } = useQuery<BackupList>({
     queryKey: ['backups'],
@@ -247,12 +250,12 @@ function BackupsPage() {
       <PageHeader
         title="Backups"
         description="One-click database backups live on the console server (Docker volume, /var/backups/wgconsole). Creating one runs pg_dump; restoring replaces the current database with a saved copy. Downloading, restoring, uploading or deleting a backup requires an MFA step-up (passkey or authenticator code)."
-        actions={
+        actions={canManage ? (
           <PrimaryButton onClick={() => createMutation.mutate()} disabled={createMutation.isPending}>
             <IconArchive size={16} stroke={1.6} aria-hidden="true" />
             {createMutation.isPending ? 'Creating…' : 'Create backup now'}
           </PrimaryButton>
-        }
+        ) : undefined}
       />
 
       {(createMutation.isError || restoreMutation.isError || deleteMutation.isError || uploadMutation.isError) && (
@@ -276,7 +279,7 @@ function BackupsPage() {
 
       <Panel
         title={`Saved backups (${backups.length})`}
-        right={
+        right={canManage ? (
           <GhostButton
             onClick={() => fileInput.current?.click()}
             disabled={uploadMutation.isPending}
@@ -284,7 +287,7 @@ function BackupsPage() {
             <IconUpload size={15} stroke={1.6} aria-hidden="true" />
             {uploadMutation.isPending ? 'Restoring…' : 'Restore from upload'}
           </GhostButton>
-        }
+        ) : undefined}
       >
         <input
           ref={fileInput}
@@ -306,12 +309,12 @@ function BackupsPage() {
           <EmptyState
             title="No backups yet"
             hint="Create your first backup with the button above, or restore from a .sql.gz file you exported earlier. Backups are stored inside the api container's persistent volume."
-            action={
+            action={canManage ? (
               <PrimaryButton onClick={() => createMutation.mutate()} disabled={createMutation.isPending}>
                 <IconArchive size={16} stroke={1.6} aria-hidden="true" />
                 Create backup now
               </PrimaryButton>
-            }
+            ) : undefined}
           />
         ) : (
           <div className="overflow-x-auto">
@@ -320,7 +323,7 @@ function BackupsPage() {
                 <tr className="text-left text-[11px] uppercase tracking-wider text-zinc-500">
                   <th className={thCls}>Created</th>
                   <th className={thCls}>Filename</th>
-                  <th className={thCls + ' text-right'}>Actions</th>
+                  {canManage && <th className={thCls + ' text-right'}>Actions</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800/60">
@@ -328,20 +331,22 @@ function BackupsPage() {
                   <tr key={name} className="hover:bg-zinc-800/30 transition-colors">
                     <td className={tdCls + ' font-mono tabular-nums'}>{backupLabel(name)}</td>
                     <td className={tdCls + ' font-mono text-zinc-200'}>{name}</td>
-                    <td className="px-5 py-3.5 text-right">
-                      <div className="flex justify-end gap-1">
-                        <GhostButton disabled={restoreMutation.isPending} onClick={() => confirmDownload(name)}>
-                          <IconDownload size={14} stroke={1.6} aria-hidden="true" />
-                          Download
-                        </GhostButton>
-                        <GhostButton disabled={restoreMutation.isPending} onClick={() => confirmRestore(name)}>
-                          {restoreMutation.isPending ? 'Restoring…' : 'Restore'}
-                        </GhostButton>
-                        <ActionLink tone="danger" onClick={() => confirmDelete(name)}>
-                          {deleteMutation.isPending ? 'Deleting…' : 'Delete'}
-                        </ActionLink>
-                      </div>
-                    </td>
+                    {canManage && (
+                      <td className="px-5 py-3.5 text-right">
+                        <div className="flex justify-end gap-1">
+                          <GhostButton disabled={restoreMutation.isPending} onClick={() => confirmDownload(name)}>
+                            <IconDownload size={14} stroke={1.6} aria-hidden="true" />
+                            Download
+                          </GhostButton>
+                          <GhostButton disabled={restoreMutation.isPending} onClick={() => confirmRestore(name)}>
+                            {restoreMutation.isPending ? 'Restoring…' : 'Restore'}
+                          </GhostButton>
+                          <ActionLink tone="danger" onClick={() => confirmDelete(name)}>
+                            {deleteMutation.isPending ? 'Deleting…' : 'Delete'}
+                          </ActionLink>
+                        </div>
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>

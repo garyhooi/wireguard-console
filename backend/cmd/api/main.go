@@ -17,6 +17,7 @@ import (
 	"github.com/go-chi/cors"
 	"github.com/wireguard-console/backend/internal/api"
 	authwebauthn "github.com/wireguard-console/backend/internal/auth/webauthn"
+	"github.com/wireguard-console/backend/internal/authz"
 	"github.com/wireguard-console/backend/internal/db"
 	"github.com/wireguard-console/backend/internal/worker"
 )
@@ -183,191 +184,204 @@ func main() {
 			// through untouched.
 			r.Use(api.RequireCSRF(store))
 
-			// Version + update check (any authenticated admin): compares the
-			// console's APP_VERSION against the newest GitHub release and
-			// serves the update one-liner. GET-only — no CSRF needed.
+			// Any authenticated admin: self-service, release check and the two
+			// policy reads used by every page (timezone + step-up grace).
 			r.Get("/update/check", api.UpdateCheckHandler(store))
+			r.Get("/admins/me", api.GetMe(store))
+			r.Post("/admins/me/password", api.ChangePassword(store))
+			r.Get("/admins/me/sessions", api.ListMySessions(store))
+			r.Delete("/admins/me/sessions/{id}", api.RevokeMySession(store))
+			r.Post("/admins/me/sessions/revoke-others", api.RevokeMyOtherSessions(store))
+			r.Get("/admins/me/mfa", api.GetMyMFA(store))
+			r.Post("/admins/me/mfa/totp/begin", api.AddTOTPBegin(store))
+			r.Post("/admins/me/mfa/totp/finish", api.AddTOTPFinish(store))
+			r.Post("/admins/me/mfa/totp/remove", api.AddTOTPRemove(store))
+			r.Post("/admins/me/mfa/passkeys/begin", api.AddPasskeyBegin(store))
+			r.Post("/admins/me/mfa/passkeys/finish", api.AddPasskeyFinish(store))
+			r.Patch("/admins/me/mfa/passkeys/{id}", api.UpdatePasskey(store))
+			r.Delete("/admins/me/mfa/passkeys/{id}", api.DeletePasskey(store))
+			r.Post("/admins/me/mfa/recovery-codes/regenerate", api.RegenerateRecoveryCodes(store))
+			r.Post("/auth/mfa/stepup/passkey/begin", api.PasskeyStepUpBegin(store))
+			r.Post("/auth/mfa/stepup/passkey/finish", api.PasskeyStepUpFinish(store))
+			r.Get("/config/timezone", api.GetTimezoneConfig(store))
+			r.Get("/config/step-up", api.GetStepUpConfig(store))
 
-			// Admin management - super_admin only
+			// Access control: only the reserved super-admin capabilities reach
+			// these groups. Custom roles cannot receive admins.* or roles.manage.
 			r.Group(func(r chi.Router) {
-				r.Use(api.RequireRole(store, "super_admin"))
+				r.Use(api.RequirePermission(authz.AdminsView))
 				r.Get("/admins", api.ListAdmins(store))
-				r.Post("/admins", api.InviteAdmin(store))
 				r.Get("/admins/{id}", api.GetAdmin(store))
+				r.Get("/admin-roles", api.ListAdminRoles(store))
+				r.Get("/admin-groups", api.ListAdminGroups(store))
+				r.Get("/admin-groups/{id}", api.GetAdminGroup(store))
+			})
+			r.Group(func(r chi.Router) {
+				r.Use(api.RequirePermission(authz.AdminsManage))
+				r.Post("/admins", api.InviteAdmin(store))
 				r.Patch("/admins/{id}", api.UpdateAdmin(store))
 				r.Delete("/admins/{id}", api.DeleteAdmin(store))
 				r.Post("/admins/{id}/reset-password", api.ResetAdminPassword(store))
-				// Super-admin helpdesk: clear another admin's factors so they
-				// can re-enroll (requires the acting admin's own MFA proof;
-				// their sessions are revoked and a store ban buffer is not used).
 				r.Post("/admins/{id}/reset-mfa", api.ResetAdminMFA(store))
-				// Audit-log housekeeping — super_admin only.
-				r.Delete("/audit-logs", api.PurgeAuditLogs(store))
-				// Web-activity housekeeping — super_admin only (raw browsing
-				// records grow with peer traffic; nightly auto-purge keeps the
-				// retention window, this allows an immediate manual cleanup).
-				r.Delete("/web-activity", api.PurgeWebActivity(store))
-				// Live Go runtime counters (goroutines / heap / fds) for leak
-				// triage. super_admin only; pprof is on the loopback listener.
-				r.Get("/debug/runtime", api.RuntimeStats(store))
-				// Force an immediate full rule sync (super_admin only).
-				r.Post("/domain-rules/sync", api.ResyncDomainRules(store))
-				r.Post("/ip-rules/sync", api.ResyncIPRules(store))
+				r.Post("/admin-groups", api.CreateAdminGroup(store))
+				r.Patch("/admin-groups/{id}", api.UpdateAdminGroup(store))
+				r.Delete("/admin-groups/{id}", api.DeleteAdminGroup(store))
+				r.Patch("/admin-groups/{id}/members", api.SetAdminGroupMembers(store))
+				r.Post("/admin-groups/{id}/assign-role", api.AssignAdminGroupRole(store))
+			})
+			r.Group(func(r chi.Router) {
+				r.Use(api.RequirePermission(authz.RolesManage))
+				r.Post("/admin-roles", api.CreateAdminRole(store))
+				r.Patch("/admin-roles/{slug}", api.UpdateAdminRole(store))
+				r.Delete("/admin-roles/{slug}", api.DeleteAdminRole(store))
 			})
 
-			// User and peer management - admin and super_admin
+			// Monitoring and web activity.
 			r.Group(func(r chi.Router) {
-				r.Use(api.RequireRole(store, "admin", "super_admin"))
-				r.Get("/users", api.ListUsers(store))
-				r.Post("/users", api.CreateUser(store))
-				r.Get("/users/{id}", api.GetUser(store))
-				r.Patch("/users/{id}", api.UpdateUser(store))
-				r.Post("/users/{id}/suspend", api.SuspendUser(store))
-				r.Delete("/users/{id}", api.DeleteUser(store))
-				r.Post("/users/{id}/resume", api.ResumeUser(store))
-				// Re-issue the claim email when the original send failed
-				// (SMTP error) or the user lost/expired their invite link.
-				r.Post("/users/{id}/resend-invite", api.ResendUserInvite(store))
-
-				// Departments: free-form labels for VPN users.
-				r.Get("/departments", api.ListDepartments(store))
-				r.Post("/departments", api.CreateDepartment(store))
-				r.Patch("/departments/{id}", api.UpdateDepartment(store))
-				r.Delete("/departments/{id}", api.DeleteDepartment(store))
-
-				r.Get("/peers", api.ListPeers(store))
-				r.Post("/peers", api.CreatePeer(store))
-				r.Get("/peers/{id}", api.GetPeer(store))
-				r.Patch("/peers/{id}", api.UpdatePeer(store))
-				r.Post("/peers/{id}/suspend", api.SuspendPeer(store))
-				r.Post("/peers/{id}/resume", api.ResumePeer(store))
-				r.Delete("/peers/{id}", api.DeletePeer(store))
-				r.Get("/peers/{id}/config", api.GetPeerConfig(store))
-				r.Post("/peers/{id}/config-link", api.CreatePeerAccessLink(store))
-				// Re-email the config link when the original send hit an
-				// SMTP error or the user never received it.
-				r.Post("/peers/{id}/resend-config-email", api.ResendPeerConfigEmail(store))
-
-				r.Get("/servers", api.ListServers(store))
-				r.Post("/servers", api.CreateServer(store))
-				r.Get("/servers/{id}", api.GetServer(store))
-				r.Patch("/servers/{id}", api.UpdateServer(store))
-				r.Delete("/servers/{id}", api.DeleteServer(store))
-				r.Get("/servers/{id}/status", api.GetServerStatus(store))
-				// Host setup reveals the server's private key — POST + MFA.
-				r.Post("/servers/{id}/host-config", api.GetServerHostConfig(store))
-
-				// Node management (admin session auth)
-				r.Get("/admins/me", api.GetMe(store))
-				r.Post("/admins/me/password", api.ChangePassword(store))
-				r.Get("/admins/me/sessions", api.ListMySessions(store))
-				r.Delete("/admins/me/sessions/{id}", api.RevokeMySession(store))
-				r.Post("/admins/me/sessions/revoke-others", api.RevokeMyOtherSessions(store))
-				// MFA self-service: factor list, add/remove factors (step-up
-				// gated) and recovery-code regeneration.
-				r.Get("/admins/me/mfa", api.GetMyMFA(store))
-				r.Post("/admins/me/mfa/totp/begin", api.AddTOTPBegin(store))
-				r.Post("/admins/me/mfa/totp/finish", api.AddTOTPFinish(store))
-				r.Post("/admins/me/mfa/totp/remove", api.AddTOTPRemove(store))
-				r.Post("/admins/me/mfa/passkeys/begin", api.AddPasskeyBegin(store))
-				r.Post("/admins/me/mfa/passkeys/finish", api.AddPasskeyFinish(store))
-				r.Patch("/admins/me/mfa/passkeys/{id}", api.UpdatePasskey(store))
-				r.Delete("/admins/me/mfa/passkeys/{id}", api.DeletePasskey(store))
-				r.Post("/admins/me/mfa/recovery-codes/regenerate", api.RegenerateRecoveryCodes(store))
-				// Step-up proof for passkey users: a successful assertion stamps
-				// a 90-second single-use freshness window on the session.
-				r.Post("/auth/mfa/stepup/passkey/begin", api.PasskeyStepUpBegin(store))
-				r.Post("/auth/mfa/stepup/passkey/finish", api.PasskeyStepUpFinish(store))
-				r.Get("/config/mfa", api.GetMFAPolicyConfig(store))
-				r.Get("/config/email-templates", api.ListEmailTemplates(store))
-				r.Patch("/config/email-templates/{key}", api.UpdateEmailTemplate(store))
-				r.Get("/nodes", api.ListNodes(store))
-				r.Post("/nodes", api.CreateNode(store))
-				r.Get("/nodes/local/status", api.GetLocalNodeStatus(store))
-				r.Delete("/nodes/{id}", api.DeleteNode(store))
-				// Rotating a node token re-issues the join command (the
-				// plaintext token is only stored hashed) — super_admin only,
-				// like the other node-management write actions.
-				r.Group(func(r chi.Router) {
-					r.Use(api.RequireRole(store, "super_admin"))
-					r.Post("/nodes/{id}/rotate-token", api.RotateNodeToken(store))
-				})
-
-				r.Get("/domain-rules", api.ListDomainRules(store))
-				r.Post("/domain-rules", api.CreateDomainRule(store))
-				r.Delete("/domain-rules/{id}", api.DeleteDomainRule(store))
-				r.Get("/domain-rules/status", api.DomainRuleSyncStatus(store))
-
-				// Reusable domain groups (e.g. "YouTube" = youtube.com +
-				// googlevideo.com + ...). A single blocking rule can target a
-				// whole group, and editing the group updates every rule using it.
-				r.Get("/domain-groups", api.ListDomainGroups(store))
-				r.Post("/domain-groups", api.CreateDomainGroup(store))
-				r.Patch("/domain-groups/{id}", api.UpdateDomainGroup(store))
-				r.Delete("/domain-groups/{id}", api.DeleteDomainGroup(store))
-
-				// IP blocking: L3/L4 destination rules enforced by wg-helper
-				// nftables (IPv4 + IPv6, global and per-user).
-				r.Get("/ip-rules", api.ListIPRules(store))
-				r.Post("/ip-rules", api.CreateIPRule(store))
-				r.Delete("/ip-rules/{id}", api.DeleteIPRule(store))
-				r.Get("/ip-rules/status", api.IPRuleStatus(store))
-
-				// Reusable IP groups (e.g. "CDN edge ranges"): one blocking
-				// rule can target a whole group, editing it updates the rules.
-				r.Get("/ip-groups", api.ListIPGroups(store))
-				r.Post("/ip-groups", api.CreateIPGroup(store))
-				r.Patch("/ip-groups/{id}", api.UpdateIPGroup(store))
-				r.Delete("/ip-groups/{id}", api.DeleteIPGroup(store))
-				// Is this domain actually blocked right now? Proxies AdGuard's
-				// check_host (read-only diagnostics).
-				r.Get("/domain-rules/check", api.CheckDomainRule(store))
-
-				// Web activity (per-peer DNS browsing history). Records are
-				// imported from AdGuard Home by the browse worker.
-				r.Get("/web-activity", api.ListWebActivity(store))
-				r.Get("/web-activity/summary", api.GetWebActivitySummary(store))
-				r.Get("/web-activity/top-domains", api.GetTopDomains(store))
-				// Blocked-IP attempts (nftables counters) — they never hit DNS,
-				// so they are not part of the browsing records above.
-				r.Get("/web-activity/ip-blocked", api.IPBlockedActivity(store))
-
+				r.Use(api.RequirePermission(authz.MonitoringView))
 				r.Get("/stats/overview", api.GetStatsOverview(store))
 				r.Get("/stats/traffic", api.GetTrafficStats(store))
 				r.Get("/stats/usage", api.GetTrafficUsage(store))
 				r.Get("/peers/{id}/traffic", api.GetPeerTraffic(store))
 				r.Get("/users/{id}/traffic", api.GetUserTraffic(store))
-
+			})
+			r.Group(func(r chi.Router) {
+				r.Use(api.RequirePermission(authz.ActivityView))
+				r.Get("/web-activity", api.ListWebActivity(store))
+				r.Get("/web-activity/summary", api.GetWebActivitySummary(store))
+				r.Get("/web-activity/top-domains", api.GetTopDomains(store))
+				r.Get("/web-activity/ip-blocked", api.IPBlockedActivity(store))
+			})
+			r.Group(func(r chi.Router) {
+				r.Use(api.RequirePermission(authz.AuditView))
 				r.Get("/audit-logs", api.ListAuditLogs(store))
+			})
 
+			// Network.
+			r.Group(func(r chi.Router) {
+				r.Use(api.RequirePermission(authz.NetworkView))
+				r.Get("/servers", api.ListServers(store))
+				r.Get("/servers/{id}", api.GetServer(store))
+				r.Get("/servers/{id}/status", api.GetServerStatus(store))
+				r.Get("/peers", api.ListPeers(store))
+				r.Get("/peers/{id}", api.GetPeer(store))
+				r.Get("/nodes", api.ListNodes(store))
+				r.Get("/nodes/local/status", api.GetLocalNodeStatus(store))
+			})
+			r.Group(func(r chi.Router) {
+				r.Use(api.RequirePermission(authz.NetworkManage))
+				r.Post("/servers", api.CreateServer(store))
+				r.Patch("/servers/{id}", api.UpdateServer(store))
+				r.Delete("/servers/{id}", api.DeleteServer(store))
+				r.Post("/peers", api.CreatePeer(store))
+				r.Patch("/peers/{id}", api.UpdatePeer(store))
+				r.Post("/peers/{id}/suspend", api.SuspendPeer(store))
+				r.Post("/peers/{id}/resume", api.ResumePeer(store))
+				r.Delete("/peers/{id}", api.DeletePeer(store))
+				r.Post("/nodes", api.CreateNode(store))
+				r.Delete("/nodes/{id}", api.DeleteNode(store))
+			})
+			r.Group(func(r chi.Router) {
+				r.Use(api.RequirePermission(authz.NetworkSecrets))
+				r.Get("/peers/{id}/config", api.GetPeerConfig(store))
+				r.Post("/peers/{id}/config-link", api.CreatePeerAccessLink(store))
+				r.Post("/peers/{id}/resend-config-email", api.ResendPeerConfigEmail(store))
+				r.Post("/servers/{id}/host-config", api.GetServerHostConfig(store))
+			})
+
+			// Directory.
+			r.Group(func(r chi.Router) {
+				r.Use(api.RequirePermission(authz.DirectoryView))
+				r.Get("/users", api.ListUsers(store))
+				r.Get("/users/{id}", api.GetUser(store))
+				r.Get("/departments", api.ListDepartments(store))
+			})
+			r.Group(func(r chi.Router) {
+				r.Use(api.RequirePermission(authz.DirectoryManage))
+				r.Post("/users", api.CreateUser(store))
+				r.Patch("/users/{id}", api.UpdateUser(store))
+				r.Post("/users/{id}/suspend", api.SuspendUser(store))
+				r.Post("/users/{id}/resume", api.ResumeUser(store))
+				r.Delete("/users/{id}", api.DeleteUser(store))
+				r.Post("/users/{id}/resend-invite", api.ResendUserInvite(store))
+				r.Post("/departments", api.CreateDepartment(store))
+				r.Patch("/departments/{id}", api.UpdateDepartment(store))
+				r.Delete("/departments/{id}", api.DeleteDepartment(store))
+			})
+
+			// Security rules.
+			r.Group(func(r chi.Router) {
+				r.Use(api.RequirePermission(authz.RulesView))
+				r.Get("/domain-rules", api.ListDomainRules(store))
+				r.Get("/domain-rules/status", api.DomainRuleSyncStatus(store))
+				r.Get("/domain-rules/check", api.CheckDomainRule(store))
+				r.Get("/domain-groups", api.ListDomainGroups(store))
+				r.Get("/ip-rules", api.ListIPRules(store))
+				r.Get("/ip-rules/status", api.IPRuleStatus(store))
+				r.Get("/ip-groups", api.ListIPGroups(store))
+			})
+			r.Group(func(r chi.Router) {
+				r.Use(api.RequirePermission(authz.RulesManage))
+				r.Post("/domain-rules", api.CreateDomainRule(store))
+				r.Delete("/domain-rules/{id}", api.DeleteDomainRule(store))
+				r.Post("/domain-groups", api.CreateDomainGroup(store))
+				r.Patch("/domain-groups/{id}", api.UpdateDomainGroup(store))
+				r.Delete("/domain-groups/{id}", api.DeleteDomainGroup(store))
+				r.Post("/ip-rules", api.CreateIPRule(store))
+				r.Delete("/ip-rules/{id}", api.DeleteIPRule(store))
+				r.Post("/ip-groups", api.CreateIPGroup(store))
+				r.Patch("/ip-groups/{id}", api.UpdateIPGroup(store))
+				r.Delete("/ip-groups/{id}", api.DeleteIPGroup(store))
+			})
+
+			// System configuration and backups.
+			r.Group(func(r chi.Router) {
+				r.Use(api.RequirePermission(authz.SystemView))
 				r.Get("/config", api.GetConfig(store))
-				r.Patch("/config", api.UpdateConfig(store))
 				r.Get("/config/smtp", api.GetSMTPConfig(store))
-				r.Patch("/config/smtp", api.UpdateSMTPConfig(store))
-				r.Get("/config/timezone", api.GetTimezoneConfig(store))
-				r.Patch("/config/timezone", api.UpdateTimezoneConfig(store))
-				r.Post("/config/email/test", api.SendTestEmail(store))
-				r.Get("/config/step-up", api.GetStepUpConfig(store))
-				// Login lockout policy (attempts / IP window / account window).
+				r.Get("/config/email-templates", api.ListEmailTemplates(store))
+				r.Get("/config/mfa", api.GetMFAPolicyConfig(store))
 				r.Get("/config/security", api.GetSecurityConfig(store))
-				// The MFA policy and the step-up grace window are security
-				// policies — super_admin only, strict MFA step-up enforced by
-				// the handlers.
-				r.Group(func(r chi.Router) {
-					r.Use(api.RequireRole(store, "super_admin"))
-					r.Patch("/config/mfa", api.UpdateMFAPolicyConfig(store))
-					r.Patch("/config/step-up", api.UpdateStepUpConfig(store))
-					r.Patch("/config/security", api.UpdateSecurityConfig(store))
-				})
-
-				// Backup endpoints (download/restore/delete require the
-				// acting admin's own MFA proof — see each handler).
+			})
+			r.Group(func(r chi.Router) {
+				r.Use(api.RequirePermission(authz.SystemManage))
+				r.Patch("/config", api.UpdateConfig(store))
+				r.Patch("/config/smtp", api.UpdateSMTPConfig(store))
+				r.Patch("/config/timezone", api.UpdateTimezoneConfig(store))
+				r.Patch("/config/email-templates/{key}", api.UpdateEmailTemplate(store))
+				r.Post("/config/email/test", api.SendTestEmail(store))
+			})
+			r.Group(func(r chi.Router) {
+				r.Use(api.RequirePermission(authz.BackupsView))
+				r.Get("/backup/list", api.ListBackups(store))
+			})
+			r.Group(func(r chi.Router) {
+				r.Use(api.RequirePermission(authz.BackupsManage))
 				r.Post("/backup/create", api.CreateBackup(store))
 				r.Post("/backup/restore", api.RestoreBackup(store))
-				r.Get("/backup/list", api.ListBackups(store))
 				r.Post("/backup/download", api.DownloadBackup(store))
 				r.Post("/backup/restore-upload", api.RestoreBackupUpload(store))
 				r.Post("/backup/delete", api.DeleteBackup(store))
+			})
+
+			// Reserved security/maintenance actions.
+			r.Group(func(r chi.Router) {
+				r.Use(api.RequirePermission(authz.SecurityManage))
+				r.Patch("/config/mfa", api.UpdateMFAPolicyConfig(store))
+				r.Patch("/config/step-up", api.UpdateStepUpConfig(store))
+				r.Patch("/config/security", api.UpdateSecurityConfig(store))
+			})
+			r.Group(func(r chi.Router) {
+				r.Use(api.RequirePermission(authz.AuditManage))
+				r.Delete("/audit-logs", api.PurgeAuditLogs(store))
+				r.Delete("/web-activity", api.PurgeWebActivity(store))
+			})
+			r.Group(func(r chi.Router) {
+				r.Use(api.RequirePermission(authz.MaintenanceRun))
+				r.Get("/debug/runtime", api.RuntimeStats(store))
+				r.Post("/domain-rules/sync", api.ResyncDomainRules(store))
+				r.Post("/ip-rules/sync", api.ResyncIPRules(store))
+				r.Post("/nodes/{id}/rotate-token", api.RotateNodeToken(store))
 			})
 		})
 	})

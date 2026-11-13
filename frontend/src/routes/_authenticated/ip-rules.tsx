@@ -8,6 +8,7 @@ import {
   IconTrash,
 } from '@tabler/icons-react'
 import { apiJson } from '../../lib/api'
+import { useCan } from '../../lib/permissions'
 import { userLabel } from '../../lib/userLabel'
 import {
   Badge,
@@ -196,6 +197,7 @@ export const Route = createFileRoute('/_authenticated/ip-rules')({
 })
 
 export function IPBlockingPage() {
+  const canManage = useCan('rules.manage')
   const [showAddModal, setShowAddModal] = useState(false)
   const [scope, setScope] = useState<RuleScope>('global')
   const [target, setTarget] = useState<'cidr' | 'group'>('cidr')
@@ -474,12 +476,12 @@ export function IPBlockingPage() {
       <PageHeader
         title="IP Blocking"
         description="Drop traffic to IP addresses and CIDR ranges for VPN peers."
-        actions={
+        actions={canManage ? (
           <button type="button" onClick={openAddModal} className={smallPrimaryButtonCls}>
             <IconPlus size={14} stroke={1.8} aria-hidden="true" />
             Add IP rule
           </button>
-        }
+        ) : undefined}
       />
 
       {/* One mutually-exclusive enforcement state. */}
@@ -496,12 +498,12 @@ export function IPBlockingPage() {
       <Panel
         title="IP groups"
         className="mb-6"
-        right={
+        right={canManage ? (
           <button type="button" onClick={openNewGroupModal} className={smallButtonCls}>
             <IconPlus size={13} stroke={1.6} aria-hidden="true" />
             New group
           </button>
-        }
+        ) : undefined}
       >
         {deleteGroupResult && (
           <p role="status" className="px-5 pb-2 text-xs text-zinc-500">
@@ -550,7 +552,7 @@ export function IPBlockingPage() {
                     <span className="text-xs text-zinc-500 tabular-nums">
                       used by {group.rule_count} rule{group.rule_count === 1 ? '' : 's'}
                     </span>
-                    <div className="flex items-center gap-1">
+                    {canManage && <div className="flex items-center gap-1">
                       <button
                         type="button"
                         onClick={() => openEditGroupModal(group)}
@@ -569,7 +571,7 @@ export function IPBlockingPage() {
                       >
                         <IconTrash size={14} stroke={1.6} aria-hidden="true" />
                       </button>
-                    </div>
+                    </div>}
                   </div>
                   {expanded && (
                     <div className="flex flex-wrap gap-1.5 px-5 pb-3 pl-10">
@@ -616,7 +618,7 @@ export function IPBlockingPage() {
                   <th className={thCls}>Target</th>
                   <th className={thCls}>Scope</th>
                   <th className={thCls}>Note</th>
-                  <th className={thCls + ' text-right'}>Actions</th>
+                  {canManage && <th className={thCls + ' text-right'}>Actions</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800/60">
@@ -672,6 +674,7 @@ export function IPBlockingPage() {
                       <td className={tdCls}>
                         <span className="text-zinc-500">{rule.note || '—'}</span>
                       </td>
+                      {canManage && (
                       <td className="px-5 py-3.5 whitespace-nowrap text-right text-sm font-medium">
                         <button
                           type="button"
@@ -687,6 +690,7 @@ export function IPBlockingPage() {
                           <IconTrash size={14} stroke={1.6} aria-hidden="true" />
                         </button>
                       </td>
+                      )}
                     </tr>
                   )
                 })}

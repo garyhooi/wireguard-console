@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/wireguard-console/backend/internal/auth"
 )
 
@@ -45,10 +46,28 @@ func GetMe(store *Store) http.HandlerFunc {
 		}
 		requireMethods := loadMFAPolicy(ctx, store)
 
+		groupMap, err := loadAdminGroups(ctx, store, []uuid.UUID{adminID})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to load admin groups")
+			return
+		}
+		groups := groupMap[adminID]
+		if groups == nil {
+			groups = []adminGroupRef{}
+		}
+		permissions := getAdminPermissions(r)
+		if permissions == nil {
+			permissions = []string{}
+		}
+
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"id":                       adminID.String(),
 			"email":                    email,
 			"role":                     role,
+			"role_name":                getAdminRoleName(r),
+			"is_super_admin":           role == "super_admin",
+			"permissions":              permissions,
+			"groups":                   groups,
 			"totp_enabled":             totpEnabled,
 			"status":                   status,
 			"created_at":               createdAt.UTC().Format(time.RFC3339),

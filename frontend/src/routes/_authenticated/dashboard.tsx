@@ -4,6 +4,7 @@ import { IconArrowRight, IconCirclePlus } from '@tabler/icons-react'
 import { EmptyState, PageHeader, Panel, Skeleton, Stat, StatusBadge } from '../../lib/ui'
 import { apiJson } from '../../lib/api'
 import { fmtDateTime } from '../../lib/timezone'
+import { useCan } from '../../lib/permissions'
 
 interface Stats {
   total_peers: number
@@ -28,19 +29,40 @@ export const Route = createFileRoute('/_authenticated/dashboard')({
 })
 
 export function DashboardPage() {
+  const canViewMonitoring = useCan('monitoring.view')
+  const canViewNetwork = useCan('network.view')
+  const canManageNetwork = useCan('network.manage')
+
   const { data: stats, isLoading } = useQuery<Stats>({
     queryKey: ['stats'],
     queryFn: async () => apiJson<Stats>('/api/stats/overview'),
+    enabled: canViewMonitoring,
     refetchInterval: 15000,
   })
 
   const { data: peers } = useQuery<Peer[]>({
     queryKey: ['peers'],
     queryFn: async () => apiJson<Peer[]>('/api/peers'),
+    enabled: canViewNetwork,
     refetchInterval: 15000,
   })
 
   const activePeers = (peers || []).filter((p) => p.status !== 'removed').slice(0, 8)
+
+  if (!canViewMonitoring) {
+    return (
+      <div>
+        <PageHeader
+          title="Dashboard"
+          description="This role does not include monitoring access."
+        />
+        <p className="text-sm text-zinc-400">
+          Use the navigation to open the sections your role can access. A super admin can add the
+          monitoring.view capability on Directory → Admins → Roles &amp; policies.
+        </p>
+      </div>
+    )
+  }
 
   if (isLoading) {
     return (
@@ -91,6 +113,7 @@ export function DashboardPage() {
       </Panel>
 
       {/* Recent peers */}
+      {canViewNetwork && (
       <div className="mt-8">
         <Panel
           title="Recent peers"
@@ -108,7 +131,7 @@ export function DashboardPage() {
             <EmptyState
               title="No peers yet"
               hint="Create a server, invite a user, then add a peer — the tunnel config is generated automatically."
-              action={
+              action={canManageNetwork ? (
                 <Link
                   to="/peers"
                   className="inline-flex items-center gap-2 bg-teal-700 hover:bg-teal-600 text-white text-sm font-medium py-2 px-4 rounded-md transition-colors"
@@ -116,7 +139,7 @@ export function DashboardPage() {
                   <IconCirclePlus size={16} stroke={1.6} aria-hidden="true" />
                   Add peer
                 </Link>
-              }
+              ) : undefined}
             />
           ) : (
             <div className="overflow-x-auto">
@@ -150,6 +173,7 @@ export function DashboardPage() {
           )}
         </Panel>
       </div>
+      )}
     </div>
   )
 }

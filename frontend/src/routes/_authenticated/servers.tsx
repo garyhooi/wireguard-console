@@ -1,6 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { ConfirmMFA } from '../../lib/ConfirmMFA'
 import { apiFetch, apiJson } from '../../lib/api'
+import { useCan } from '../../lib/permissions'
 import { isMFAError, useStepUpMinutes } from '../../lib/stepup'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
@@ -65,6 +66,8 @@ function listenPortFromEndpoint(endpoint: string): string {
 }
 
 function ServersPage() {
+  const canManage = useCan('network.manage')
+  const canSecrets = useCan('network.secrets')
   const queryClient = useQueryClient()
   const [showAdd, setShowAdd] = useState(false)
   const [editing, setEditing] = useState<Server | null>(null)
@@ -264,7 +267,7 @@ function ServersPage() {
       <PageHeader
         title="Servers"
         description="A server is one WireGuard interface on the VPN host. Keys are generated automatically on creation."
-        actions={<PrimaryButton onClick={openAdd}><IconPlus size={16} stroke={1.6} aria-hidden="true" />Add Server</PrimaryButton>}
+        actions={canManage ? <PrimaryButton onClick={openAdd}><IconPlus size={16} stroke={1.6} aria-hidden="true" />Add Server</PrimaryButton> : undefined}
       />
 
       {error && <p className="text-red-400 text-sm mb-3">{error}</p>}
@@ -453,7 +456,7 @@ function ServersPage() {
                 <th className={thCls}>Network</th>
                 <th className={thCls}>Public Key</th>
                 <th className={thCls}>Status</th>
-                <th className={thCls + ' text-right'}>Actions</th>
+                {(canManage || canSecrets) && <th className={thCls + ' text-right'}>Actions</th>}
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-800/60">
@@ -472,24 +475,30 @@ function ServersPage() {
                       {server.managed_mode === 'manual' && <Badge tone="info">manual</Badge>}
                     </div>
                   </td>
-                  <td className="px-5 py-3.5 whitespace-nowrap text-right text-sm">
-                    <div className="flex justify-end gap-1">
-                      <ActionLink onClick={() => openEdit(server)}>Edit</ActionLink>
-                      <ActionLink
-                        tone="default"
-                        onClick={() => confirmHostSetup(server)}
-                      >
-                        <IconTerminal2 size={14} stroke={1.6} aria-hidden="true" />
-                        Host Setup
-                      </ActionLink>
-                      <ActionLink
-                        tone="danger"
-                        onClick={() => confirmDelete(server)}
-                      >
-                        Delete
-                      </ActionLink>
-                    </div>
-                  </td>
+                  {(canManage || canSecrets) && (
+                    <td className="px-5 py-3.5 whitespace-nowrap text-right text-sm">
+                      <div className="flex justify-end gap-1">
+                        {canManage && <ActionLink onClick={() => openEdit(server)}>Edit</ActionLink>}
+                        {canSecrets && (
+                          <ActionLink
+                            tone="default"
+                            onClick={() => confirmHostSetup(server)}
+                          >
+                            <IconTerminal2 size={14} stroke={1.6} aria-hidden="true" />
+                            Host Setup
+                          </ActionLink>
+                        )}
+                        {canManage && (
+                          <ActionLink
+                            tone="danger"
+                            onClick={() => confirmDelete(server)}
+                          >
+                            Delete
+                          </ActionLink>
+                        )}
+                      </div>
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>

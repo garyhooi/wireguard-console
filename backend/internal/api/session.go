@@ -18,11 +18,15 @@ import (
 var uuidNil = uuid.Nil
 
 // Typed context keys (unexported) carrying per-request auth state populated
-// by AuthMiddleware: resolved admin id, the session's CSRF token, and the
-// acting admin_sessions row id (for the Active Sessions UI).
+// by AuthMiddleware: resolved admin id, the session's CSRF token, the acting
+// admin_sessions row id (for the Active Sessions UI), and the admin's current
+// role name plus canonical permission policy.
 type adminIDKey struct{}
 type csrfTokenKey struct{}
 type sessionRowIDKey struct{}
+type adminRoleKey struct{}
+type adminRoleNameKey struct{}
+type adminPermissionsKey struct{}
 
 // Session cookie name. The token value is the same opaque 32-byte hex the
 // API used to return in JSON — only the transport changes (HttpOnly cookie
