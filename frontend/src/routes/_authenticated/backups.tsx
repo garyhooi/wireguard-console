@@ -362,7 +362,7 @@ function BackupsPage() {
         <input
           ref={fileInput}
           type="file"
-          accept=".sql.gz,.sql.gz.enc,application/gzip,application/octet-stream"
+          accept=".sql.gz,.sql.gz.enc,.gz,.enc,application/gzip,application/x-gzip,application/octet-stream"
           className="hidden"
           onChange={(e) => {
             handlePickFile(e.target.files?.[0])

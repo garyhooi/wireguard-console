@@ -2353,6 +2353,12 @@ func TestEndToEnd(t *testing.T) {
 	if encDL.ctype != "application/octet-stream" || len(encDL.body) < 100 {
 		t.Fatalf("encrypted download body/type wrong: type=%q len=%d", encDL.ctype, len(encDL.body))
 	}
+	// Uploading the downloaded .enc archive must work through the same
+	// passphrase-aware restore path (the UI picker must offer .enc files).
+	encUpload := rawUpload(t, "/api/backup/restore-upload", token, "uploaded_"+encName, encDL.body, actorCode())
+	if encUpload.status != 200 {
+		t.Fatalf("encrypted restore-upload: status %d, want 200 (body %s)", encUpload.status, encUpload.body)
+	}
 	encRestore, _ := api(t, "POST", "/api/backup/restore", token, map[string]string{
 		"filename": encName, "code": actorCode(),
 	})
