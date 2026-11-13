@@ -6,6 +6,7 @@ import { IconFingerprint } from "@tabler/icons-react";
 import { BrandMark } from "@/components/brand";
 import { GithubCorner } from "@/components/demo/github-corner";
 import { HoloPageBackground } from "@/components/demo/holo-page-background";
+import { AuthStatusOverlay } from "@/components/demo/auth-status-overlay";
 import {
   GhostButton,
   PrimaryButton,
@@ -17,6 +18,7 @@ export function LoginScreen({ onSignIn }: { onSignIn: () => void }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState<"password" | "passkey" | null>(null);
+  const [success, setSuccess] = useState(false);
   const timer = useRef<number | null>(null);
 
   useEffect(
@@ -27,9 +29,11 @@ export function LoginScreen({ onSignIn }: { onSignIn: () => void }) {
   );
 
   function finish(kind: "password" | "passkey") {
-    if (busy) return;
+    if (busy || success) return;
     setBusy(kind);
-    timer.current = window.setTimeout(() => onSignIn(), 700);
+    // Let the button show its busy label, then hand off to the full-page
+    // identity-verification hologram before the demo console mounts.
+    timer.current = window.setTimeout(() => setSuccess(true), 550);
   }
 
   function submit(event: React.FormEvent<HTMLFormElement>) {
@@ -42,7 +46,7 @@ export function LoginScreen({ onSignIn }: { onSignIn: () => void }) {
       <HoloPageBackground />
 
       <div className="relative z-10 w-full max-w-md">
-        <div className="relative rounded-xl border border-teal-500/25 bg-[#080d16]/80 p-8 shadow-[0_0_60px_-18px_rgba(45,212,191,0.55)] backdrop-blur-md">
+        <div className="hero-rise relative rounded-xl border border-teal-500/25 bg-[#080d16]/80 p-8 shadow-[0_0_60px_-18px_rgba(45,212,191,0.55)] backdrop-blur-md">
           <div
             aria-hidden="true"
             className="pointer-events-none absolute inset-x-10 -top-px h-px bg-gradient-to-r from-transparent via-teal-300/70 to-transparent"
@@ -121,7 +125,7 @@ export function LoginScreen({ onSignIn }: { onSignIn: () => void }) {
           </div>
         </div>
 
-        <p className="mt-6 text-center text-xs tracking-wide text-dim">
+        <p className="hero-rise hero-rise-2 mt-6 text-center text-xs tracking-wide text-dim">
           Secure remote access to your private mesh.
         </p>
         <div className="mt-3 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-[11px] text-dim">
@@ -135,6 +139,7 @@ export function LoginScreen({ onSignIn }: { onSignIn: () => void }) {
         </div>
       </div>
 
+      {success && <AuthStatusOverlay onDone={onSignIn} durationMs={1500} />}
       <GithubCorner />
     </main>
   );

@@ -272,8 +272,8 @@ export const seedActivity: Activity[] = [
   {
     id: "a-5",
     kind: "backup",
-    action: "Created a backup",
-    detail: "wgconsole_backup_20261112_031209.sql.gz",
+    action: "Created, verified and uploaded a backup",
+    detail: "wgconsole_backup_20261112_031209.sql.gz · S3",
     at: "2026-11-13 03:12:09",
     actor: "Demo operator",
   },

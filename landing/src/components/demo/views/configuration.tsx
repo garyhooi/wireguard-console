@@ -3,6 +3,7 @@
 import { useState } from "react";
 import {
   IconClock,
+  IconCloud,
   IconCode,
   IconMail,
   IconSend,
@@ -10,6 +11,7 @@ import {
   IconShieldLock,
 } from "@tabler/icons-react";
 import { useDemo } from "@/components/demo/store";
+import { BackupStorageSettings } from "@/components/demo/views/backup-storage";
 import {
   GhostButton,
   PageHeader,
@@ -19,7 +21,7 @@ import {
   selectCls,
 } from "@/components/demo/ui";
 
-type ConfigTab = "smtp" | "templates" | "timezone" | "security";
+type ConfigTab = "smtp" | "templates" | "timezone" | "storage" | "security";
 
 const TABS: Array<{
   id: ConfigTab;
@@ -29,6 +31,7 @@ const TABS: Array<{
   { id: "smtp", label: "Email (SMTP)", icon: IconSettings },
   { id: "templates", label: "Email templates", icon: IconCode },
   { id: "timezone", label: "Timezone", icon: IconClock },
+  { id: "storage", label: "Backup storage", icon: IconCloud },
   { id: "security", label: "Security", icon: IconShieldLock },
 ];
 
@@ -671,7 +674,7 @@ export function ConfigurationView() {
     <div>
       <PageHeader
         title="Configuration"
-        description="Outbound email (SMTP), the templates the console uses for invites, the display timezone for reports and logs, and security policy."
+        description="Outbound email (SMTP), invite templates, timezone, S3 backup storage, automatic backup schedules and retention, plus security policy."
       />
 
       <div className="mb-6 flex flex-wrap items-center gap-1 border-b border-zinc-800">
@@ -699,6 +702,7 @@ export function ConfigurationView() {
       {tab === "smtp" && <SmtpSettings />}
       {tab === "templates" && <TemplateSettings />}
       {tab === "timezone" && <TimezoneSettings />}
+      {tab === "storage" && <BackupStorageSettings />}
       {tab === "security" && <SecuritySettings />}
     </div>
   );

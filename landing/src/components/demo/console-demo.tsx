@@ -29,6 +29,7 @@ import { AmbientBackdrop } from "@/components/demo/ambient-backdrop";
 import { GithubCorner } from "@/components/demo/github-corner";
 import { DemoProvider, useDemo, type DemoView } from "@/components/demo/store";
 import { LoginScreen } from "@/components/demo/login";
+import { SignOutOverlay } from "@/components/demo/sign-out-overlay";
 import { ToastRegion } from "@/components/demo/ui";
 import { DashboardView } from "@/components/demo/views/dashboard";
 import { ServersView } from "@/components/demo/views/servers";
@@ -370,7 +371,10 @@ function Shell({ onSignOut }: { onSignOut: () => void }) {
           </div>
         )}
 
-        <main className="relative z-10 mx-auto w-full max-w-[1400px] px-4 py-8 sm:px-6 lg:px-8">
+        <main
+          key={view}
+          className="demo-panel-in relative z-10 mx-auto w-full max-w-[1400px] px-4 py-8 sm:px-6 lg:px-8"
+        >
           {view === "dashboard" && <DashboardView />}
           {view === "statistics" && <StatisticsView />}
           {view === "server-monitoring" && <ServerMonitoringView />}
@@ -403,14 +407,25 @@ function Shell({ onSignOut }: { onSignOut: () => void }) {
 
 export function ConsoleDemo() {
   const [signedIn, setSignedIn] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
 
   if (!signedIn) {
     return <LoginScreen onSignIn={() => setSignedIn(true)} />;
   }
 
   return (
-    <DemoProvider>
-      <Shell onSignOut={() => setSignedIn(false)} />
-    </DemoProvider>
+    <>
+      <DemoProvider>
+        <Shell onSignOut={() => setSigningOut(true)} />
+      </DemoProvider>
+      {signingOut && (
+        <SignOutOverlay
+          onDone={() => {
+            setSigningOut(false);
+            setSignedIn(false);
+          }}
+        />
+      )}
+    </>
   );
 }

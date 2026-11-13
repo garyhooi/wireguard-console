@@ -11,6 +11,7 @@ import {
   IconUpload,
 } from "@tabler/icons-react";
 import { useDemo } from "@/components/demo/store";
+import { DemoLoadingOverlay } from "@/components/demo/loading-overlay";
 import {
   ActionLink,
   Badge,
@@ -73,10 +74,12 @@ export function BackupsView() {
   const [creating, setCreating] = useState(false);
   const [restoring, setRestoring] = useState<Backup | null>(null);
   const [deleting, setDeleting] = useState<Backup | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
 
   function create() {
     if (creating) return;
     setCreating(true);
+    setBusy("Creating and verifying backup");
     window.setTimeout(() => {
       setBackups((items) => [
         {
@@ -90,8 +93,9 @@ export function BackupsView() {
         ...items,
       ]);
       setCreating(false);
+      setBusy(null);
       pushToast("Backup created, verified and uploaded to S3");
-    }, 700);
+    }, 1100);
   }
 
   function download(backup: Backup) {
@@ -112,8 +116,13 @@ export function BackupsView() {
 
   function restore() {
     if (!restoring) return;
-    pushToast(`Restore queued for ${restoring.name}`, "info");
+    const name = restoring.name;
     setRestoring(null);
+    setBusy("Restoring database");
+    window.setTimeout(() => {
+      setBusy(null);
+      pushToast(`Restore queued for ${name}`, "info");
+    }, 1100);
   }
 
   function remove() {
@@ -121,13 +130,19 @@ export function BackupsView() {
     const message = deleting.s3
       ? `${deleting.name} deleted from the console and S3`
       : `${deleting.name} deleted`;
-    setBackups((items) => items.filter((item) => item.name !== deleting.name));
-    pushToast(message, "info");
+    const name = deleting.name;
     setDeleting(null);
+    setBusy(deleting.s3 ? "Deleting local and S3 copies" : "Deleting backup");
+    window.setTimeout(() => {
+      setBackups((items) => items.filter((item) => item.name !== name));
+      setBusy(null);
+      pushToast(message, "info");
+    }, 750);
   }
 
   return (
     <div>
+      {busy && <DemoLoadingOverlay label={busy} />}
       <PageHeader
         title="Backups"
         description="Every new backup runs pg_dump, is encrypted when backup encryption is enabled, restored into a temporary database to verify it, and uploaded to S3 when configured. Automatic schedules and retention live under Configuration → Backup storage. Downloading, restoring, uploading or deleting requires an MFA step-up (passkey or authenticator code)."
