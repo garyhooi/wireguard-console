@@ -273,7 +273,7 @@ export const seedActivity: Activity[] = [
     id: "a-5",
     kind: "backup",
     action: "Created a backup",
-    detail: "backup-2026-11-12.tar.zst",
+    detail: "wgconsole_backup_20261112_031209.sql.gz",
     at: "2026-11-13 03:12:09",
     actor: "Demo operator",
   },

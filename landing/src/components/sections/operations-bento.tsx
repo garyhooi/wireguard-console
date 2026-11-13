@@ -90,13 +90,16 @@ export function OperationsBento() {
           </article>
 
           <article className="relative overflow-hidden rounded-[14px] border border-line bg-panel p-6 md:col-span-2">
-            <h3 className="text-[15px] font-medium text-text">Backups gated by MFA</h3>
+            <h3 className="text-[15px] font-medium text-text">Backups that verify themselves</h3>
             <p className="mt-2 text-[13px] leading-relaxed text-muted">
-              Create, download and restore from the console. Destructive
-              restores ask for a fresh factor.
+              Every archive is restore-checked, optionally encrypted, and can
+              be copied to S3 on a schedule. Retention prunes the old copies;
+              destructive restores still ask for a fresh factor.
             </p>
             <div className="mt-6 space-y-1.5 font-mono text-[10px] text-dim">
-              <div>backup.tar.zst</div>
+              <div>wgconsole_backup_20261113.sql.gz.enc</div>
+              <div className="text-accent">verify: restore_check</div>
+              <div>s3: configured · auto: 24h · keep 7</div>
               <div className="text-muted">restore: mfa_required</div>
             </div>
           </article>

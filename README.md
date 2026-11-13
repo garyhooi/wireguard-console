@@ -65,7 +65,7 @@ A self-hosted web console for issuing, monitoring, and revoking company WireGuar
 - **DNS filtering** — global and per-user domain blocking (AdGuard) with reusable domain groups and a branded block page (HTTPS block pages need the console certificate installed once per device)
 - **IP blocking** — drop IPv4/IPv6 addresses and CIDR ranges for VPN peers, globally or per-user, with reusable IP groups (enforced server-side before NAT); blocked-IP attempts appear in Statistics and Web Activity
 - **Web activity** — per-user browsing history, traffic charts and usage reports (CSV export)
-- **Backup & restore** — one-click, MFA-gated
+- **Backup & restore** — one-click, restore-verified and optionally encrypted; optional S3 copy; automatic schedules and retention; MFA-gated
 
 ## Quick start
 
@@ -196,15 +196,15 @@ Each admin has exactly one role. **Super admin** is the only locked system role,
 
 ## Backup & restore
 
-**System → Backups**: create, download (off-server copy), and restore with one click. The list shows each archive's size, whether it is passphrase-encrypted, and whether its last automatic restore check passed. Every new backup is restored into a temporary database before the console reports success, so a damaged archive is flagged instead of being treated as a usable backup.
+**System → Backups**: create, download (off-server copy), and restore with one click. The list shows each archive's size, whether it is passphrase-encrypted, whether its last automatic restore check passed, and whether it has an S3 copy. Every new backup is restored into a temporary database before the console reports success, so a damaged archive is flagged instead of being treated as a usable backup.
 
-Destructive actions ask for your MFA confirmation (passkey or authenticator code). Backups live on the console's Docker volume — download them regularly.
+Destructive actions ask for your MFA confirmation (passkey or authenticator code). Local archives live on the console's Docker volume; configure an S3-compatible bucket under **Configuration → Backup storage** and every verified new backup is also uploaded off-site. Automatic schedules and retention are on the same page. Downloading a backup still gives you an independent copy.
 
 **Optional backup encryption:** **Configuration → Security → Backup encryption** sets a passphrase used automatically for every new backup created by any admin. The passphrase is stored encrypted on the server; the backup file itself is authenticated and cannot be read without it. Changing or disabling the passphrase keeps up to 10 previous passphrases encrypted so older archives remain restorable. Keep the passphrase somewhere safe — if both the server and its database are lost, it is the only way to open an encrypted archive.
 
 ### S3 backup destination
 
-**Configuration → Backup storage** configures a generic S3-compatible destination. After a backup passes its restore check it is also uploaded to the bucket. The local archive remains on the console volume for the one-click restore list; the S3 object is the off-site copy.
+**Configuration → Backup storage** configures a generic S3-compatible destination. After a backup passes its restore check it is also uploaded to the bucket. The local archive remains on the console volume for the one-click restore list; the S3 object is the off-site copy. Existing backups are not uploaded retroactively; create a new backup after enabling S3.
 
 - **AWS S3:** leave Endpoint empty, set the region and bucket. Path-style URLs are optional.
 - **MinIO / R2 / Backblaze B2 / Wasabi:** set the provider's HTTPS endpoint, region (use the value the provider documents, often `auto` or `us-east-1`), and enable path-style URLs only when required.
@@ -247,8 +247,9 @@ The same **Backup storage** page can enable automatic backups and a retention li
 
 - Choose an interval: hourly, every 6/12 hours, daily, every 3 days, weekly, or every 30 days. The API process checks the schedule every minute and records the last automatic attempt.
 - **Keep last N backups**: after every successful backup, older archives beyond N are removed. `0` keeps everything; the maximum is 100.
-- Retention removes the matching S3 object when S3 is enabled, and the local archive. If the newest upload failed or its restore check did not pass, retention pauses so an older copy is not deleted while the current one is only local.
+- Retention removes the matching S3 object when S3 is enabled, and the local archive. If the newest upload failed or its restore check did not pass, retention pauses so an older copy is not deleted while the current one is only local. Manual deletion always removes both the local archive and the recorded S3 object.
 - The local archive is not removed by a successful upload; it is what the Backups page restores. If the console volume is lost, download the object from S3 and use **Restore from upload**.
+- The scheduler runs inside the API process. Missed intervals while the API is down are not replayed; the next attempt runs after the API comes back.
 
 ## Upgrading
 

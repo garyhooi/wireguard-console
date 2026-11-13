@@ -35,7 +35,7 @@ Set `NEXT_PUBLIC_SITE_URL` before `pnpm build` in production. The canonical URL,
 - `/opengraph-image` - 1200x630 social card generated with `next/og`
 - `/icon.svg`, `/apple-icon`
 
-The demo mirrors the signed-in console: the same ShieldLock mark, zinc/teal palette, 240px sidebar, 56px top bar, table styles and centered dialogs. It includes the full navigation: Dashboard, Statistics, Server Monitoring, Web Activity, Audit Log, Servers, Peers, Nodes, VPN Users, Departments, Admins, Domain Blocking, IP Blocking, Backups, Configuration and Profile. Sign out returns to the login screen.
+The demo mirrors the signed-in console: the same ShieldLock mark, zinc/teal palette, 240px sidebar, 56px top bar, table styles and centered dialogs. It includes the full navigation: Dashboard, Statistics, Server Monitoring, Web Activity, Audit Log, Servers, Peers, Nodes, VPN Users, Departments, Admins, Domain Blocking, IP Blocking, Backups, Configuration and Profile. The Backups screen shows encrypted/plain protection, restore verification, S3 copies, automatic scheduling and retention. Sign out returns to the login screen.
 
 ## SEO notes
 

@@ -3,13 +3,17 @@
 import { useState } from "react";
 import {
   IconArchive,
+  IconCloud,
   IconDownload,
+  IconLock,
+  IconShieldCheck,
   IconTrash,
   IconUpload,
 } from "@tabler/icons-react";
 import { useDemo } from "@/components/demo/store";
 import {
   ActionLink,
+  Badge,
   DangerButton,
   GhostButton,
   Modal,
@@ -25,18 +29,42 @@ type Backup = {
   name: string;
   created: string;
   size: string;
+  encrypted: boolean;
+  verified: boolean;
+  s3: boolean;
 };
 
 const SEED: Backup[] = [
-  { name: "wgconsole-2026-11-13_031244.sql.gz", created: "2026-11-13 03:12", size: "2.4 MB" },
-  { name: "wgconsole-2026-11-12_031201.sql.gz", created: "2026-11-12 03:12", size: "2.3 MB" },
-  { name: "wgconsole-2026-11-11_031188.sql.gz", created: "2026-11-11 03:11", size: "2.3 MB" },
+  {
+    name: "wgconsole_backup_20261113_031244.sql.gz.enc",
+    created: "2026-11-13 03:12",
+    size: "2.4 MB",
+    encrypted: true,
+    verified: true,
+    s3: true,
+  },
+  {
+    name: "wgconsole_backup_20261112_031201.sql.gz.enc",
+    created: "2026-11-12 03:12",
+    size: "2.3 MB",
+    encrypted: true,
+    verified: true,
+    s3: true,
+  },
+  {
+    name: "wgconsole_backup_20261111_031188.sql.gz",
+    created: "2026-11-11 03:11",
+    size: "2.3 MB",
+    encrypted: false,
+    verified: true,
+    s3: false,
+  },
 ];
 
 function stamp() {
   const d = new Date();
   const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 }
 
 export function BackupsView() {
@@ -52,14 +80,17 @@ export function BackupsView() {
     window.setTimeout(() => {
       setBackups((items) => [
         {
-          name: `wgconsole-${stamp().replace("_", "_")}.sql.gz`,
+          name: `wgconsole_backup_${stamp()}.sql.gz.enc`,
           created: "just now",
           size: "2.4 MB",
+          encrypted: true,
+          verified: true,
+          s3: true,
         },
         ...items,
       ]);
       setCreating(false);
-      pushToast("Backup created");
+      pushToast("Backup created, verified and uploaded to S3");
     }, 700);
   }
 
@@ -87,8 +118,11 @@ export function BackupsView() {
 
   function remove() {
     if (!deleting) return;
+    const message = deleting.s3
+      ? `${deleting.name} deleted from the console and S3`
+      : `${deleting.name} deleted`;
     setBackups((items) => items.filter((item) => item.name !== deleting.name));
-    pushToast(`${deleting.name} deleted`, "info");
+    pushToast(message, "info");
     setDeleting(null);
   }
 
@@ -96,7 +130,7 @@ export function BackupsView() {
     <div>
       <PageHeader
         title="Backups"
-        description="One-click database backups live on the console server (Docker volume, /var/backups/wgconsole). Creating one runs pg_dump; restoring replaces the current database with a saved copy. Downloading, restoring, uploading or deleting a backup requires an MFA step-up (passkey or authenticator code)."
+        description="Every new backup runs pg_dump, is encrypted when backup encryption is enabled, restored into a temporary database to verify it, and uploaded to S3 when configured. Automatic schedules and retention live under Configuration → Backup storage. Downloading, restoring, uploading or deleting requires an MFA step-up (passkey or authenticator code)."
         actions={
           <PrimaryButton onClick={create} disabled={creating}>
             <IconArchive size={16} stroke={1.6} aria-hidden="true" />
@@ -105,7 +139,10 @@ export function BackupsView() {
         }
       />
 
-      <Panel title={`Saved backups (${backups.length})`}>
+      <Panel
+        title={`Saved backups (${backups.length})`}
+        right={<Badge tone="info">Auto: daily · keep 7 · S3</Badge>}
+      >
         <div className="overflow-x-auto">
           <table className={tableCls}>
             <thead>
@@ -113,6 +150,8 @@ export function BackupsView() {
                 <th className={thCls}>Created</th>
                 <th className={thCls}>Filename</th>
                 <th className={thCls}>Size</th>
+                <th className={thCls}>Protection</th>
+                <th className={thCls}>Verification</th>
                 <th className={thCls + " text-right"}>Actions</th>
               </tr>
             </thead>
@@ -130,6 +169,30 @@ export function BackupsView() {
                   </td>
                   <td className={tdCls + " font-mono tabular-nums"}>
                     {backup.size}
+                  </td>
+                  <td className={tdCls}>
+                    <div className="flex flex-wrap gap-1">
+                      <Badge tone={backup.encrypted ? "good" : "neutral"}>
+                        {backup.encrypted && (
+                          <IconLock size={12} stroke={1.7} aria-hidden="true" />
+                        )}
+                        {backup.encrypted ? "Encrypted" : "Plain"}
+                      </Badge>
+                      {backup.s3 && (
+                        <Badge tone="info">
+                          <IconCloud size={12} stroke={1.7} aria-hidden="true" />
+                          S3
+                        </Badge>
+                      )}
+                    </div>
+                  </td>
+                  <td className={tdCls}>
+                    <Badge tone={backup.verified ? "good" : "bad"}>
+                      {backup.verified && (
+                        <IconShieldCheck size={12} stroke={1.7} aria-hidden="true" />
+                      )}
+                      {backup.verified ? "Verified" : "Unverified"}
+                    </Badge>
                   </td>
                   <td className="whitespace-nowrap px-5 py-3.5 text-right">
                     <div className="flex justify-end gap-1">
@@ -159,7 +222,9 @@ export function BackupsView() {
 
       <p className="mt-3 text-xs leading-relaxed text-dim">
         Demo only. Creating a backup adds a sample row; downloading produces a
-        placeholder file. No database is read or replaced.
+        placeholder file. No database is read, replaced, uploaded or deleted.
+        In a real install, deleting an S3-backed backup removes both the local
+        archive and the remote object.
       </p>
 
       <Modal
@@ -181,7 +246,8 @@ export function BackupsView() {
       >
         <p className="text-sm text-dim">
           In a real install this action requires a fresh MFA check and restarts
-          the API with the restored data. The demo only shows the confirmation.
+          the API with the restored data. Passphrase-encrypted archives also
+          need the backup passphrase. The demo only shows the confirmation.
         </p>
       </Modal>
 
@@ -191,7 +257,9 @@ export function BackupsView() {
         title="Delete backup?"
         description={
           deleting
-            ? `${deleting.name} will be removed from the console server.`
+            ? deleting.s3
+              ? `${deleting.name} will be removed from the console server and its S3 bucket.`
+              : `${deleting.name} will be removed from the console server.`
             : undefined
         }
         className="max-w-md"
@@ -205,7 +273,9 @@ export function BackupsView() {
         }
       >
         <p className="text-sm text-dim">
-          The file is deleted from the backup volume. This cannot be undone.
+          {deleting?.s3
+            ? "The local archive and its S3 object are deleted. If the S3 copy cannot be removed, the local file is kept so you can fix the destination and retry."
+            : "The file is deleted from the backup volume. This cannot be undone."}
         </p>
       </Modal>
     </div>

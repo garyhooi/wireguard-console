@@ -112,8 +112,8 @@ export const operations = [
   },
   {
     key: "backup",
-    title: "Backups gated by MFA",
-    body: "Create, download and restore from the console. Destructive restores require a fresh factor.",
+    title: "Verified backups, on-site and off",
+    body: "Every backup is restore-checked and optionally passphrase-encrypted. Add an S3-compatible bucket, automatic schedules and a retention count, while restores still require a fresh factor.",
     kind: "small",
   },
   {
@@ -174,7 +174,7 @@ export const faqs = [
   },
   {
     q: "How do backup and restore work?",
-    a: "System, then Backups, creates and downloads a backup. A restore requires MFA confirmation. Backups live on the console's Docker volume, so download a copy off the server.",
+    a: "System, then Backups, creates and downloads a backup. Every new backup is restored into a temporary database to verify it, and passphrase encryption is optional. Configure an S3-compatible bucket, automatic schedule and retention under Configuration, then Backup storage. Restores require MFA confirmation.",
   },
   {
     q: "What is the licence?",

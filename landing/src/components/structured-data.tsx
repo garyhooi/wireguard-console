@@ -38,7 +38,7 @@ export function StructuredData() {
       "DNS filtering with AdGuard Home",
       "IPv4 and IPv6 blocking before NAT",
       "Passkey and authenticator-app MFA",
-      "Audit log, usage CSV export and MFA-gated backups",
+      "Audit log, usage CSV export and MFA-gated, restore-verified backups with optional S3, automatic schedules and retention",
     ],
     sameAs: [siteConfig.repo],
   };
