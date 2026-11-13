@@ -61,7 +61,7 @@ A self-hosted web console for issuing, monitoring, and revoking company WireGuar
 
 - **Admins** (invited, mandatory MFA — passkey or authenticator app) manage everything from the web UI
 - **VPN users** claim their own peer config via an emailed invite link, tagged with an optional department
-- **Distributed nodes** — add VPN exit machines in any region in ~2 minutes
+- **Distributed nodes** — add exit nodes in any region in ~2 minutes
 - **DNS filtering** — global and per-user domain blocking (AdGuard) with reusable domain groups and a branded block page (HTTPS block pages need the console certificate installed once per device)
 - **IP blocking** — drop IPv4/IPv6 addresses and CIDR ranges for VPN peers, globally or per-user, with reusable IP groups (enforced server-side before NAT); blocked-IP attempts appear in Statistics and Web Activity
 - **Web activity** — per-user browsing history, traffic charts and usage reports (CSV export)
@@ -69,13 +69,21 @@ A self-hosted web console for issuing, monitoring, and revoking company WireGuar
 
 ## Quick start
 
-Requires: Ubuntu 22.04+, Docker (installed automatically), and either a **domain** (recommended) or a public IP.
+Requires:
+
+- **OS:** Ubuntu 22.04+ or Debian 12+
+- **Docker:** Engine with the Compose plugin (installed automatically)
+- **systemd:** used for the stack, firewall boot rules and service management
+- **Address:** a **domain** (recommended) or a public IP
+- **Ports:** 80/tcp, 443/tcp and 51820/udp open on the host and any cloud firewall
+
+The one-command installer supports both Ubuntu 22.04+ and Debian 12+. Exit nodes can also run either distribution.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/garyhooi/wireguard-console/main/install.sh | sudo bash
 ```
 
-This installs Docker, WireGuard tools and the stack, provisions AdGuard Home, opens the firewall on whichever manager is active (ufw, firewalld, or a bare iptables ruleset), and **asks you for your first `super_admin` email, then prints the auto-generated password at the end** — save them, log in, change the password and set up MFA (a passkey or an authenticator app). (A fresh database is detected from the Postgres data volume, so re-running after a reset that wiped Docker data prompts for the email again and prints new credentials instead of silently reusing stale ones.)
+This installs Docker, WireGuard tools and the stack on Ubuntu or Debian, provisions AdGuard Home, opens the firewall on whichever manager is active (ufw, firewalld, or a bare iptables ruleset), and **asks you for your first `super_admin` email, then prints the auto-generated password at the end** — save them, log in, change the password and set up MFA (a passkey or an authenticator app). (A fresh database is detected from the Postgres data volume, so re-running after a reset that wiped Docker data prompts for the email again and prints new credentials instead of silently reusing stale ones.)
 
 **No domain?** Enter the server's public IP when prompted. HTTPS then uses Caddy's internal CA — your browser shows a one-time self-signed warning (the connection is still encrypted). For a trusted certificate without buying a domain, use `CONSOLE_DOMAIN=<your-ip>.sslip.io bash install.sh`.
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
-# WireGuard Console — one-command installer for Ubuntu.
+# WireGuard Console — one-command installer for Ubuntu 22.04+ and Debian 12+.
 #
 #   curl -fsSL https://raw.githubusercontent.com/garyhooi/wireguard-console/main/install.sh | sudo bash
 #
-# What this does, in order: verifies you're on a supported Ubuntu release,
+# What this does, in order: verifies you're on a supported Ubuntu or Debian release,
 # installs Docker if it isn't present, installs WireGuard's kernel tools,
 # frees port 53 from systemd-resolved (needed by the built-in DNS filter),
 # enables IP forwarding (required for WireGuard routing), clones/updates
@@ -32,6 +32,7 @@ REPO="${WGCONSOLE_REPO:-garyhooi/wireguard-console}"
 BRANCH="${WGCONSOLE_BRANCH:-main}"
 INSTALL_DIR="${WGCONSOLE_DIR:-/opt/wireguard-console}"
 MIN_UBUNTU_VERSION="22.04"
+MIN_DEBIAN_VERSION="12"
 WG_DEFAULT_PORT="51820"
 
 # ---------------------------------------------------------------------------
@@ -71,7 +72,7 @@ is_cloudflare_ip() {
 # usage: domain_is_cloudflare_proxied <domain> → 0 if its public A records
 # resolve inside Cloudflare's ranges (i.e. Cloudflare is in front of it).
 # Unresolvable/AAAA-only domains return 1 (fail closed to domain mode).
-# Resolution order: getent (glibc, the Ubuntu target) → dig → host →
+# Resolution order: getent (glibc, the apt targets) → dig → host →
 # nslookup → python3, so it also works on macOS for local testing.
 domain_is_cloudflare_proxied() {
   local domain="$1" ips ip found=1
@@ -199,22 +200,31 @@ if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Must be Ubuntu, warn (don't hard-fail) if older than MIN_UBUNTU_VERSION
+# 2. Must be Ubuntu or Debian, warn (don't hard-fail) if older than the
+#    supported baseline for that distribution.
 # ---------------------------------------------------------------------------
-[[ -f /etc/os-release ]] || error "Cannot detect the OS (no /etc/os-release). This installer supports Ubuntu only."
+[[ -f /etc/os-release ]] || error "Cannot detect the OS (no /etc/os-release). This installer supports Ubuntu 22.04+ and Debian 12+."
 # shellcheck disable=SC1091
 . /etc/os-release
 
-if [[ "${ID:-}" != "ubuntu" ]]; then
-  error "This installer supports Ubuntu only (detected: ${PRETTY_NAME:-unknown}). For other distros, follow the manual setup in the README instead."
-fi
+case "${ID:-}" in
+  ubuntu)
+    MIN_VERSION="${MIN_UBUNTU_VERSION}"
+    ;;
+  debian)
+    MIN_VERSION="${MIN_DEBIAN_VERSION}"
+    ;;
+  *)
+    error "This installer supports Ubuntu 22.04+ and Debian 12+ (detected: ${PRETTY_NAME:-unknown}). For other distributions, follow the manual setup in the README instead."
+    ;;
+esac
 
 info "Detected ${PRETTY_NAME}"
 
 if command -v dpkg >/dev/null 2>&1; then
-  if ! dpkg --compare-versions "${VERSION_ID:-0}" ge "${MIN_UBUNTU_VERSION}"; then
-    warn "Ubuntu ${VERSION_ID:-unknown} is older than the tested baseline (${MIN_UBUNTU_VERSION} LTS+)."
-    warn "Continuing anyway, but if Docker or WireGuard steps fail below, upgrading Ubuntu is the first thing to try."
+  if ! dpkg --compare-versions "${VERSION_ID:-0}" ge "${MIN_VERSION}"; then
+    warn "${PRETTY_NAME:-unknown} is older than the supported baseline (${MIN_VERSION}+)."
+    warn "Continuing anyway, but if Docker or WireGuard steps fail below, upgrading the OS is the first thing to try."
   fi
 fi
 
@@ -242,13 +252,17 @@ apt-get install -y -qq wireguard wireguard-tools git openssl curl >/dev/null
 
 if ! modprobe wireguard 2>/dev/null; then
   warn "Could not load the WireGuard kernel module directly."
-  warn "On older LTS kernels this usually means you need the HWE kernel: apt install --install-recommends linux-generic-hwe-\$(lsb_release -rs)"
+  if [[ "${ID}" == "ubuntu" ]]; then
+    warn "On older LTS kernels this usually means you need the HWE kernel: apt install --install-recommends linux-generic-hwe-\$(lsb_release -rs)"
+  else
+    warn "On Debian, install the current kernel package (apt install linux-image-amd64) and reboot."
+  fi
   warn "Continuing — the wg-helper container installs wireguard-tools too and may still work if the module loads another way."
 fi
 
 # ---------------------------------------------------------------------------
 # 5. Free port 53 from systemd-resolved's stub listener
-#    (AdGuard Home needs it — this is the single most common snag on Ubuntu)
+#    (AdGuard Home needs it — the most common snag on Ubuntu and Debian)
 # ---------------------------------------------------------------------------
 if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
   info "Freeing port 53 from systemd-resolved's stub listener..."

@@ -47,3 +47,6 @@ backend/aghenc.exe
 
 # Local security audit artifacts
 .security-audit/
+
+# Local package store created by pnpm in this checkout
+.pnpm-store/
