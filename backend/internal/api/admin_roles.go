@@ -141,8 +141,7 @@ func CreateAdminRole(store *Store) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Role name is too long (40 characters after normalization)")
 			return
 		}
-		switch slug {
-		case "super_admin", "admin", "auditor":
+		if slug == "super_admin" {
 			writeError(w, http.StatusBadRequest, "That role name is reserved")
 			return
 		}
@@ -299,8 +298,8 @@ func DeleteAdminRole(store *Store) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "Failed to load role")
 			return
 		}
-		if cur.IsSystem {
-			writeError(w, http.StatusBadRequest, "System roles cannot be deleted")
+		if cur.IsSystem || slug == "super_admin" {
+			writeError(w, http.StatusBadRequest, "The super_admin role cannot be deleted")
 			return
 		}
 		if cur.AdminCount > 0 {

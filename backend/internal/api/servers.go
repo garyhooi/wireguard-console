@@ -543,7 +543,8 @@ func InviteAdmin(store *Store) http.HandlerFunc {
 			return
 		}
 
-		if req.Role == "" {
+		roleWasDefault := req.Role == ""
+		if roleWasDefault {
 			req.Role = "admin"
 		}
 		ctx := context.Background()
@@ -551,6 +552,21 @@ func InviteAdmin(store *Store) http.HandlerFunc {
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to check role")
 			return
+		}
+		if !exists && roleWasDefault {
+			// The seeded Admin role can be deleted now. Fall back to the first
+			// remaining non-super role instead of rejecting an invite that did
+			// not explicitly choose a role.
+			var fallback string
+			if err := store.pool.QueryRow(ctx, `
+				SELECT slug FROM admin_roles
+				WHERE slug <> 'super_admin'
+				ORDER BY lower(name)
+				LIMIT 1
+			`).Scan(&fallback); err == nil {
+				req.Role = fallback
+				exists = true
+			}
 		}
 		if !exists {
 			writeError(w, http.StatusBadRequest, "Unknown role")

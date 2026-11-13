@@ -39,9 +39,10 @@ const (
 	MaintenanceRun = "maintenance.run"
 )
 
-// Permission is one selectable capability. Reserved capabilities are only
-// available to the super_admin wildcard; custom roles and the editable system
-// roles cannot receive them.
+// Permission is one selectable capability. Reserved marks sensitive
+// capabilities (access control, security policy and maintenance); they are
+// highlighted in the role editor but can be granted to custom roles. Only the
+// super_admin wildcard is not assignable.
 type Permission struct {
 	Key         string `json:"key"`
 	Label       string `json:"label"`
@@ -149,7 +150,8 @@ func PermissionByKey(key string) (Permission, bool) {
 	return p, ok
 }
 
-// IsReserved reports whether key is a super-admin-only capability.
+// IsReserved reports whether key is a sensitive capability highlighted by
+// the role editor. It is not an assignment restriction.
 func IsReserved(key string) bool { return reserved[key] }
 
 // All returns a copy of the permission catalogue in display order.
@@ -202,8 +204,10 @@ func HasAny(granted []string, needed ...string) bool {
 	return false
 }
 
-// Validate checks a policy for syntax and catalogue membership. For a
-// non-super role, reserved keys and "*" are rejected.
+// Validate checks a policy for syntax and catalogue membership. When
+// allowReserved is false, reserved keys and "*" are rejected. When true,
+// reserved keys are allowed; Canonical separately rejects "*" so a custom
+// role never becomes a super_admin wildcard.
 func Validate(policy []string, allowReserved bool) error {
 	seen := map[string]bool{}
 	for _, key := range policy {
@@ -233,6 +237,7 @@ func Validate(policy []string, allowReserved bool) error {
 // "manage" while hiding the page that hosts the action.
 var implied = map[string][]string{
 	NetworkManage:   {NetworkView},
+	AdminsManage:    {AdminsView},
 	NetworkSecrets:  {NetworkView},
 	DirectoryManage: {DirectoryView},
 	RulesManage:     {RulesView},
@@ -244,9 +249,15 @@ var implied = map[string][]string{
 }
 
 // Canonical de-duplicates, validates, adds implied read capabilities and
-// orders a policy for storage.
+// orders a policy for storage. Custom roles may receive reserved (sensitive)
+// capabilities, but never the "*" wildcard reserved for super_admin.
 func Canonical(policy []string) ([]string, error) {
-	if err := Validate(policy, false); err != nil {
+	for _, key := range policy {
+		if key == "*" {
+			return nil, fmt.Errorf("wildcard permission is reserved for super_admin")
+		}
+	}
+	if err := Validate(policy, true); err != nil {
 		return nil, err
 	}
 	seen := map[string]bool{}

@@ -2254,8 +2254,17 @@ func TestEndToEnd(t *testing.T) {
 
 	// ---- Backups: create / download / restore require the actor's MFA ----
 	// Create a backup (no gate — making one is safe), then list it.
-	createResp, _ := api(t, "POST", "/api/backup/create", token, nil)
+	createResp, createOut := api(t, "POST", "/api/backup/create", token, nil)
 	expectStatus(t, createResp, 200, "POST /api/backup/create")
+	if verified, _ := createOut["verified"].(bool); !verified {
+		t.Fatalf("backup create verified = %v, want true (%v)", createOut["verified"], createOut)
+	}
+	if encrypted, _ := createOut["encrypted"].(bool); encrypted {
+		t.Fatalf("plain backup unexpectedly encrypted: %v", createOut)
+	}
+	if size, _ := createOut["size"].(float64); size <= 0 {
+		t.Fatalf("backup create size = %v, want > 0", createOut["size"])
+	}
 	listRaw := rawGet(t, baseURL+"/api/backup/list", token)
 	var bkList map[string]interface{}
 	json.Unmarshal([]byte(listRaw), &bkList)
@@ -2264,6 +2273,20 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatalf("no backups after create: %s", listRaw)
 	}
 	bkName, _ := bkArr[0].(string)
+	details, _ := bkList["details"].(map[string]interface{})
+	detail, _ := details[bkName].(map[string]interface{})
+	if verified, _ := detail["verified"].(bool); !verified {
+		t.Fatalf("backup list detail verified = %v, want true (%v)", detail["verified"], detail)
+	}
+	if known, _ := detail["verified_known"].(bool); !known {
+		t.Fatalf("backup list detail verified_known = %v, want true (%v)", detail["verified_known"], detail)
+	}
+	if size, _ := detail["size"].(float64); size <= 0 {
+		t.Fatalf("backup list detail size = %v, want > 0", detail["size"])
+	}
+	if enabled, _ := bkList["backup_passphrase_enabled"].(bool); enabled {
+		t.Fatalf("backup passphrase enabled with default config")
+	}
 
 	// Download with a bad code is refused.
 	badDL := rawPost(t, baseURL+"/api/backup/download", token, map[string]string{
@@ -2303,6 +2326,53 @@ func TestEndToEnd(t *testing.T) {
 	if goodUpload.status != 200 {
 		t.Fatalf("restore-upload: status %d, want 200 (body %s)", goodUpload.status, goodUpload.body)
 	}
+
+	// ---- Backup passphrase: automatic encryption + restore verification ----
+	passphrase := "correct horse battery staple"
+	passResp, _ := api(t, "PATCH", "/api/config/backup-passphrase", token, map[string]interface{}{
+		"enabled": true, "passphrase": passphrase, "code": actorCode(),
+	})
+	expectStatus(t, passResp, 200, "PATCH /api/config/backup-passphrase (enable)")
+	encCreateResp, encOut := api(t, "POST", "/api/backup/create", token, nil)
+	expectStatus(t, encCreateResp, 200, "POST /api/backup/create (encrypted)")
+	encVerified, _ := encOut["verified"].(bool)
+	encEncrypted, _ := encOut["encrypted"].(bool)
+	if !encVerified || !encEncrypted {
+		t.Fatalf("encrypted backup verified=%v encrypted=%v (%v)", encVerified, encEncrypted, encOut)
+	}
+	encName, _ := encOut["filename"].(string)
+	if !strings.HasSuffix(encName, ".sql.gz.enc") {
+		t.Fatalf("encrypted backup filename = %q, want .sql.gz.enc", encName)
+	}
+	encDL := rawPost(t, baseURL+"/api/backup/download", token, map[string]string{
+		"filename": encName, "code": actorCode(),
+	})
+	if encDL.status != 200 {
+		t.Fatalf("encrypted download: status %d, want 200", encDL.status)
+	}
+	if encDL.ctype != "application/octet-stream" || len(encDL.body) < 100 {
+		t.Fatalf("encrypted download body/type wrong: type=%q len=%d", encDL.ctype, len(encDL.body))
+	}
+	encRestore, _ := api(t, "POST", "/api/backup/restore", token, map[string]string{
+		"filename": encName, "code": actorCode(),
+	})
+	expectStatus(t, encRestore, 200, "POST /api/backup/restore (encrypted)")
+	disableResp, _ := api(t, "PATCH", "/api/config/backup-passphrase", token, map[string]interface{}{
+		"enabled": false, "code": actorCode(),
+	})
+	expectStatus(t, disableResp, 200, "PATCH /api/config/backup-passphrase (disable)")
+	// The retired passphrase is retained encrypted so the archive written
+	// before disabling can still be restored.
+	encRestoreAfterDisable, _ := api(t, "POST", "/api/backup/restore", token, map[string]string{
+		"filename": encName, "code": actorCode(),
+	})
+	expectStatus(t, encRestoreAfterDisable, 200, "POST /api/backup/restore (encrypted after disable)")
+	// That restore reinstated the config captured in the archive; turn
+	// encryption off again for the rest of the suite.
+	disableAgain, _ := api(t, "PATCH", "/api/config/backup-passphrase", token, map[string]interface{}{
+		"enabled": false, "code": actorCode(),
+	})
+	expectStatus(t, disableAgain, 200, "PATCH /api/config/backup-passphrase (disable after restore)")
 
 	// ---- Audit-log housekeeping (super_admin only) ----
 	// Many actions above logged audit rows. A purge with a huge cutoff

@@ -26,6 +26,7 @@ import {
 
 interface Props {
   gateMFA: (label: string, run: (code: string) => Promise<void>) => void
+  canManage: boolean
 }
 
 function permissionSummary(permissions: string[]): string {
@@ -34,7 +35,7 @@ function permissionSummary(permissions: string[]): string {
   return `${permissions.length} capabilit${permissions.length === 1 ? 'y' : 'ies'}`
 }
 
-export function AdminRolesTab({ gateMFA }: Props) {
+export function AdminRolesTab({ gateMFA, canManage }: Props) {
   const queryClient = useQueryClient()
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
@@ -98,7 +99,7 @@ export function AdminRolesTab({ gateMFA }: Props) {
   }
 
   const toggleGroup = (group: PermissionGroup) => {
-    const selectable = group.permissions.filter((p) => !p.reserved).map((p) => p.key)
+    const selectable = group.permissions.map((p) => p.key)
     const all = selectable.length > 0 && selectable.every((key) => permissions.includes(key))
     setPermissions((current) => all
       ? current.filter((key) => !selectable.includes(key))
@@ -126,7 +127,7 @@ export function AdminRolesTab({ gateMFA }: Props) {
     if (defaults) setPermissions(defaults.filter((p) => p !== '*'))
   }
 
-  const locked = editing?.slug === 'super_admin'
+  const locked = editing?.slug === 'super_admin' || !canManage
   const groups = catalog.data?.groups || []
 
   return (
@@ -139,10 +140,12 @@ export function AdminRolesTab({ gateMFA }: Props) {
             Admin or Auditor role updates every admin assigned to it immediately.
           </p>
         </div>
-        <PrimaryButton onClick={openCreate}>
-          <IconPlus size={16} stroke={1.6} aria-hidden="true" />
-          New role
-        </PrimaryButton>
+        {canManage && (
+          <PrimaryButton onClick={openCreate}>
+            <IconPlus size={16} stroke={1.6} aria-hidden="true" />
+            New role
+          </PrimaryButton>
+        )}
       </div>
 
       {error && <p className="mt-4 text-sm text-red-400">{error}</p>}
@@ -189,12 +192,12 @@ export function AdminRolesTab({ gateMFA }: Props) {
                       <div className="flex flex-wrap justify-end gap-1">
                         <button
                           onClick={() => openEdit(role)}
-                          aria-label={`Edit role ${role.name}`}
+                          aria-label={`${canManage ? 'Edit' : 'View'} role ${role.name}`}
                           className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-sm text-zinc-300 transition-colors hover:bg-zinc-700/50 hover:text-white"
                         >
-                          <IconPencil size={13} stroke={1.6} aria-hidden="true" /> {rowLocked ? 'View' : 'Edit'}
+                          <IconPencil size={13} stroke={1.6} aria-hidden="true" /> {rowLocked || !canManage ? 'View' : 'Edit'}
                         </button>
-                        {!role.is_system && (
+                        {canManage && !role.is_system && (
                           <button
                             disabled={role.admin_count > 0}
                             title={role.admin_count > 0 ? 'Reassign the admins using this role first' : 'Delete role'}
@@ -217,11 +220,11 @@ export function AdminRolesTab({ gateMFA }: Props) {
       </div>
 
       <p className="mt-3 text-xs leading-relaxed text-zinc-500">
-        Reserved capabilities (access control, security policy and maintenance) remain
-        super-admin-only. Custom roles can use every other capability.
+        Sensitive capabilities (access control, security policy and maintenance) can be granted
+        to custom roles. Only the super_admin wildcard is non-assignable and locked.
       </p>
 
-      <Modal open={formOpen} onClose={() => setFormOpen(false)} title={editing ? (locked ? 'Super admin policy' : `Edit role: ${editing.name}`) : 'New role'} className="max-w-3xl">
+      <Modal open={formOpen} onClose={() => setFormOpen(false)} title={editing ? (editing.slug === 'super_admin' ? 'Super admin policy' : `${canManage ? 'Edit' : 'View'} role: ${editing.name}`) : 'New role'} className="max-w-3xl">
         <div className="space-y-5">
           {locked && (
             <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-sm text-amber-300">
@@ -231,11 +234,11 @@ export function AdminRolesTab({ gateMFA }: Props) {
           <div className="grid gap-4 sm:grid-cols-2">
             <div>
               <label className={labelCls} htmlFor="role-name">Name</label>
-              <input id="role-name" className={inputCls} maxLength={80} disabled={Boolean(editing && editing.slug === 'super_admin')} value={name} onChange={(e) => setName(e.target.value)} placeholder="Network operator" />
+              <input id="role-name" className={inputCls} maxLength={80} disabled={locked} value={name} onChange={(e) => setName(e.target.value)} placeholder="Network operator" />
             </div>
             <div>
               <label className={labelCls} htmlFor="role-description">Description</label>
-              <input id="role-description" className={inputCls} maxLength={300} disabled={Boolean(editing && editing.slug === 'super_admin')} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Runs servers and peers, no access control" />
+              <input id="role-description" className={inputCls} maxLength={300} disabled={locked} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Runs servers and peers, no access control" />
             </div>
           </div>
 
@@ -244,7 +247,7 @@ export function AdminRolesTab({ gateMFA }: Props) {
               <h3 className="text-sm font-medium text-zinc-200">Permissions</h3>
               <p className="text-xs text-zinc-500">{permissions.includes('*') ? 'Full access' : `${permissions.length} selected`}</p>
             </div>
-            {editing?.is_system && editing.slug !== 'super_admin' && (
+            {canManage && editing && (editing.slug === 'admin' || editing.slug === 'auditor') && (
               <GhostButton type="button" onClick={resetDefaults} className="!px-3 !py-1.5 !text-xs">
                 <IconRefresh size={13} stroke={1.6} aria-hidden="true" /> Reset to defaults
               </GhostButton>
@@ -253,7 +256,7 @@ export function AdminRolesTab({ gateMFA }: Props) {
 
           <div className="space-y-4">
             {groups.map((group) => {
-              const selectable = group.permissions.filter((p) => !p.reserved)
+              const selectable = group.permissions
               const selected = selectable.filter((p) => permissions.includes(p.key))
               const all = selectable.length > 0 && selected.length === selectable.length
               return (
@@ -264,7 +267,7 @@ export function AdminRolesTab({ gateMFA }: Props) {
                       <input
                         type="checkbox"
                         className="h-3.5 w-3.5 accent-teal-500"
-                        checked={locked || all}
+                        checked={editing?.slug === 'super_admin' || all}
                         disabled={locked}
                         onChange={() => toggleGroup(group)}
                       />
@@ -273,16 +276,16 @@ export function AdminRolesTab({ gateMFA }: Props) {
                   </div>
                   <div className="grid gap-2 p-3 sm:grid-cols-2">
                     {group.permissions.map((permission) => (
-                      <label key={permission.key} className={`flex gap-2 rounded-md px-2 py-1.5 text-sm ${permission.reserved ? 'cursor-not-allowed opacity-50' : 'cursor-pointer hover:bg-zinc-800/50'}`}>
+                      <label key={permission.key} className="flex cursor-pointer gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-zinc-800/50">
                         <input
                           type="checkbox"
                           className="mt-0.5 h-4 w-4 shrink-0 accent-teal-500"
-                          checked={locked || permissions.includes(permission.key)}
-                          disabled={locked || permission.reserved}
+                          checked={editing?.slug === 'super_admin' || permissions.includes(permission.key)}
+                          disabled={locked}
                           onChange={() => togglePermission(permission.key)}
                         />
                         <span>
-                          <span className="block text-zinc-200">{permission.label}{permission.reserved ? ' (reserved)' : ''}</span>
+                          <span className="block text-zinc-200">{permission.label}{permission.reserved ? ' (sensitive)' : ''}</span>
                           <span className="block text-[11px] leading-relaxed text-zinc-500">{permission.description}</span>
                         </span>
                       </label>
@@ -295,7 +298,7 @@ export function AdminRolesTab({ gateMFA }: Props) {
 
           <div className="flex justify-end gap-3 border-t border-zinc-800 pt-4">
             <GhostButton type="button" onClick={() => setFormOpen(false)}>Cancel</GhostButton>
-            {!locked && (
+            {!locked && canManage && (
               <PrimaryButton type="button" disabled={saveMutation.isPending || !name.trim()} onClick={save}>
                 {saveMutation.isPending ? 'Saving…' : editing ? 'Save policy' : 'Create role'}
               </PrimaryButton>

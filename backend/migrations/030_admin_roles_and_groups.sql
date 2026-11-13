@@ -1,7 +1,7 @@
 -- Dynamic admin roles (permission policies) and organizational admin groups.
 -- The migration runner re-executes every file on startup, so everything here
--- is idempotent and the system-role seed uses ON CONFLICT DO NOTHING. Existing
--- edits to the admin/auditor roles are therefore preserved across upgrades.
+-- is idempotent. Only the break-glass super_admin is a locked system role;
+-- Admin/Auditor are seeded once by migration 033 and can be deleted.
 
 CREATE TABLE IF NOT EXISTS admin_roles (
     slug        TEXT PRIMARY KEY,
@@ -16,22 +16,12 @@ CREATE TABLE IF NOT EXISTS admin_roles (
 CREATE UNIQUE INDEX IF NOT EXISTS admin_roles_name_lower_key
     ON admin_roles (lower(name));
 
+-- super_admin is always present. Admin and Auditor are seeded exactly
+-- once by migration 033 using a durable marker, so deleting them stays
+-- deleted across restarts/migrations.
 INSERT INTO admin_roles (slug, name, description, permissions, is_system)
 VALUES
-    ('super_admin', 'Super admin', 'Full access to every console capability.', ARRAY['*']::TEXT[], TRUE),
-    ('admin', 'Admin', 'Day-to-day operations, without access-control or security-policy changes.', ARRAY[
-        'monitoring.view', 'activity.view', 'audit.view',
-        'network.view', 'network.manage', 'network.secrets',
-        'directory.view', 'directory.manage',
-        'rules.view', 'rules.manage',
-        'system.view', 'system.manage',
-        'backups.view', 'backups.manage'
-    ]::TEXT[], TRUE),
-    ('auditor', 'Auditor', 'Read-only visibility across the console.', ARRAY[
-        'monitoring.view', 'activity.view', 'audit.view',
-        'network.view', 'directory.view', 'rules.view',
-        'system.view', 'backups.view'
-    ]::TEXT[], TRUE)
+    ('super_admin', 'Super admin', 'Full access to every console capability.', ARRAY['*']::TEXT[], TRUE)
 ON CONFLICT (slug) DO NOTHING;
 
 -- The old column check limited admins.role to three literals. Replace it with

@@ -45,6 +45,8 @@ const TABS: { id: ConfigTab; label: string; icon: React.ComponentType<{ size?: n
 export function ConfigPage() {
   const [tab, setTab] = useState<ConfigTab>('smtp')
   const canSystemWrite = useCan('system.manage')
+  const canSecurityWrite = useCan('security.manage')
+  const readOnly = tab === 'security' ? !canSecurityWrite : !canSystemWrite
 
   return (
     <div>
@@ -53,8 +55,10 @@ export function ConfigPage() {
         description="Outbound email (SMTP), the templates the console uses for invites, the display timezone for reports and logs, and security policy."
       />
 
-      {!canSystemWrite && (
-        <p className="mb-4 text-sm text-zinc-500">Read-only access: an admin with the system.manage capability can change these settings.</p>
+      {readOnly && (
+        <p className="mb-4 text-sm text-zinc-500">
+          Read-only access: an admin with the {tab === 'security' ? 'security.manage' : 'system.manage'} capability can change these settings.
+        </p>
       )}
 
       {/* Tab bar */}
@@ -544,13 +548,15 @@ function SecuritySettings() {
   const [error, setError] = useState('')
   const [pendingMFA, setPendingMFA] = useState<null | ((code: string) => Promise<void>)>(null)
 
-  const { data: me } = useQuery<{ role: string; passkey_available?: boolean; passkey_count?: number }>({
+  const { data: me } = useQuery<{ role: string; permissions?: string[]; passkey_available?: boolean; passkey_count?: number }>({
     queryKey: ['me'],
     queryFn: async () => {
-      return apiJson<{ role: string; passkey_available?: boolean; passkey_count?: number }>('/api/admins/me')
+      return apiJson<{ role: string; permissions?: string[]; passkey_available?: boolean; passkey_count?: number }>('/api/admins/me')
     },
   })
-  const isSuperAdmin = me?.role === 'super_admin'
+  const canManageSecurity =
+    me?.role === 'super_admin' ||
+    Boolean(me?.permissions?.includes('security.manage'))
   // A passkey can only authorize a step-up when this admin has one enrolled.
   const passkeyStepUpAvailable = Boolean(me?.passkey_available && (me?.passkey_count ?? 0) > 0)
 
@@ -624,7 +630,7 @@ function SecuritySettings() {
               </span>
             </div>
 
-            {isSuperAdmin ? (
+            {canManageSecurity ? (
               <div>
                 <label htmlFor="stepUpMinutes" className={labelCls}>
                   Minutes to trust after an MFA check
@@ -654,12 +660,12 @@ function SecuritySettings() {
                   </PrimaryButton>
                 </div>
                 <p className="mt-1.5 text-xs text-zinc-600">
-                  Minutes, 0–1440 (a 24h cap). Applied to every admin's session — super_admin only.
+                  Minutes, 0–1440 (a 24h cap). Applied to every admin's session — requires security.manage.
                 </p>
               </div>
             ) : (
               <p className="text-xs text-amber-400/90">
-                Only a super admin can change the MFA step-up window.
+                Only an admin with the security.manage capability can change the MFA step-up window.
               </p>
             )}
           </div>
@@ -667,15 +673,19 @@ function SecuritySettings() {
       </div>
 
       <MFAPolicySettings
-        isSuperAdmin={isSuperAdmin}
+        isSuperAdmin={canManageSecurity}
         passkeyStepUpAvailable={passkeyStepUpAvailable}
       />
       <LoginLockoutSettings
-        isSuperAdmin={isSuperAdmin}
+        isSuperAdmin={canManageSecurity}
         passkeyStepUpAvailable={passkeyStepUpAvailable}
       />
       <InviteExpirySettings
-        isSuperAdmin={isSuperAdmin}
+        isSuperAdmin={canManageSecurity}
+        passkeyStepUpAvailable={passkeyStepUpAvailable}
+      />
+      <BackupPassphraseSettings
+        isSuperAdmin={canManageSecurity}
         passkeyStepUpAvailable={passkeyStepUpAvailable}
       />
 
@@ -862,14 +872,14 @@ function MFAPolicySettings({
                   {saveMutation.isPending ? 'Saving…' : 'Save MFA policy'}
                 </PrimaryButton>
                 <p className="text-xs text-zinc-600">
-                  Applies to every admin; super_admin only. Security changes require a fresh MFA
+                  Applies to every admin; requires security.manage. Security changes require a fresh MFA
                   check.
                 </p>
               </div>
             </div>
           ) : (
             <p className="text-xs text-amber-400/90">
-              Only a super admin can change the MFA requirement policy.
+              Only an admin with the security.manage capability can change the MFA requirement policy.
             </p>
           )}
         </div>
@@ -1052,13 +1062,13 @@ function LoginLockoutSettings({
                   {saveMutation.isPending ? 'Saving…' : 'Save lockout policy'}
                 </PrimaryButton>
                 <p className="text-xs text-zinc-600">
-                  Attempts 1–20, windows 5–3600s (60 = 1 minute). Applies to new lockouts; super_admin only.
+                  Attempts 1–20, windows 5–3600s (60 = 1 minute). Applies to new lockouts; requires security.manage.
                 </p>
               </div>
             </div>
           ) : (
             <p className="text-xs text-amber-400/90">
-              Only a super admin can change the login lockout policy.
+              Only an admin with the security.manage capability can change the login lockout policy.
             </p>
           )}
         </div>
@@ -1232,13 +1242,13 @@ function InviteExpirySettings({
                   Save link expiry
                 </PrimaryButton>
                 <p className="text-xs text-zinc-600">
-                  1–720 hours (72 = 3 days). Applies to newly issued links; super_admin only.
+                  1–720 hours (72 = 3 days). Applies to newly issued links; requires security.manage.
                 </p>
               </div>
             </div>
           ) : (
             <p className="text-xs text-amber-400/90">
-              Only a super admin can change link expiry.
+              Only an admin with the security.manage capability can change link expiry.
             </p>
           )}
         </div>
@@ -1249,6 +1259,234 @@ function InviteExpirySettings({
         onClose={() => setPendingMFA(null)}
         title="Confirm security change"
         description="Confirm this link-lifetime change with your passkey or an authenticator code."
+        onSubmit={pendingMFA}
+        passkeyAvailable={passkeyStepUpAvailable}
+      />
+    </div>
+  )
+}
+
+// Configuration → Security: passphrase encryption for new backups.
+// The passphrase is write-only in the UI; the API returns only whether one is
+// configured. Previous passphrases are retained encrypted so changing the
+// setting does not strand older archives.
+interface BackupPassphraseConfig {
+  enabled: boolean
+  configured: boolean
+  history_count: number
+}
+
+function BackupPassphraseSettings({
+  isSuperAdmin,
+  passkeyStepUpAvailable,
+}: {
+  isSuperAdmin: boolean
+  passkeyStepUpAvailable: boolean
+}) {
+  const queryClient = useQueryClient()
+  const [enabled, setEnabled] = useState(false)
+  const [passphrase, setPassphrase] = useState('')
+  const [confirmPassphrase, setConfirmPassphrase] = useState('')
+  const [message, setMessage] = useState('')
+  const [error, setError] = useState('')
+  const [pendingMFA, setPendingMFA] = useState<null | ((code: string) => Promise<void>)>(null)
+
+  const { data: cfg, isLoading, isError } = useQuery<BackupPassphraseConfig>({
+    queryKey: ['backup-passphrase-config'],
+    queryFn: async () => apiJson<BackupPassphraseConfig>('/api/config/backup-passphrase'),
+  })
+
+  useEffect(() => {
+    if (!cfg) return
+    setEnabled(cfg.enabled)
+  }, [cfg])
+
+  const saveMutation = useMutation({
+    mutationFn: async (vars: { enabled: boolean; passphrase?: string; code: string }) => {
+      return apiJson('/api/config/backup-passphrase', {
+        method: 'PATCH',
+        body: vars,
+      })
+    },
+    onSuccess: (_data, vars) => {
+      setPassphrase('')
+      setConfirmPassphrase('')
+      setMessage(
+        vars.enabled
+          ? 'Saved — new backups will be encrypted with the backup passphrase and restore-verified.'
+          : 'Saved — new backups will be unencrypted. Existing encrypted backups can still be restored with the retained passphrase.',
+      )
+      setError('')
+      queryClient.invalidateQueries({ queryKey: ['backup-passphrase-config'] })
+      queryClient.invalidateQueries({ queryKey: ['backups'] })
+    },
+    onError: (e: Error) => {
+      setError(e.message)
+      setMessage('')
+    },
+  })
+
+  const wantsNewPassphrase = passphrase.trim() !== ''
+  const passphraseLength = passphrase.length
+  const passphraseValid = !wantsNewPassphrase || (passphraseLength >= 12 && passphraseLength <= 256)
+  const confirmationValid = !wantsNewPassphrase || passphrase === confirmPassphrase
+  const needNewPassphrase = enabled && !cfg?.configured && !wantsNewPassphrase
+  const dirty = !!cfg && (enabled !== cfg.enabled || wantsNewPassphrase)
+  const canSave = dirty && passphraseValid && confirmationValid && !needNewPassphrase && (!wantsNewPassphrase || enabled)
+
+  return (
+    <div className="border border-zinc-800 rounded-lg bg-zinc-900/50 p-6">
+      <div className="flex items-center gap-2 mb-1">
+        <IconShieldLock size={18} stroke={1.6} className="text-zinc-400" aria-hidden="true" />
+        <h2 className="text-base font-semibold text-zinc-100">Backup encryption</h2>
+      </div>
+      <p className="text-sm text-zinc-400 mb-4">
+        Encrypt every new database backup with a passphrase. The file alone is not enough to read
+        the dump without the passphrase, and new backups are automatically restored into a
+        temporary database to verify they can be recovered.
+      </p>
+
+      {error && <p className="text-red-400 text-sm mb-3">{error}</p>}
+      {message && <p className="text-teal-400 text-sm mb-3">{message}</p>}
+
+      {isLoading ? (
+        <p className="text-zinc-400 text-sm">Loading…</p>
+      ) : isError ? (
+        <p className="text-red-400 text-sm">Failed to load the backup encryption setting.</p>
+      ) : (
+        <div className="space-y-5">
+          <div className="flex items-baseline justify-between gap-3 text-sm">
+            <span className="text-zinc-500">Currently</span>
+            <span className="text-zinc-100">
+              {cfg?.enabled ? 'Enabled · passphrase set' : 'Disabled · plain backups'}
+            </span>
+          </div>
+          {!cfg?.enabled && (cfg?.history_count ?? 0) > 0 && (
+            <p className="text-xs text-zinc-500">
+              {cfg?.history_count} previous passphrase{(cfg?.history_count ?? 0) === 1 ? '' : 's'} retained encrypted so older backups remain restorable.
+            </p>
+          )}
+
+          {isSuperAdmin ? (
+            <div className="space-y-4">
+              <label className="flex cursor-pointer items-start gap-3 rounded-md border border-zinc-800 bg-zinc-950/30 p-3">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 h-4 w-4 accent-teal-500"
+                  checked={enabled}
+                  onChange={(e) => {
+                    setEnabled(e.target.checked)
+                    if (!e.target.checked) {
+                      setPassphrase('')
+                      setConfirmPassphrase('')
+                    }
+                  }}
+                />
+                <span>
+                  <span className="block text-sm text-zinc-200">Encrypt new backups with a passphrase</span>
+                  <span className="block text-xs leading-relaxed text-zinc-500">
+                    Applies to every backup created from now on, regardless of which admin clicks
+                    Create backup.
+                  </span>
+                </span>
+              </label>
+
+              {enabled && (
+                <div className="space-y-3">
+                  <div>
+                    <label htmlFor="backupPassphrase" className={labelCls}>
+                      {cfg?.configured ? 'New backup passphrase (optional)' : 'Backup passphrase'}
+                    </label>
+                    <input
+                      id="backupPassphrase"
+                      type="password"
+                      autoComplete="new-password"
+                      className={inputCls}
+                      value={passphrase}
+                      onChange={(e) => setPassphrase(e.target.value)}
+                      placeholder={cfg?.configured ? 'Leave blank to keep the current passphrase' : 'At least 12 characters'}
+                    />
+                  </div>
+                  {wantsNewPassphrase && (
+                    <div>
+                      <label htmlFor="backupPassphraseConfirm" className={labelCls}>
+                        Confirm new passphrase
+                      </label>
+                      <input
+                        id="backupPassphraseConfirm"
+                        type="password"
+                        autoComplete="new-password"
+                        className={inputCls}
+                        value={confirmPassphrase}
+                        onChange={(e) => setConfirmPassphrase(e.target.value)}
+                        placeholder="Repeat the passphrase"
+                      />
+                    </div>
+                  )}
+                  <p className="text-xs leading-relaxed text-zinc-600">
+                    12–256 characters. Keep it somewhere safe: if both this server and its database
+                    are lost, an encrypted backup can only be opened with this passphrase.
+                  </p>
+                  {cfg?.configured && (
+                    <p className="text-xs leading-relaxed text-amber-400/90">
+                      Changing the passphrase keeps older backups restorable by retaining up to
+                      10 previous passphrases encrypted on this server.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center gap-3">
+                <PrimaryButton
+                  onClick={() => {
+                    if (!canSave) return
+                    setPendingMFA(
+                      () => async (code: string) => {
+                        await saveMutation.mutateAsync({
+                          enabled,
+                          passphrase: wantsNewPassphrase ? passphrase : undefined,
+                          code,
+                        })
+                      },
+                    )
+                  }}
+                  disabled={!canSave}
+                >
+                  {saveMutation.isPending ? 'Saving…' : 'Save backup encryption'}
+                </PrimaryButton>
+                <p className="text-xs text-zinc-600">
+                  Applies to new backups; requires security.manage. Security changes require a fresh MFA check.
+                </p>
+              </div>
+              {needNewPassphrase && (
+                <p className="text-xs text-amber-400/90">
+                  Set a passphrase before enabling encryption.
+                </p>
+              )}
+              {wantsNewPassphrase && !passphraseValid && (
+                <p className="text-xs text-amber-400/90">
+                  The passphrase must be 12–256 characters.
+                </p>
+              )}
+              {wantsNewPassphrase && passphraseValid && !confirmationValid && (
+                <p className="text-xs text-amber-400/90">
+                  The passphrase confirmation does not match.
+                </p>
+              )}
+            </div>
+          ) : (
+            <p className="text-xs text-amber-400/90">
+              Only an admin with the security.manage capability can change backup encryption.
+            </p>
+          )}
+        </div>
+      )}
+
+      <ConfirmMFA
+        open={pendingMFA !== null}
+        onClose={() => setPendingMFA(null)}
+        title="Confirm security change"
+        description="Confirm this backup encryption change with your passkey or an authenticator code. Security settings always require a fresh check, even when a step-up window is configured."
         onSubmit={pendingMFA}
         passkeyAvailable={passkeyStepUpAvailable}
       />

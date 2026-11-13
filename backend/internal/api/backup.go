@@ -20,8 +20,8 @@ import (
 // migrations. A backup can predate the running binary — most importantly the
 // pre-MFA dumps have no pending_kind / webauthn_* schema — so the live process
 // must upgrade the restored database before serving another request.
-func restoreAndUpgrade(svc *backup.BackupService, store *Store, backupPath string) error {
-	if err := svc.RestoreBackup(backupPath); err != nil {
+func restoreAndUpgrade(svc *backup.BackupService, store *Store, backupPath string, passphrases []string) error {
+	if err := svc.RestoreBackup(backupPath, passphrases); err != nil {
 		return err
 	}
 	if err := db.RunMigrationsFor(store.pool); err != nil {
@@ -39,24 +39,67 @@ func backupDataDir() string {
 	return "/var/backups/wgconsole"
 }
 
+// backupRestorePassphrases loads stored passphrases only when the archive is
+// actually encrypted. A plain backup must remain restorable even if the
+// encryption setting is broken or its key cannot be decrypted.
+func backupRestorePassphrases(ctx context.Context, store *Store, backupPath string) ([]string, error) {
+	encrypted, err := backup.IsEncryptedFile(backupPath)
+	if err != nil {
+		return nil, err
+	}
+	if !encrypted {
+		return nil, nil
+	}
+	state, err := loadBackupPassphraseState(ctx, store.pool)
+	if err != nil {
+		return nil, err
+	}
+	return state.RestorePassphrases()
+}
+
 func CreateBackup(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		adminID := getAdminID(r)
 		ctx := context.Background()
 
-		svc := backup.NewBackupService(backupDataDir())
-		backupPath, err := svc.CreateBackup()
+		state, err := loadBackupPassphraseState(ctx, store.pool)
 		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to load backup encryption setting")
+			return
+		}
+		passphrase, err := state.CurrentPassphrase()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		svc := backup.NewBackupService(backupDataDir())
+		result, err := svc.CreateBackup(passphrase)
+		if err != nil {
+			log.Printf("Failed to create backup: %v", err)
 			writeError(w, http.StatusInternalServerError, "Failed to create backup")
 			return
 		}
 
-		logAudit(ctx, store, adminID, "backup.create", "backup", backupPath, nil)
-
-		writeJSON(w, http.StatusOK, map[string]string{
-			"status":   "created",
-			"filepath": backupPath,
+		logAudit(ctx, store, adminID, "backup.create", "backup", result.Filename, map[string]interface{}{
+			"encrypted": result.Encrypted,
+			"verified":  result.Verified,
+			"size":      result.Size,
 		})
+
+		resp := map[string]interface{}{
+			"status":    "created",
+			"filepath":  result.Path,
+			"filename":  result.Filename,
+			"encrypted": result.Encrypted,
+			"verified":  result.Verified,
+			"size":      result.Size,
+		}
+		if result.VerificationErr != nil {
+			log.Printf("Backup %s created but verification failed: %v", result.Filename, result.VerificationErr)
+			resp["verification_warning"] = "Backup was created, but the automatic restore check failed. See server logs before relying on it."
+		}
+		writeJSON(w, http.StatusOK, resp)
 	}
 }
 
@@ -109,7 +152,11 @@ func DownloadBackup(store *Store) http.HandlerFunc {
 
 		logAudit(ctx, store, adminID, "backup.download", "backup", name, nil)
 
-		w.Header().Set("Content-Type", "application/gzip")
+		contentType := "application/gzip"
+		if strings.HasSuffix(name, ".enc") {
+			contentType = "application/octet-stream"
+		}
+		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name))
 		_, _ = io.Copy(w, f)
 	}
@@ -147,8 +194,14 @@ func RestoreBackup(store *Store) http.HandlerFunc {
 			return
 		}
 
+		passphrases, err := backupRestorePassphrases(ctx, store, backupPath)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
 		svc := backup.NewBackupService(backupDataDir())
-		if err := restoreAndUpgrade(svc, store, backupPath); err != nil {
+		if err := restoreAndUpgrade(svc, store, backupPath, passphrases); err != nil {
 			log.Printf("Failed to restore backup: %v", err)
 			writeError(w, http.StatusInternalServerError, "Failed to restore backup")
 			return
@@ -187,12 +240,11 @@ func RestoreBackupUpload(store *Store) http.HandlerFunc {
 		}
 		defer file.Close()
 
-		// The uploaded file must look like a console backup. Keep the base
-		// name but ensure it ends with .sql.gz so restores can never point
-		// at an arbitrary file type.
+		// The uploaded file must look like a console backup. Accept both the
+		// legacy plain gzip archive and the passphrase-encrypted variant.
 		uploadName := backupDownloadName(header.Filename)
-		if uploadName == "" || !strings.HasSuffix(uploadName, ".sql.gz") {
-			writeError(w, http.StatusBadRequest, "Uploaded file must be a .sql.gz backup")
+		if uploadName == "" || (!strings.HasSuffix(uploadName, ".sql.gz") && !strings.HasSuffix(uploadName, ".sql.gz.enc")) {
+			writeError(w, http.StatusBadRequest, "Uploaded file must be a .sql.gz or .sql.gz.enc backup")
 			return
 		}
 		// Prefix with a timestamp to avoid clobbering an existing file with
@@ -200,7 +252,7 @@ func RestoreBackupUpload(store *Store) http.HandlerFunc {
 		finalName := fmt.Sprintf("%s_%s", time.Now().Format("20060102_150405"), uploadName)
 		dstPath := filepath.Join(backupDataDir(), finalName)
 
-		dst, err := os.Create(dstPath)
+		dst, err := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to save upload")
 			return
@@ -213,8 +265,15 @@ func RestoreBackupUpload(store *Store) http.HandlerFunc {
 		}
 		dst.Close()
 
+		passphrases, err := backupRestorePassphrases(ctx, store, dstPath)
+		if err != nil {
+			os.Remove(dstPath)
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
 		svc := backup.NewBackupService(backupDataDir())
-		if err := restoreAndUpgrade(svc, store, dstPath); err != nil {
+		if err := restoreAndUpgrade(svc, store, dstPath, passphrases); err != nil {
 			log.Printf("Failed to restore uploaded backup: %v", err)
 			os.Remove(dstPath)
 			writeError(w, http.StatusInternalServerError, "Failed to restore uploaded backup")
@@ -271,8 +330,15 @@ func ListBackups(store *Store) http.HandlerFunc {
 			return
 		}
 
+		details := make(map[string]backup.Metadata, len(backups))
+		for _, name := range backups {
+			details[name] = svc.ReadMetadata(name)
+		}
+
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"backups": backups,
+			"backups":                   backups,
+			"details":                   details,
+			"backup_passphrase_enabled": backupPassphraseEnabled(store),
 		})
 	}
 }

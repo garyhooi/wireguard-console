@@ -6,7 +6,7 @@
 // behaviour was to print the UTC components verbatim).
 import { describe, expect, it, beforeEach } from 'vitest'
 import { _resetTimezoneForTests, setTimezone } from '../../lib/timezone'
-import { backupCreatedAt, backupLabel } from '../_authenticated/backups'
+import { backupCreatedAt, backupLabel, formatBytes } from '../_authenticated/backups'
 
 // 12:04 UTC on 2026-09-03, encoded in the server-side filename.
 const NAME = 'wgconsole_backup_20260903_120405.sql.gz'
@@ -55,5 +55,20 @@ describe('backup filename → Created label', () => {
 
   it('falls back to the raw name when the filename is not a backup', () => {
     expect(backupLabel('custom_export.sql.gz')).toBe('custom_export.sql.gz')
+  })
+})
+
+describe('backup encryption and size helpers', () => {
+  it('parses the timestamp from an encrypted backup filename', () => {
+    const encrypted = 'wgconsole_backup_20260903_120405.sql.gz.enc'
+    expect(backupCreatedAt(encrypted)).toBe('2026-09-03T12:04:00Z')
+  })
+
+  it('formats byte sizes compactly', () => {
+    expect(formatBytes(undefined)).toBe('—')
+    expect(formatBytes(0)).toBe('0 B')
+    expect(formatBytes(1024)).toBe('1.0 KB')
+    expect(formatBytes(10 * 1024)).toBe('10 KB')
+    expect(formatBytes(5 * 1024 * 1024)).toBe('5.0 MB')
   })
 })

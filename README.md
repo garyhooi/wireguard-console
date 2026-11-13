@@ -182,13 +182,17 @@ Access control lives under **Directory → Admins**:
 
 - **Admins** — invite operators, change an admin's single role, and see the groups they belong to.
 - **Admin groups** — organizational groups (for example "Network operators"). Groups do not grant permissions; they make the admin list filterable and let you reassign a role to every member at once.
-- **Roles & policies** — create custom roles and edit the built-in **Admin** and **Auditor** roles in place. Edits apply to every admin assigned to that role on their next request; no re-invite or reassignment is needed.
+- **Roles & policies** — create custom roles and edit or delete the seeded **Admin** and **Auditor** roles. Edits apply to every admin assigned to that role on their next request; no re-invite or reassignment is needed. A role that still has admins assigned cannot be deleted until those admins are reassigned.
 
-Each admin has exactly one role. **Super admin** is locked to full access so the console cannot lose its break-glass account. **Admin** and **Auditor** are ordinary editable roles, and they can be reset to their seeded policies. Custom roles can use every operational capability, but access-control, security-policy, audit-purge and maintenance capabilities are reserved for super admins. Changing a role policy or bulk-assigning a group role requires an MFA step-up.
+Each admin has exactly one role. **Super admin** is the only locked system role, so the console cannot lose its break-glass account. **Admin** and **Auditor** are ordinary roles and can be deleted once unused. Custom roles can include any capability, including sensitive access-control, security-policy, audit-purge and maintenance capabilities; grant those deliberately. Changing a role policy or bulk-assigning a group role requires an MFA step-up.
 
 ## Backup & restore
 
-**System → Backups**: create, download (off-server copy), and restore with one click. Destructive actions ask for your MFA confirmation (passkey or authenticator code). Backups live on the console's Docker volume — download them regularly.
+**System → Backups**: create, download (off-server copy), and restore with one click. The list shows each archive's size, whether it is passphrase-encrypted, and whether its last automatic restore check passed. Every new backup is restored into a temporary database before the console reports success, so a damaged archive is flagged instead of being treated as a usable backup.
+
+Destructive actions ask for your MFA confirmation (passkey or authenticator code). Backups live on the console's Docker volume — download them regularly.
+
+**Optional backup encryption:** **Configuration → Security → Backup encryption** sets a passphrase used automatically for every new backup created by any admin. The passphrase is stored encrypted on the server; the backup file itself is authenticated and cannot be read without it. Changing or disabling the passphrase keeps up to 10 previous passphrases encrypted so older archives remain restorable. Keep the passphrase somewhere safe — if both the server and its database are lost, it is the only way to open an encrypted archive.
 
 ## Upgrading
 

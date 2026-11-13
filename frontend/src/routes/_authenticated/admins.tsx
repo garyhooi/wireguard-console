@@ -1,6 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { IconKey, IconMailPlus, IconShieldOff, IconUserPlus } from '@tabler/icons-react'
 import {
   Badge,
@@ -29,7 +29,7 @@ import { fmtDate } from '../../lib/timezone'
 import { AdminGroupsTab } from '../../components/AdminGroupsTab'
 import { AdminRolesTab } from '../../components/AdminRolesTab'
 import { getGroups, getRoles, type AdminGroup, type RoleCatalog } from '../../lib/admin-rbac'
-import type { AdminGroupRef } from '../../lib/permissions'
+import { can, type AdminGroupRef } from '../../lib/permissions'
 
 interface Admin {
   id: string
@@ -156,16 +156,26 @@ export function AdminsPage() {
     },
   })
 
+  const canViewAdmins = can(me, 'admins.view') || can(me, 'admins.manage')
+  const canManageAdmins = can(me, 'admins.manage')
+  const canManageRoles = can(me, 'roles.manage')
+  const canViewRoles = canViewAdmins || canManageRoles
+
+  useEffect(() => {
+    if (!me) return
+    if (!canViewAdmins && canViewRoles) setSection('roles')
+  }, [me, canViewAdmins, canViewRoles])
+
   const { data: roles } = useQuery<RoleCatalog>({
     queryKey: ['admin-roles'],
     queryFn: getRoles,
-    enabled: Boolean(me && (me.is_super_admin || me.role === 'super_admin')),
+    enabled: Boolean(me && canViewRoles),
   })
 
   const { data: adminGroups } = useQuery<AdminGroup[]>({
     queryKey: ['admin-groups'],
     queryFn: getGroups,
-    enabled: Boolean(me && (me.is_super_admin || me.role === 'super_admin')),
+    enabled: Boolean(me && canViewAdmins),
   })
 
   const roleName = (slug: string) => roles?.roles.find((r) => r.slug === slug)?.name || slug
@@ -177,11 +187,19 @@ export function AdminsPage() {
         return await apiJson<Admin[]>('/api/admins')
       } catch (e) {
         const err = e as { status?: number }
-        if (err.status === 403) throw new Error('Only super_admins can view admin management')
+        if (err.status === 403) throw new Error('You do not have permission to view admins')
         throw new Error('Failed to fetch admins')
       }
     },
+    enabled: Boolean(me && canViewAdmins),
   })
+
+  const openInvite = () => {
+    const available = roles?.roles || []
+    const preferred = available.find((r) => r.slug === 'admin')?.slug || available[0]?.slug || ''
+    setForm((current) => ({ ...current, role: preferred || current.role }))
+    setShowInvite(true)
+  }
 
   const inviteMutation = useMutation({
     mutationFn: async () => {
@@ -478,11 +496,11 @@ export function AdminsPage() {
   }, {})
   const TABS = ['all', 'active', 'disabled']
 
-  if (me && !(me.is_super_admin || me.role === 'super_admin')) {
+  if (me && !canViewAdmins && !canViewRoles) {
     return (
       <div>
-        <PageHeader title="Admins" description="Access control is restricted to super admins." />
-        <p className="text-sm text-zinc-400">You do not have permission to manage admins or roles.</p>
+        <PageHeader title="Admins" description="Access control requires the admins.view or roles.manage capability." />
+        <p className="text-sm text-zinc-400">You do not have permission to view admins or roles.</p>
       </div>
     )
   }
@@ -492,8 +510,8 @@ export function AdminsPage() {
       <PageHeader
         title="Admins & access"
         description="People who operate this console, their roles and their admin groups. VPN users live under VPN Users and only receive tunnel configs."
-        actions={section === 'admins' ? (
-          <PrimaryButton onClick={() => setShowInvite(true)}>
+        actions={section === 'admins' && canManageAdmins ? (
+          <PrimaryButton onClick={openInvite} disabled={!roles?.roles.length}>
             <IconUserPlus size={16} stroke={1.6} aria-hidden="true" />
             Invite Admin
           </PrimaryButton>
@@ -503,10 +521,10 @@ export function AdminsPage() {
       <div className="mb-6 border-b border-zinc-800">
         <nav className="-mb-px flex gap-6" aria-label="Admin access sections">
           {[
-            ['admins', 'Admins'],
-            ['groups', 'Admin groups'],
-            ['roles', 'Roles & policies'],
-          ].map(([key, label]) => (
+            canViewAdmins ? ['admins', 'Admins'] : null,
+            canViewAdmins ? ['groups', 'Admin groups'] : null,
+            canViewRoles ? ['roles', 'Roles & policies'] : null,
+          ].filter((item): item is [string, string] => item !== null).map(([key, label]) => (
             <button
               key={key}
               onClick={() => {
@@ -526,8 +544,8 @@ export function AdminsPage() {
       {error && <p className="text-red-400 text-sm mb-3">{error}</p>}
       {notice && <p className="text-teal-400 text-sm mb-3">{notice}</p>}
 
-      {section === 'groups' && <AdminGroupsTab gateMFA={gateMFA} />}
-      {section === 'roles' && <AdminRolesTab gateMFA={gateMFA} />}
+      {section === 'groups' && canViewAdmins && <AdminGroupsTab gateMFA={gateMFA} canManage={canManageAdmins} />}
+      {section === 'roles' && canViewRoles && <AdminRolesTab gateMFA={gateMFA} canManage={canManageRoles} />}
 
       <Modal
         open={showInvite}
@@ -597,7 +615,7 @@ export function AdminsPage() {
         </form>
       </Modal>
 
-      {section === 'admins' && (
+      {section === 'admins' && canViewAdmins && (
       <>
       <div className={toolbarCls}>
         <div className={tabGroupCls}>
@@ -760,7 +778,7 @@ export function AdminsPage() {
                               You
                             </Badge>
                           )}
-                          {a.status === 'active' && (
+                          {a.status === 'active' && canManageAdmins && (
                             <button
                               onClick={() => beginEmailEdit(a)}
                               className="text-zinc-600 hover:text-teal-400 transition-colors"
@@ -776,8 +794,8 @@ export function AdminsPage() {
                       <select
                         className="bg-zinc-800/60 border border-zinc-700 rounded-md px-2 py-1 text-xs text-zinc-200 disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-teal-500"
                         value={a.role}
-                        disabled={me?.id === a.id}
-                        onChange={(e) => a.status === 'active' && confirmRoleChange(a, e.target.value)}
+                        disabled={me?.id === a.id || !canManageAdmins}
+                        onChange={(e) => a.status === 'active' && canManageAdmins && confirmRoleChange(a, e.target.value)}
                       >
                         {(roles?.roles || [{ slug: a.role, name: a.role_name || a.role }]).map((role) => (
                           <option key={role.slug} value={role.slug}>{role.name}</option>
@@ -814,6 +832,7 @@ export function AdminsPage() {
                       {a.created_at ? fmtDate(a.created_at) : '—'}
                     </td>
                     <td className="px-5 py-3 text-right text-sm">
+                      {canManageAdmins ? (
                       <div className="flex justify-end gap-1">
                         {a.status === 'active' ? (
                           <>
@@ -859,6 +878,9 @@ export function AdminsPage() {
                           </button>
                         )}
                       </div>
+                      ) : (
+                        <span className="text-xs text-zinc-600">View only</span>
+                      )}
                     </td>
                   </tr>
                   )

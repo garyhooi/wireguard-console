@@ -34,11 +34,24 @@ func TestCanonicalAddsImpliedReadPermissions(t *testing.T) {
 	}
 }
 
-func TestCanonicalRejectsReservedAndWildcard(t *testing.T) {
-	for _, policy := range [][]string{{AdminsView}, {RolesManage}, {"*"}, {SecurityManage}} {
-		if _, err := Canonical(policy); err == nil {
-			t.Fatalf("Canonical(%v) succeeded, want reserved error", policy)
+func TestCanonicalAllowsReservedButRejectsWildcard(t *testing.T) {
+	for _, policy := range [][]string{{AdminsView}, {RolesManage}, {SecurityManage}} {
+		if _, err := Canonical(policy); err != nil {
+			t.Fatalf("Canonical(%v) rejected a grantable sensitive capability: %v", policy, err)
 		}
+	}
+	if _, err := Canonical([]string{"*"}); err == nil {
+		t.Fatal("Canonical accepted the super_admin wildcard")
+	}
+}
+
+func TestCanonicalAdminsManageImpliesView(t *testing.T) {
+	got, err := Canonical([]string{AdminsManage})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(got, AdminsView) {
+		t.Fatalf("canonical policy %v is missing %q", got, AdminsView)
 	}
 }
 

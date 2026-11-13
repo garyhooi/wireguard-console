@@ -113,6 +113,9 @@ export interface ApiFetchOptions extends Omit<RequestInit, 'body'> {
   body?: unknown
   /** Do not auto-attach X-CSRF-Token (login/MFA endpoints are pre-session). */
   skipCsrf?: boolean
+  /** Keep the generic full-screen overlay out of the way when a page has its
+   *  own operation-specific progress UI (e.g. backup verification). */
+  skipGlobalLoading?: boolean
   /**
    * Do not treat a 401 as an expired session. Pre-session endpoints (login,
    * MFA verify) answer 401 for bad credentials; redirecting there would
@@ -126,7 +129,7 @@ export interface ApiFetchOptions extends Omit<RequestInit, 'body'> {
  * CSRF token to non-GET calls, and routes 401s to the login page.
  */
 export async function apiFetch(path: string, options: ApiFetchOptions = {}): Promise<Response> {
-  const { body, skipCsrf, noAuthRedirect, headers, ...rest } = options
+  const { body, skipCsrf, skipGlobalLoading, noAuthRedirect, headers, ...rest } = options
 
   const h = new Headers(headers)
   const isForm = body instanceof FormData
@@ -145,7 +148,7 @@ export async function apiFetch(path: string, options: ApiFetchOptions = {}): Pro
   }
 
   // Only state-changing calls feed the global overlay; GETs stay quiet.
-  if (isStateChanging) beginLoading()
+  if (isStateChanging && !skipGlobalLoading) beginLoading()
   try {
     const res = await fetch(path, {
       ...rest,
@@ -164,7 +167,7 @@ export async function apiFetch(path: string, options: ApiFetchOptions = {}): Pro
 
     return res
   } finally {
-    if (isStateChanging) endLoading()
+    if (isStateChanging && !skipGlobalLoading) endLoading()
   }
 }
 

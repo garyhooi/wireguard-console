@@ -1,11 +1,13 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useRef, useState } from 'react'
-import { IconArchive, IconDownload, IconUpload } from '@tabler/icons-react'
+import { useEffect, useRef, useState } from 'react'
+import { IconArchive, IconDownload, IconLoader2, IconLock, IconShieldCheck, IconUpload } from '@tabler/icons-react'
 import {
   ActionLink,
+  Badge,
   EmptyState,
   GhostButton,
+  Modal,
   PageHeader,
   Panel,
   PrimaryButton,
@@ -21,8 +23,47 @@ import { useCan } from '../../lib/permissions'
 import { isMFAError, useStepUpMinutes } from '../../lib/stepup'
 import { getTimezone } from '../../lib/timezone'
 
+interface BackupDetail {
+  encrypted: boolean
+  verified: boolean
+  verified_known: boolean
+  verified_at?: string
+  size: number
+}
+
 interface BackupList {
   backups: string[]
+  details?: Record<string, BackupDetail>
+  backup_passphrase_enabled?: boolean
+}
+
+interface CreateBackupResponse {
+  status: string
+  filename: string
+  encrypted: boolean
+  verified: boolean
+  size: number
+  verification_warning?: string
+}
+
+const CREATE_STAGES = [
+  'Snapshotting the PostgreSQL database…',
+  'Compressing the archive…',
+  'Encrypting with the backup passphrase when enabled…',
+  'Verifying the backup by restoring it into a temporary database…',
+]
+
+export function formatBytes(bytes?: number): string {
+  if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes < 0) return '—'
+  if (bytes < 1024) return `${Math.round(bytes)} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let value = bytes / 1024
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit++
+  }
+  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`
 }
 
 export const Route = createFileRoute('/_authenticated/backups')({
@@ -89,6 +130,7 @@ function BackupsPage() {
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const [pendingMFA, setPendingMFA] = useState<PendingMFA | null>(null)
+  const [createStage, setCreateStage] = useState(0)
 
   // MFA step-up grace: try the action without a code first — the server
   // accepts it when this session already verified within the window (or a
@@ -120,15 +162,41 @@ function BackupsPage() {
 
   const createMutation = useMutation({
     mutationFn: async () => {
-      return apiJson('/api/backup/create', { method: 'POST' })
+      return apiJson<CreateBackupResponse>('/api/backup/create', { method: 'POST', skipGlobalLoading: true })
     },
-    onSuccess: () => {
-      setNotice('Backup created.')
-      setError('')
+    onSuccess: (result) => {
+      if (result.verified) {
+        const protection = result.encrypted ? 'passphrase-encrypted and ' : ''
+        setNotice(
+          `Backup ${result.filename} created — ${protection}restore-verified (${formatBytes(result.size)}).`,
+        )
+        setError('')
+      } else {
+        setNotice('')
+        setError(
+          result.verification_warning ||
+            'Backup was created, but the automatic restore check failed. Check the server logs before relying on it.',
+        )
+      }
       queryClient.invalidateQueries({ queryKey: ['backups'] })
     },
-    onError: (e: Error) => setError(e.message),
+    onError: (e: Error) => {
+      setNotice('')
+      setError(e.message)
+    },
   })
+
+  useEffect(() => {
+    if (!createMutation.isPending) {
+      setCreateStage(0)
+      return
+    }
+    setCreateStage(0)
+    const timer = setInterval(() => {
+      setCreateStage((current) => Math.min(current + 1, CREATE_STAGES.length - 1))
+    }, 4000)
+    return () => clearInterval(timer)
+  }, [createMutation.isPending])
 
   // Download streams the file; the server requires the actor's MFA step-up.
   const download = (filename: string, code: string) => {
@@ -180,7 +248,7 @@ function BackupsPage() {
     )
   }
 
-  // Restore from an uploaded .sql.gz file (MFA step-up gated).
+  // Restore from an uploaded plain or passphrase-encrypted backup (MFA-gated).
   const uploadMutation = useMutation({
     mutationFn: async (a: { file: File; code: string }) => {
       const fd = new FormData()
@@ -228,12 +296,11 @@ function BackupsPage() {
   }
 
   const backups = data?.backups ?? []
-  const newest = backups[backups.length - 1] ?? ''
 
   const handlePickFile = (file?: File | null) => {
     if (!file) return
-    if (!file.name.endsWith('.sql.gz')) {
-      setError('Please pick a .sql.gz backup file exported from this console.')
+    if (!file.name.endsWith('.sql.gz') && !file.name.endsWith('.sql.gz.enc')) {
+      setError('Please pick a .sql.gz or .sql.gz.enc backup file exported from this console.')
       return
     }
     if (!confirm(`Restore from uploaded "${file.name}"?\n\nThe current database will be replaced.`)) {
@@ -249,11 +316,11 @@ function BackupsPage() {
     <div>
       <PageHeader
         title="Backups"
-        description="One-click database backups live on the console server (Docker volume, /var/backups/wgconsole). Creating one runs pg_dump; restoring replaces the current database with a saved copy. Downloading, restoring, uploading or deleting a backup requires an MFA step-up (passkey or authenticator code)."
+        description="One-click database backups live on the console server (Docker volume, /var/backups/wgconsole). Creating one runs pg_dump, encrypts it when backup encryption is enabled, and restores it into a temporary database to verify it before reporting success. Downloading, restoring, uploading or deleting a backup requires an MFA step-up (passkey or authenticator code)."
         actions={canManage ? (
           <PrimaryButton onClick={() => createMutation.mutate()} disabled={createMutation.isPending}>
             <IconArchive size={16} stroke={1.6} aria-hidden="true" />
-            {createMutation.isPending ? 'Creating…' : 'Create backup now'}
+            {createMutation.isPending ? 'Creating & verifying…' : 'Create backup now'}
           </PrimaryButton>
         ) : undefined}
       />
@@ -268,12 +335,15 @@ function BackupsPage() {
       )}
       {error && <p className="text-red-400 text-sm mb-3">{error}</p>}
       {notice && <p className="text-teal-400 text-sm mb-3">{notice}</p>}
-      {createMutation.isSuccess && (
-        <p className="text-teal-400 text-sm mb-3">Backup created — {newest || ''}</p>
-      )}
       {restoreMutation.isSuccess && (
         <p className="text-teal-400 text-sm mb-3">
           Backup restored. The API restarts with the reloaded data; you may need to refresh.
+        </p>
+      )}
+      {data?.backup_passphrase_enabled && (
+        <p className="mb-3 inline-flex items-center gap-1.5 text-xs text-teal-400">
+          <IconLock size={13} stroke={1.7} aria-hidden="true" />
+          New backups are passphrase-encrypted.
         </p>
       )}
 
@@ -292,7 +362,7 @@ function BackupsPage() {
         <input
           ref={fileInput}
           type="file"
-          accept=".sql.gz,application/gzip"
+          accept=".sql.gz,.sql.gz.enc,application/gzip,application/octet-stream"
           className="hidden"
           onChange={(e) => {
             handlePickFile(e.target.files?.[0])
@@ -308,7 +378,7 @@ function BackupsPage() {
         ) : backups.length === 0 ? (
           <EmptyState
             title="No backups yet"
-            hint="Create your first backup with the button above, or restore from a .sql.gz file you exported earlier. Backups are stored inside the api container's persistent volume."
+            hint="Create your first backup with the button above, or restore from a .sql.gz or .sql.gz.enc file you exported earlier. Backups are stored inside the api container's persistent volume."
             action={canManage ? (
               <PrimaryButton onClick={() => createMutation.mutate()} disabled={createMutation.isPending}>
                 <IconArchive size={16} stroke={1.6} aria-hidden="true" />
@@ -323,14 +393,41 @@ function BackupsPage() {
                 <tr className="text-left text-[11px] uppercase tracking-wider text-zinc-500">
                   <th className={thCls}>Created</th>
                   <th className={thCls}>Filename</th>
+                  <th className={thCls}>Size</th>
+                  <th className={thCls}>Protection</th>
+                  <th className={thCls}>Verification</th>
                   {canManage && <th className={thCls + ' text-right'}>Actions</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800/60">
-                {[...backups].reverse().map((name) => (
+                {[...backups].reverse().map((name) => {
+                  const detail = data?.details?.[name]
+                  const encrypted = detail?.encrypted ?? name.endsWith('.enc')
+                  return (
                   <tr key={name} className="hover:bg-zinc-800/30 transition-colors">
                     <td className={tdCls + ' font-mono tabular-nums'}>{backupLabel(name)}</td>
                     <td className={tdCls + ' font-mono text-zinc-200'}>{name}</td>
+                    <td className={tdCls + ' font-mono tabular-nums'}>{formatBytes(detail?.size)}</td>
+                    <td className={tdCls}>
+                      <Badge tone={encrypted ? 'good' : 'neutral'}>
+                        {encrypted && <IconLock size={12} stroke={1.7} aria-hidden="true" />}
+                        {encrypted ? 'Encrypted' : 'Plain'}
+                      </Badge>
+                    </td>
+                    <td className={tdCls}>
+                      {detail?.verified ? (
+                        <span title={detail.verified_at ? `Verified ${new Date(detail.verified_at).toLocaleString()}` : 'Verified'}>
+                          <Badge tone="good">
+                            <IconShieldCheck size={12} stroke={1.7} aria-hidden="true" />
+                            Verified
+                          </Badge>
+                        </span>
+                      ) : detail?.verified_known ? (
+                        <Badge tone="bad">Unverified</Badge>
+                      ) : (
+                        <span className="text-xs text-zinc-600" title="Created before verification metadata was recorded">—</span>
+                      )}
+                    </td>
                     {canManage && (
                       <td className="px-5 py-3.5 text-right">
                         <div className="flex justify-end gap-1">
@@ -348,7 +445,8 @@ function BackupsPage() {
                       </td>
                     )}
                   </tr>
-                ))}
+                  )
+                })}
               </tbody>
             </table>
           </div>
@@ -360,6 +458,41 @@ function BackupsPage() {
         (they live only on the Docker volume). Downloading a backup lets you keep an off-site copy;
         restoring wipes current data, so every destructive action asks for an MFA step-up first.
       </p>
+
+      <Modal
+        open={createMutation.isPending}
+        onClose={() => {}}
+        title="Creating and verifying backup"
+        className="max-w-md"
+      >
+        <div role="status" aria-live="polite" className="space-y-5">
+          <div className="flex items-start gap-3">
+            <IconLoader2 size={28} stroke={1.8} className="mt-0.5 shrink-0 animate-spin text-teal-400" aria-hidden="true" />
+            <div>
+              <p className="text-sm font-medium text-zinc-100">{CREATE_STAGES[createStage]}</p>
+              <p className="mt-1 text-xs leading-relaxed text-zinc-500">
+                The archive is dumped, encrypted when configured, then restored into a
+                temporary database. This can take a while on a large database.
+              </p>
+            </div>
+          </div>
+          <div className="h-1.5 overflow-hidden rounded-full bg-zinc-800">
+            <div className="h-full w-1/3 animate-pulse rounded-full bg-teal-500" />
+          </div>
+          <div className="grid grid-cols-4 gap-1.5">
+            {CREATE_STAGES.map((_, i) => (
+              <span
+                key={i}
+                className={`h-1 rounded-full ${i <= createStage ? 'bg-teal-500' : 'bg-zinc-700'} ${i === createStage ? 'animate-pulse' : ''}`}
+              />
+            ))}
+          </div>
+          <p className="text-xs leading-relaxed text-zinc-600">
+            Keep this tab open. The backup is only reported as successful after the restore check
+            finishes.
+          </p>
+        </div>
+      </Modal>
 
       {/* Step-up MFA gate for backup actions */}
       <ConfirmMFA

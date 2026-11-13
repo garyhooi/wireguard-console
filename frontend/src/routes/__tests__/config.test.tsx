@@ -169,6 +169,9 @@ describe('Configuration → Security login lockout', () => {
           }),
         } as Response
       }
+      if (url.includes('/api/config/backup-passphrase') && method === 'GET') {
+        return { ok: true, status: 200, json: async () => ({ enabled: false, configured: false, history_count: 0 }) } as Response
+      }
       throw new Error('unexpected fetch: ' + method + ' ' + url)
     })
     vi.stubGlobal('fetch', fetchMock)
@@ -285,6 +288,9 @@ describe('Configuration → Security MFA requirements', () => {
       if (url.includes('/api/config/mfa') && method === 'PATCH') {
         return { ok: true, status: 200, json: async () => ({ status: 'updated' }) } as Response
       }
+      if (url.includes('/api/config/backup-passphrase') && method === 'GET') {
+        return { ok: true, status: 200, json: async () => ({ enabled: false, configured: false, history_count: 0 }) } as Response
+      }
       throw new Error('unexpected fetch: ' + method + ' ' + url)
     })
     vi.stubGlobal('fetch', fetchMock)
@@ -359,6 +365,9 @@ describe('Configuration → Security MFA requirements', () => {
           }),
         } as Response
       }
+      if (url.includes('/api/config/backup-passphrase') && method === 'GET') {
+        return { ok: true, status: 200, json: async () => ({ enabled: false, configured: false, history_count: 0 }) } as Response
+      }
       throw new Error('unexpected fetch: ' + method + ' ' + url)
     })
     vi.stubGlobal('fetch', fetchMock)
@@ -379,3 +388,93 @@ describe('Configuration → Security MFA requirements', () => {
   })
 })
 
+describe('Configuration → Security backup encryption', () => {
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
+
+  it('enables a backup passphrase and sends it only after MFA', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init })
+      const method = (init?.method ?? 'GET').toUpperCase()
+      if (url.includes('/api/config/smtp') && method === 'GET') {
+        return { ok: true, status: 200, json: async () => ({ host: '', configured: false }) } as Response
+      }
+      if (url.includes('/api/admins/me') && method === 'GET') {
+        return { ok: true, status: 200, json: async () => ({ role: 'super_admin' }) } as Response
+      }
+      if (url.includes('/api/config/step-up') && method === 'GET') {
+        return { ok: true, status: 200, json: async () => ({ step_up_minutes: 0 }) } as Response
+      }
+      if (url.includes('/api/config/security') && method === 'GET') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            login_max_attempts: 3,
+            login_ip_lockout_seconds: 60,
+            login_account_lockout_seconds: 60,
+            vpn_invite_expiry_hours: 72,
+            peer_claim_expiry_hours: 72,
+            admin_invite_expiry_hours: 72,
+          }),
+        } as Response
+      }
+      if (url.includes('/api/config/mfa') && method === 'GET') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            require_methods: 'any',
+            passkey_available: false,
+            passkey_reason: 'no domain configured',
+            rp_id: '',
+          }),
+        } as Response
+      }
+      if (url.includes('/api/config/backup-passphrase') && method === 'GET') {
+        return { ok: true, status: 200, json: async () => ({ enabled: false, configured: false, history_count: 0 }) } as Response
+      }
+      if (url.includes('/api/config/backup-passphrase') && method === 'PATCH') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ status: 'updated', enabled: true, configured: true, history_count: 0 }),
+        } as Response
+      }
+      throw new Error('unexpected fetch: ' + method + ' ' + url)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderPage()
+    await screen.findByRole('button', { name: 'Email (SMTP)' })
+    fireEvent.click(screen.getByRole('button', { name: 'Security' }))
+    await screen.findByText('Backup encryption')
+    await waitFor(() => expect(screen.queryByText('Loading…')).toBeNull())
+
+    fireEvent.click(screen.getByRole('checkbox', { name: /Encrypt new backups with a passphrase/ }))
+    const passphrase = 'correct horse battery staple'
+    fireEvent.change(screen.getByLabelText('Backup passphrase'), { target: { value: passphrase } })
+    fireEvent.change(screen.getByLabelText('Confirm new passphrase'), { target: { value: passphrase } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save backup encryption' }))
+
+    const codeInput = await screen.findByLabelText('Authenticator or recovery code')
+    fireEvent.change(codeInput, { target: { value: '123456' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+
+    await waitFor(() => {
+      const patches = calls.filter(
+        (c) => c.url.includes('/api/config/backup-passphrase') && (c.init?.method ?? 'GET').toUpperCase() === 'PATCH',
+      )
+      expect(patches).toHaveLength(1)
+      expect(JSON.parse(String(patches[0].init?.body))).toEqual({
+        enabled: true,
+        passphrase,
+        code: '123456',
+      })
+    })
+    await screen.findByText(/new backups will be encrypted with the backup passphrase/)
+  })
+})

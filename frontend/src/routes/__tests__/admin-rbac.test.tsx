@@ -96,7 +96,7 @@ const roles = [
     name: 'Admin',
     description: 'Operations.',
     permissions: ['network.view', 'network.manage'],
-    is_system: true,
+    is_system: false,
     admin_count: 1,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
@@ -106,7 +106,7 @@ const roles = [
     name: 'Auditor',
     description: 'Read only.',
     permissions: ['network.view'],
-    is_system: true,
+    is_system: false,
     admin_count: 0,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
@@ -246,6 +246,75 @@ describe('Admins → roles and groups', () => {
       name: 'New group',
       description: '',
     })
+  })
+
+
+
+  it('lets a custom role select sensitive capabilities', async () => {
+    renderPage()
+    await screen.findByText('other@example.com')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Roles & policies' }))
+    await screen.findByRole('button', { name: 'New role' })
+    fireEvent.click(screen.getByRole('button', { name: 'New role' }))
+
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.change(within(dialog).getByLabelText('Name'), {
+      target: { value: 'Access operator' },
+    })
+    const sensitive = within(dialog).getByRole('checkbox', { name: /View admins \(sensitive\)/ })
+    expect((sensitive as HTMLInputElement).disabled).toBe(false)
+    fireEvent.click(sensitive)
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Create role' }))
+
+    await submitStepUpCode()
+    await waitFor(() => expect(callsTo('/api/admin-roles', 'POST')).toHaveLength(1))
+    expect(callsTo('/api/admin-roles', 'POST')[0][1]?.body).toEqual({
+      name: 'Access operator',
+      description: '',
+      permissions: ['admins.view'],
+      code: '123456',
+    })
+  })
+
+  it('shows delete for seeded Admin and Auditor roles, while super_admin stays locked', async () => {
+    renderPage()
+    await screen.findByText('other@example.com')
+    fireEvent.click(screen.getByRole('button', { name: 'Roles & policies' }))
+    await screen.findByRole('button', { name: 'Delete role Auditor' })
+
+    expect((screen.getByRole('button', { name: 'Delete role Admin' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: 'Delete role Auditor' }) as HTMLButtonElement).disabled).toBe(false)
+    expect(screen.queryByRole('button', { name: 'Delete role Super admin' })).toBeNull()
+  })
+
+
+  it('shows only the roles workspace to a roles.manage-only custom role', async () => {
+    const roleManager = {
+      ...me,
+      id: 'role-manager',
+      email: 'roles@example.com',
+      role: 'role_manager',
+      role_name: 'Role manager',
+      is_super_admin: false,
+      permissions: ['roles.manage'],
+    }
+    apiJsonMock.mockImplementation(async (path: string, options?: ApiFetchOptions) => {
+      const method = (options?.method ?? 'GET').toUpperCase()
+      if (path === '/api/config/step-up' && method === 'GET') return { step_up_minutes: 0 }
+      if (path === '/api/admins/me' && method === 'GET') return roleManager
+      if (path === '/api/admin-roles' && method === 'GET') return catalog
+      throw new Error(`unexpected apiJson call: ${method} ${path}`)
+    })
+
+    renderPage()
+    await screen.findByRole('button', { name: 'Roles & policies' })
+    await screen.findByRole('button', { name: 'New role' })
+
+    expect(screen.queryByRole('button', { name: 'Admins' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Admin groups' })).toBeNull()
+    expect(callsTo('/api/admins', 'GET')).toHaveLength(0)
+    expect(callsTo('/api/admin-groups', 'GET')).toHaveLength(0)
   })
 
   it('bulk-assigns a role to a group through the MFA gate', async () => {

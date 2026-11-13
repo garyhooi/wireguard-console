@@ -31,9 +31,10 @@ import {
 
 interface Props {
   gateMFA: (label: string, run: (code: string) => Promise<void>) => void
+  canManage: boolean
 }
 
-export function AdminGroupsTab({ gateMFA }: Props) {
+export function AdminGroupsTab({ gateMFA, canManage }: Props) {
   const queryClient = useQueryClient()
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
@@ -122,7 +123,12 @@ export function AdminGroupsTab({ gateMFA }: Props) {
   }
 
   const openAssign = (group: AdminGroup) => {
-    const preferred = roles.data?.roles.find((r) => !r.is_system)?.slug || 'admin'
+    const available = roles.data?.roles || []
+    const preferred =
+      available.find((r) => r.slug === 'admin')?.slug ||
+      available.find((r) => !r.is_system)?.slug ||
+      available[0]?.slug ||
+      ''
     setAssignFor(group)
     setAssignRoleSlug(preferred)
     setError('')
@@ -160,10 +166,12 @@ export function AdminGroupsTab({ gateMFA }: Props) {
             easy; permissions still come from each admin's single role.
           </p>
         </div>
-        <PrimaryButton onClick={openCreate}>
-          <IconPlus size={16} stroke={1.6} aria-hidden="true" />
-          New group
-        </PrimaryButton>
+        {canManage && (
+          <PrimaryButton onClick={openCreate}>
+            <IconPlus size={16} stroke={1.6} aria-hidden="true" />
+            New group
+          </PrimaryButton>
+        )}
       </div>
 
       {error && <p className="mt-4 text-sm text-red-400">{error}</p>}
@@ -197,20 +205,24 @@ export function AdminGroupsTab({ gateMFA }: Props) {
                       <Badge tone="neutral">{group.member_count} admin{group.member_count === 1 ? '' : 's'}</Badge>
                     </td>
                     <td className={tdCls + ' text-right'}>
-                      <div className="flex flex-wrap justify-end gap-1">
-                        <button onClick={() => openMembers(group)} aria-label={`Members of ${group.name}`} className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-sm text-teal-400 transition-colors hover:bg-teal-500/10 hover:text-teal-300">
-                          <IconUsers size={13} stroke={1.6} aria-hidden="true" /> Members
-                        </button>
-                        <button onClick={() => openAssign(group)} aria-label={`Assign role to ${group.name}`} className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-sm text-amber-400 transition-colors hover:bg-amber-500/10 hover:text-amber-300">
-                          <IconShieldCheck size={13} stroke={1.6} aria-hidden="true" /> Assign role
-                        </button>
-                        <button onClick={() => openEdit(group)} aria-label={`Edit ${group.name}`} className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-sm text-zinc-300 transition-colors hover:bg-zinc-700/50 hover:text-white">
-                          <IconPencil size={13} stroke={1.6} aria-hidden="true" /> Edit
-                        </button>
-                        <button onClick={() => { if (confirm(`Delete admin group "${group.name}"? Admins will not be deleted.`)) removeGroup.mutate(group.id) }} aria-label={`Delete ${group.name}`} className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-sm text-red-400 transition-colors hover:bg-red-500/10 hover:text-red-300">
-                          <IconTrash size={13} stroke={1.6} aria-hidden="true" /> Delete
-                        </button>
-                      </div>
+                      {canManage ? (
+                        <div className="flex flex-wrap justify-end gap-1">
+                          <button onClick={() => openMembers(group)} aria-label={`Members of ${group.name}`} className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-sm text-teal-400 transition-colors hover:bg-teal-500/10 hover:text-teal-300">
+                            <IconUsers size={13} stroke={1.6} aria-hidden="true" /> Members
+                          </button>
+                          <button onClick={() => openAssign(group)} aria-label={`Assign role to ${group.name}`} className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-sm text-amber-400 transition-colors hover:bg-amber-500/10 hover:text-amber-300">
+                            <IconShieldCheck size={13} stroke={1.6} aria-hidden="true" /> Assign role
+                          </button>
+                          <button onClick={() => openEdit(group)} aria-label={`Edit ${group.name}`} className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-sm text-zinc-300 transition-colors hover:bg-zinc-700/50 hover:text-white">
+                            <IconPencil size={13} stroke={1.6} aria-hidden="true" /> Edit
+                          </button>
+                          <button onClick={() => { if (confirm(`Delete admin group "${group.name}"? Admins will not be deleted.`)) removeGroup.mutate(group.id) }} aria-label={`Delete ${group.name}`} className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-sm text-red-400 transition-colors hover:bg-red-500/10 hover:text-red-300">
+                            <IconTrash size={13} stroke={1.6} aria-hidden="true" /> Delete
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="text-xs text-zinc-600">View only</span>
+                      )}
                     </td>
                   </tr>
                 ))}

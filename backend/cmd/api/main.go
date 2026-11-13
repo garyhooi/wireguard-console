@@ -206,15 +206,20 @@ func main() {
 			r.Get("/config/timezone", api.GetTimezoneConfig(store))
 			r.Get("/config/step-up", api.GetStepUpConfig(store))
 
-			// Access control: only the reserved super-admin capabilities reach
-			// these groups. Custom roles cannot receive admins.* or roles.manage.
+			// Access control. Sensitive capabilities are grantable to custom
+			// roles, so the page/tab itself is gated by the route permissions.
 			r.Group(func(r chi.Router) {
 				r.Use(api.RequirePermission(authz.AdminsView))
 				r.Get("/admins", api.ListAdmins(store))
 				r.Get("/admins/{id}", api.GetAdmin(store))
-				r.Get("/admin-roles", api.ListAdminRoles(store))
 				r.Get("/admin-groups", api.ListAdminGroups(store))
 				r.Get("/admin-groups/{id}", api.GetAdminGroup(store))
+			})
+			r.Group(func(r chi.Router) {
+				// A role manager needs the role catalogue even if they do not
+				// have admins.view (and therefore cannot see the admins list).
+				r.Use(api.RequirePermission(authz.AdminsView, authz.RolesManage))
+				r.Get("/admin-roles", api.ListAdminRoles(store))
 			})
 			r.Group(func(r chi.Router) {
 				r.Use(api.RequirePermission(authz.AdminsManage))
@@ -342,6 +347,7 @@ func main() {
 				r.Get("/config/email-templates", api.ListEmailTemplates(store))
 				r.Get("/config/mfa", api.GetMFAPolicyConfig(store))
 				r.Get("/config/security", api.GetSecurityConfig(store))
+				r.Get("/config/backup-passphrase", api.GetBackupPassphraseConfig(store))
 			})
 			r.Group(func(r chi.Router) {
 				r.Use(api.RequirePermission(authz.SystemManage))
@@ -364,12 +370,13 @@ func main() {
 				r.Post("/backup/delete", api.DeleteBackup(store))
 			})
 
-			// Reserved security/maintenance actions.
+			// Sensitive security/maintenance actions (grantable to custom roles).
 			r.Group(func(r chi.Router) {
 				r.Use(api.RequirePermission(authz.SecurityManage))
 				r.Patch("/config/mfa", api.UpdateMFAPolicyConfig(store))
 				r.Patch("/config/step-up", api.UpdateStepUpConfig(store))
 				r.Patch("/config/security", api.UpdateSecurityConfig(store))
+				r.Patch("/config/backup-passphrase", api.UpdateBackupPassphraseConfig(store))
 			})
 			r.Group(func(r chi.Router) {
 				r.Use(api.RequirePermission(authz.AuditManage))
